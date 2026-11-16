@@ -1330,6 +1330,44 @@ describe("ResourceDetailView", () => {
       logged.mockRestore();
     });
 
+    describe("in the Gateway API's group (#1089)", () => {
+      const GATEWAY_CRD: CrdRef = {
+        name: "gateways.gateway.networking.k8s.io",
+        group: "gateway.networking.k8s.io",
+        version: "v1",
+        kind: "Gateway",
+        plural: "gateways",
+        namespaced: true,
+      };
+      const GATEWAY: K8sObject = {
+        apiVersion: "gateway.networking.k8s.io/v1",
+        kind: "Gateway",
+        metadata: { name: "edge", namespace: "infra" },
+        spec: { listeners: [{ name: "https", protocol: "HTTPS", port: 443 }] },
+        status: { conditions: [{ type: "Programmed", status: "False", reason: "AddressNotAssigned" }] },
+      };
+
+      it("leads with its listeners and says in the header that it is not programmed", async () => {
+        listCrds.mockResolvedValue({ crds: [GATEWAY_CRD] });
+        getObject.mockResolvedValue({ object: GATEWAY });
+        render(<ResourceDetailView context="ctx" kind="Gateway" namespace="infra" name="edge" />);
+        await waitFor(() => expect(screen.getByRole("heading", { name: "Listeners" })).toBeDefined());
+        expect(screen.getAllByText("Not programmed").length).toBeGreaterThan(0);
+        // Still a custom resource underneath: its conditions follow.
+        const headings = screen.getAllByRole("heading").map((h) => h.textContent);
+        expect(headings.indexOf("Listeners")).toBeLessThan(headings.indexOf("Conditions"));
+      });
+
+      it("gives a Gateway kind in another group the plain custom pane", async () => {
+        listCrds.mockResolvedValue({ crds: [{ ...GATEWAY_CRD, name: "gateways.acme.io", group: "acme.io" }] });
+        getObject.mockResolvedValue({ object: { ...GATEWAY, apiVersion: "acme.io/v1" } });
+        render(<ResourceDetailView context="ctx" kind="Gateway" namespace="infra" name="edge" />);
+        await waitFor(() => expect(screen.getByRole("heading", { name: "Conditions" })).toBeDefined());
+        expect(screen.queryByRole("heading", { name: "Listeners" })).toBeNull();
+        expect(screen.queryByText("Not programmed")).toBeNull();
+      });
+    });
+
     it("gives a CRD named like a built-in the custom pane, and reads its YAML in its own group", async () => {
       const deployments: CrdRef = {
         ...WIDGET_CRD,

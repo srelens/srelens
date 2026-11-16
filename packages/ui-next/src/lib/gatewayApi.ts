@@ -1,4 +1,13 @@
-import type { CrdRef, CustomRow, PrinterColumn } from "@srelens/core";
+import {
+  asArray,
+  asRecord,
+  str,
+  type CrdRef,
+  type CustomRow,
+  type K8sObject,
+  type PrinterColumn,
+  type ResourceStatusLine,
+} from "@srelens/core";
 
 /**
  * What the app knows about the Gateway API (#1089).
@@ -91,4 +100,190 @@ export function gatewayFlagged(crd: CrdRef): ((row: CustomRow) => boolean) | und
   const at = (crd.printerColumns ?? []).findIndex((c) => c.name === column);
   if (at < 0) return undefined;
   return (row) => row.columns?.[at] === "False";
+}
+
+/** The `status` of the condition of this type, or `""` where there is none yet. */
+function conditionStatus(conditions: unknown, type: string): string {
+  const found = asArray(conditions).map(asRecord).find((c) => c.type === type);
+  return found ? str(found.status) : "";
+}
+
+export interface GatewayListener {
+  name: string;
+  protocol: string;
+  port: string;
+  hostname: string;
+  /** How many routes the controller has bound here; `null` before it has said. */
+  attachedRoutes: number | null;
+  /** The listener's own `Programmed` condition: `True`, `False`, or `""`. */
+  programmed: string;
+}
+
+/** A Gateway's listeners, each joined by name to what the controller reports for it. */
+export function gatewayListeners(object: K8sObject): GatewayListener[] {
+  const reported = asArray(asRecord(object.status).listeners).map(asRecord);
+  return asArray(asRecord(object.spec).listeners).map((l) => {
+    const listener = asRecord(l);
+    const status = reported.find((r) => r.name === listener.name);
+    return {
+      name: str(listener.name),
+      protocol: str(listener.protocol),
+      port: str(listener.port),
+      hostname: str(listener.hostname),
+      attachedRoutes: typeof status?.attachedRoutes === "number" ? status.attachedRoutes : null,
+      programmed: conditionStatus(status?.conditions, "Programmed"),
+    };
+  });
+}
+
+export interface RouteParent {
+  kind: string;
+  namespace: string;
+  name: string;
+  sectionName: string;
+  /** The parent's `Accepted` and `ResolvedRefs` conditions: `True`, `False`, or `""`. */
+  accepted: string;
+  resolvedRefs: string;
+}
+
+/** A parent reference with the defaults the API applies: a Gateway, in the route's own namespace. */
+function parentKey(ref: Record<string, unknown>, routeNamespace: string) {
+  return {
+    kind: str(ref.kind) || "Gateway",
+    namespace: str(ref.namespace) || routeNamespace,
+    name: str(ref.name),
+    sectionName: str(ref.sectionName),
+  };
+}
+
+/** What a route attaches to, each joined to the verdict that parent's controller gave. */
+export function routeParents(object: K8sObject): RouteParent[] {
+  const namespace = str(asRecord(object.metadata).namespace);
+  const reported = asArray(asRecord(object.status).parents).map(asRecord);
+  return asArray(asRecord(object.spec).parentRefs).map((r) => {
+    const parent = parentKey(asRecord(r), namespace);
+    const status = reported.find((s) => {
+      const theirs = parentKey(asRecord(s.parentRef), namespace);
+      return (
+        theirs.kind === parent.kind &&
+        theirs.namespace === parent.namespace &&
+        theirs.name === parent.name &&
+        theirs.sectionName === parent.sectionName
+      );
+    });
+    return {
+      ...parent,
+      accepted: conditionStatus(status?.conditions, "Accepted"),
+      resolvedRefs: conditionStatus(status?.conditions, "ResolvedRefs"),
+    };
+  });
+}
+
+export interface RouteBackend {
+  kind: string;
+  namespace: string;
+  name: string;
+  port: string;
+  weight: string;
+  /** A core Service, which the app can open. Anything else is named and no more. */
+  isService: boolean;
+}
+
+export interface RouteRule {
+  key: string;
+  /** What the rule matches, in words; `*` for a rule that matches everything. */
+  matches: string;
+  backends: RouteBackend[];
+}
+
+const pairs = (label: string, items: unknown) =>
+  asArray(items).map((item) => `${label} ${str(asRecord(item).name)}=${str(asRecord(item).value)}`);
+
+/** One match: an HTTP method, path, headers and query, or a gRPC service and method. */
+function matchText(match: Record<string, unknown>): string {
+  const parts: string[] = [];
+  if (typeof match.method === "string") parts.push(match.method);
+  else if (match.method) {
+    const method = asRecord(match.method);
+    parts.push([str(method.service), str(method.method)].filter(Boolean).join("/"));
+  }
+  const path = asRecord(match.path);
+  if (path.value !== undefined) parts.push(`${str(path.type) || "PathPrefix"} ${str(path.value)}`);
+  parts.push(...pairs("header", match.headers), ...pairs("query", match.queryParams));
+  return parts.filter(Boolean).join(" ");
+}
+
+/** A route's rules: what each matches and where it sends it. */
+export function routeRules(object: K8sObject): RouteRule[] {
+  const namespace = str(asRecord(object.metadata).namespace);
+  return asArray(asRecord(object.spec).rules).map((r, index) => {
+    const rule = asRecord(r);
+    const matches = asArray(rule.matches)
+      .map((m) => matchText(asRecord(m)))
+      .filter(Boolean);
+    return {
+      key: String(index),
+      matches: matches.join(", ") || "*",
+      backends: asArray(rule.backendRefs).map((b) => {
+        const ref = asRecord(b);
+        const kind = str(ref.kind) || "Service";
+        return {
+          kind,
+          namespace: str(ref.namespace) || namespace,
+          name: str(ref.name),
+          port: str(ref.port),
+          weight: str(ref.weight),
+          isService: kind === "Service" && !str(ref.group),
+        };
+      }),
+    };
+  });
+}
+
+/**
+ * The header's verdict on a Gateway or a route, in the shape every built-in
+ * kind's is. `null` for a kind with none, and for an object no controller has
+ * answered: a route applied a second ago is not a failed one.
+ */
+export function gatewayStatusLine(kind: string, object: K8sObject): ResourceStatusLine | null {
+  const well = (status: string): ResourceStatusLine => ({ status, health: "success", flagged: false, readyText: null });
+  const unwell = (status: string): ResourceStatusLine => ({ status, health: "danger", flagged: true, readyText: null });
+  if (kind === "Gateway") {
+    const programmed = conditionStatus(asRecord(object.status).conditions, "Programmed");
+    return programmed === "True" ? well("Programmed") : programmed === "False" ? unwell("Not programmed") : null;
+  }
+  if (!ROUTE_KINDS.includes(kind)) return null;
+  const parents = asArray(asRecord(object.status).parents).map((p) => asRecord(p).conditions);
+  if (parents.some((c) => conditionStatus(c, "Accepted") === "False")) return unwell("Not accepted");
+  if (parents.some((c) => conditionStatus(c, "ResolvedRefs") === "False")) return unwell("Unresolved refs");
+  return parents.some((c) => conditionStatus(c, "Accepted") === "True") ? well("Accepted") : null;
+}
+
+/** How many of a route's parents a Gateway's route list looks at. */
+const PARENTS_READ = 4;
+
+/**
+ * The columns that let a list of routes say which gateways each attaches to:
+ * a name and a namespace for each of the first {@link PARENTS_READ} parents.
+ *
+ * ponytail: a route whose only reference to a gateway is its fifth parent or
+ * later is not found. The host's JSONPath has no wildcard; lift with it.
+ */
+export const PARENT_COLUMNS: PrinterColumn[] = Array.from({ length: PARENTS_READ }, (_, i) => [
+  { name: `parent${i}`, type: "string", jsonPath: `.spec.parentRefs[${i}].name` },
+  { name: `parentNamespace${i}`, type: "string", jsonPath: `.spec.parentRefs[${i}].namespace` },
+]).flat();
+
+/** The rows, listed with {@link PARENT_COLUMNS}, whose route attaches to `gateway`. */
+export function routesAttachedTo<Row extends CustomRow>(
+  rows: Row[],
+  gateway: { namespace: string; name: string },
+): Row[] {
+  return rows.filter((row) =>
+    Array.from({ length: PARENTS_READ }, (_, i) => i).some(
+      (i) =>
+        row.columns?.[2 * i] === gateway.name &&
+        (row.columns?.[2 * i + 1] || row.namespace) === gateway.namespace,
+    ),
+  );
 }

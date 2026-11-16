@@ -27,6 +27,8 @@ import { useObject } from "../../lib/useObject";
 import { ConfigDetailsBody } from "./ConfigBody";
 import { CronJobDetailsBody } from "./CronJobBody";
 import { CustomResourceBody, customResourceFacts } from "./CustomResourceBody";
+import { GatewayApiBody } from "./GatewayApiBody";
+import { gatewayStatusLine, isGatewayApi } from "../../lib/gatewayApi";
 import { GenericBody, identityFacts } from "./GenericBody";
 import { IngressDetailsBody } from "./IngressBody";
 import { JobDetailsBody } from "./JobBody";
@@ -386,6 +388,9 @@ export function useDetailSubject({
   const meta = object?.metadata ?? {};
 
   const bodyProps = object ? { kind, object, context, revisions } : undefined;
+  // The one group of custom resources the app reads for itself (#1089). By the
+  // CRD's group, never the kind's name: `Gateway` in `acme.io` is not one.
+  const gatewayApi = custom && isGatewayApi(group ?? crd?.group);
 
   return {
     object,
@@ -395,7 +400,13 @@ export function useDetailSubject({
     reload,
     custom,
     descriptor,
-    statusLine: object && !custom ? resourceStatusLine(kind, object) : null,
+    statusLine: !object
+      ? null
+      : gatewayApi
+        ? gatewayStatusLine(kind, object)
+        : custom
+          ? null
+          : resourceStatusLine(kind, object),
     hasContainers,
     hasMetrics,
     facts: !object
@@ -406,7 +417,10 @@ export function useDetailSubject({
     body:
       bodyProps &&
       (custom ? (
-        <CustomResourceBody object={bodyProps.object} name={name} />
+        <>
+          {gatewayApi && <GatewayApiBody object={bodyProps.object} context={context} />}
+          <CustomResourceBody object={bodyProps.object} name={name} />
+        </>
       ) : (
         <GenericBody kind={kind} object={bodyProps.object} context={context}>
           {DetailsBody && createElement(DetailsBody, bodyProps)}
