@@ -17,7 +17,7 @@ import {
 import { Button, CopyButton, EmptyState, KV, LoadingState, StatusPill, Table, type Column } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { Section } from "./Section";
-import { StringList } from "./sections";
+import { AnnotationLines, StringList } from "./sections";
 
 /**
  * What this pane knows about a Secret's VALUES — which is a different question
@@ -50,6 +50,9 @@ export interface SecretDataState {
   /** What to render keys from — the fetched values once `ready`, `getObject`'s
    *  blanked (but correctly KEYED) map otherwise. */
   data: Record<string, string>;
+  /** The annotations as the cluster has them once `ready`; `getObject`'s
+   *  blanked (but correctly KEYED) map otherwise. */
+  annotations: Record<string, string>;
   /** The refusal, raw, exactly as the backend gave it — worded by `describeError`
    *  at the surface, per this package's error rule. */
   error?: string;
@@ -342,19 +345,39 @@ function GeneralSection({ object, keyCount }: { object: K8sObject; keyCount: num
  * in is all there is. The one thing that must never be `ready` is a read that
  * was attempted and did not answer.
  */
+/**
+ * One `k8s.getSecret` read for the surfaces that ask in the same breath. The
+ * body and the annotations block mount together and each need the read;
+ * without this the audit trail would record two for one opened Secret. Shared
+ * only within one tick: a Retry, a later visit, or a read that never settled
+ * always reads again.
+ */
+const sameTick = new Map<string, ReturnType<typeof getSecret>>();
+function readSecret(context: string, namespace: string, name: string): ReturnType<typeof getSecret> {
+  const key = JSON.stringify([context, namespace, name]);
+  let read = sameTick.get(key);
+  if (!read) {
+    read = getSecret(context, namespace, name);
+    sameTick.set(key, read);
+    queueMicrotask(() => sameTick.delete(key));
+  }
+  return read;
+}
+
 function useSecretData(
   context: string,
   namespace: string,
   name: string,
   redacted: Record<string, string>,
+  blankedAnnotations: Record<string, string> = {},
 ): SecretDataState {
-  const [fetched, setFetched] = useState<{ data?: Record<string, string>; error?: string } | null>(null);
+  const [fetched, setFetched] = useState<Awaited<ReturnType<typeof getSecret>> | null>(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     setFetched(null);
     if (!context) return;
     let active = true;
-    getSecret(context, namespace, name).then(
+    readSecret(context, namespace, name).then(
       (r) => {
         if (active) setFetched(r);
       },
@@ -367,13 +390,52 @@ function useSecretData(
     };
   }, [context, namespace, name, attempt]);
 
-  if (!context) return { status: "ready", data: redacted };
-  if (fetched === null) return { status: "loading", data: redacted };
+  const blanked = { data: redacted, annotations: blankedAnnotations };
+  if (!context) return { status: "ready", ...blanked };
+  if (fetched === null) return { status: "loading", ...blanked };
   if (fetched.error !== undefined) {
-    return { status: "error", data: redacted, error: fetched.error, retry: () => setAttempt((n) => n + 1) };
+    return { status: "error", ...blanked, error: fetched.error, retry: () => setAttempt((n) => n + 1) };
   }
-  if (fetched.data === undefined) return { status: "ready", data: redacted };
-  return { status: "ready", data: fetched.data };
+  return {
+    status: "ready",
+    data: fetched.data ?? redacted,
+    annotations: fetched.annotations ?? blankedAnnotations,
+  };
+}
+
+/**
+ * A Secret's annotations, as the cluster has them, open like any other kind's
+ * (#1085). `k8s.getObject` blanks every annotation value on a Secret, so the
+ * object the screen holds has the KEYS only; the values are `k8s.getSecret`'s,
+ * the same read the body makes.
+ *
+ * Until that read answers, and when it refuses, the block says so and prints
+ * no pairs: `key=` with nothing after it would state that the annotation is
+ * empty.
+ */
+export function SecretAnnotationsSection({
+  context,
+  namespace,
+  name,
+  blanked,
+}: {
+  context: string;
+  namespace: string;
+  name: string;
+  /** `getObject`'s annotations: real keys, blanked values. */
+  blanked: Record<string, string>;
+}) {
+  const state = useSecretData(context, namespace, name, {}, blanked);
+  if (Object.keys(blanked).length === 0) return null;
+  return (
+    <Section title="Annotations">
+      {hasValues(state) ? (
+        <AnnotationLines annotations={state.annotations} />
+      ) : (
+        <p className="text-[0.75rem] text-muted">{withheldReason(state)}</p>
+      )}
+    </Section>
+  );
 }
 
 /**

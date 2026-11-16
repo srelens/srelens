@@ -6,7 +6,6 @@ import {
   listEvents,
   redactSecretManifest,
   resourceStatusLine,
-  revealSecretManifest,
   str,
   type DynamicGvk,
   type EventSummary,
@@ -37,7 +36,7 @@ import { JobDetailsBody } from "./JobBody";
 import { NodeDetailsBody } from "./NodeBody";
 import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
 import { AnnotationsSection, LabelsSection } from "./sections";
-import { SecretDetailsBody } from "./SecretBody";
+import { SecretAnnotationsSection, SecretDetailsBody } from "./SecretBody";
 import { ServiceDetailsBody } from "./ServiceBody";
 import { useDeployRevisions, WorkloadDetailsBody, workloadFacts, type RevisionsState } from "./WorkloadBody";
 import type { DetailFact, FactsFor } from "./facts";
@@ -437,7 +436,19 @@ export function useDetailSubject({
         : null,
     metricsPane: bodyProps && MetricsBody ? createElement(MetricsBody, bodyProps) : null,
     labels: <LabelsSection labels={meta.labels ?? {}} />,
-    annotations: <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />,
+    // A Secret's annotation values are blanked on `getObject`; its own block
+    // reads them through `k8s.getSecret`, as its body reads the data.
+    annotations:
+      !custom && kind === "Secret" ? (
+        <SecretAnnotationsSection
+          context={context}
+          namespace={namespace ?? ""}
+          name={name}
+          blanked={meta.annotations ?? {}}
+        />
+      ) : (
+        <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />
+      ),
     isSecret: !custom && kind === "Secret",
   };
 }
@@ -530,17 +541,26 @@ export function useDetailPaneState({
   // custom-resource manifest — see `resolveCrdGvk`'s own doc comment for why
   // this is looked up here rather than threaded in from a descriptor.
   const custom = isCustomKind(kind, group);
-  // A Secret's values reach this pane through `k8s.getSecret`, the audited
-  // read, and through nothing else (#1085). `k8s.getManifest` is an ungated
-  // read: the host blanks a Secret's values on it (#661,
-  // `crates/kube/src/manifest.rs`), and this redacts again on arrival rather
-  // than trust that alone, then puts back only what `getSecret` answered with.
-  // When that read refuses, the redacted manifest is what is shown, and the
-  // pane says so. The redaction goes here, on the result, rather than inside
-  // `getManifest`, because other callers of that function handle a Secret
-  // their own way. Classic's drawer YAML view does exactly this too (#659).
+  // A Secret's manifest is the one `k8s.getSecret`, the audited read, answers
+  // with: the server's key order, nothing blanked (#1085). `k8s.getManifest`
+  // is an ungated read whose Secret the host blanks for every caller (#661,
+  // `crates/kube/src/manifest.rs`), so it is only the fallback here, for when
+  // that read refuses: redacted again on arrival rather than trusted, shown
+  // under this pane's own refusal and Retry.
   const isSecret = !custom && kind === "Secret";
   const yamlState = useLoad<ManifestShown>(openedPanes.has(PANE_YAML), target, async () => {
+    if (isSecret) {
+      const secret = await getSecret(context, namespace ?? "", name);
+      if (secret.yaml !== undefined) return { data: { yaml: secret.yaml } };
+      const fallback = await getManifest(context, kind, namespace, name);
+      if (fallback.error !== undefined || fallback.yaml === undefined) return { error: fallback.error };
+      // Fails closed: on any shape it does not understand the redactor
+      // returns an error and no YAML at all.
+      const redacted = redactSecretManifest(fallback.yaml);
+      return redacted.yaml === undefined
+        ? { error: redacted.error }
+        : { data: { yaml: redacted.yaml, refusal: secret.error ?? "" } };
+    }
     let crd: DynamicGvk | undefined;
     if (custom) {
       const resolved = await resolveCrdGvk(context, kind, group);
@@ -548,22 +568,7 @@ export function useDetailPaneState({
       crd = resolved.crd;
     }
     const result = await getManifest(context, kind, namespace, name, undefined, crd);
-    if (result.error !== undefined || result.yaml === undefined) return { error: result.error };
-    if (!isSecret) return { data: { yaml: result.yaml } };
-    // Fails closed either way: on any shape it does not understand the
-    // redactor returns an error and no YAML at all, which surfaces as the
-    // pane's error rather than as an unredacted manifest.
-    const secret = await getSecret(context, namespace ?? "", name);
-    if (secret.data === undefined) {
-      const redacted = redactSecretManifest(result.yaml);
-      return redacted.yaml === undefined
-        ? { error: redacted.error }
-        : { data: { yaml: redacted.yaml, redacted: "values", refusal: secret.error } };
-    }
-    const revealed = revealSecretManifest(result.yaml, secret.data);
-    return revealed.yaml === undefined
-      ? { error: revealed.error }
-      : { data: { yaml: revealed.yaml, redacted: revealed.annotationsRedacted ? "annotations" : undefined } };
+    return result.yaml === undefined ? { error: result.error } : { data: { yaml: result.yaml } };
   });
   const eventsState = useLoad<{ events: EventSummary[]; truncated?: boolean }>(
     openedPanes.has(PANE_EVENTS),
@@ -589,13 +594,11 @@ export function useDetailPaneState({
   };
 }
 
-/** The manifest the YAML pane shows, and what of a Secret's is not in it. */
+/** The manifest the YAML pane shows. */
 interface ManifestShown {
   yaml: string;
-  /** `values`: `k8s.getSecret` refused, so every value is blanked.
-   *  `annotations`: the values are shown and only annotation values are not. */
-  redacted?: "values" | "annotations";
-  /** Why `k8s.getSecret` refused, raw, when `redacted` is `values`. */
+  /** Set when this is a Secret's REDACTED manifest: why `k8s.getSecret`
+   *  refused, raw. */
   refusal?: string;
 }
 
@@ -659,18 +662,12 @@ function YamlPane({
       {/* This pane's OWN read refused, so its own refusal and its own retry:
           the Overview makes a separate read, which may have gone through, and
           retrying there would not reload this manifest. */}
-      {state.data.redacted === "values" && (
+      {state.data.refusal !== undefined && (
         <FailureAlert
           title="This Secret's values could not be read, so they are redacted here"
           error={state.data.refusal}
           onRetry={state.reload}
         />
-      )}
-      {state.data.redacted === "annotations" && (
-        <Alert tone="info" title="Annotation values redacted">
-          This Secret's data is shown as the cluster has it. Its annotation values are not: one of them can
-          carry a copy of the data.
-        </Alert>
       )}
       <div className="min-h-0 flex-1">
         <CodeEditor value={state.data.yaml} readOnly language="yaml" fill copy ariaLabel={`${name} manifest`} />

@@ -86,7 +86,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
-| `k8s.getSecret` | medium | read a Secret's values (sensitive; returns base64-encoded data) |
+| `k8s.getSecret` | medium | read a Secret's values, annotations and manifest (sensitive; data is base64-encoded) |
 | `k8s.nodeJournalLogs` | medium | retrieve journalctl logs for a service on a node via SSH |
 | `k8s.nodeRuntimeDiagnostics` | medium | run non-invasive host diagnostics (containers, dmesg, disk, memory, process) on a node via SSH |
 | `k8s.nodeServiceStatus` | medium | check the status of a systemd service (e.g. rke2-server, kubelet) on a node via SSH |

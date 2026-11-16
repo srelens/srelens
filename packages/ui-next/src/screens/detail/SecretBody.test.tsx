@@ -11,7 +11,7 @@ import type { K8sObject, PodMetric, PodSummary } from "@srelens/core";
 // cluster call escaping the mock boundary. `importOriginal` keeps every
 // formatter (`decodeBase64`, `dockerRegistries`, `formatBytes`, ...) intact.
 const { getSecret, podsForSelector, podMetrics } = vi.hoisted(() => ({
-  getSecret: vi.fn(async (): Promise<{ data?: Record<string, string>; error?: string }> => ({ data: undefined })),
+  getSecret: vi.fn(async (): Promise<{ data?: Record<string, string>; annotations?: Record<string, string>; yaml?: string; error?: string }> => ({ data: undefined })),
   podsForSelector: vi.fn(async (): Promise<{ pods?: PodSummary[]; error?: string }> => ({ pods: [] })),
   podMetrics: vi.fn(async (): Promise<{ metrics?: PodMetric[]; error?: string }> => ({ metrics: [] })),
 }));
@@ -25,7 +25,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
 
 import { GenericBody } from "./GenericBody";
 import { detailFacts } from "./detailData";
-import { SecretDetailsBody } from "./SecretBody";
+import { SecretAnnotationsSection, SecretDetailsBody } from "./SecretBody";
 
 // Obviously-fake fixture text — never anything that reads as a real
 // credential, per the task's secrecy ruling.
@@ -466,6 +466,32 @@ describe("when the values could not be read (getSecret refused, getObject's blan
     );
     expect(screen.getByRole("status").getAttribute("aria-label")).toBe("Reading this Secret's certificate and private key");
     expect(document.body.innerHTML).not.toContain("py-16");
+  });
+});
+
+describe("a Secret's annotations (#1085)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("makes one k8s.getSecret read for the body and the annotations drawn beside it", async () => {
+    getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 }, annotations: { note: "annotation-fixture" } });
+    render(
+      <>
+        <SecretDetailsBody object={secret({ token: "" })} context="ctx" />
+        <SecretAnnotationsSection context="ctx" namespace="default" name="s-1" blanked={{ note: "" }} />
+      </>,
+    );
+    await waitFor(() => expect(screen.getByText(FIXTURE_VALUE)).toBeDefined());
+    expect(getSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it("draws nothing for a Secret with no annotations", () => {
+    getSecret.mockResolvedValue({ data: {}, annotations: {} });
+    const { container } = render(
+      <SecretAnnotationsSection context="ctx" namespace="default" name="s-1" blanked={{}} />,
+    );
+    expect(container.innerHTML).toBe("");
   });
 });
 

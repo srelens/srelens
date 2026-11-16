@@ -81,14 +81,18 @@ button anywhere for weeks.
 
 The host blanks a Secret's `data`, `stringData` and every annotation value on
 every ungated read — `k8s.getObject`, `k8s.getManifest`, `k8s.diffManifest` —
-through `redact_secret_data`. The frontend redacts again on arrival with
-`redactSecretManifest` and fails closed. A Secret's values reach the window
-only through `k8s.getSecret`, the audited, consent-gated read: the detail
-pane's Overview and YAML show what it answered as soon as it answers (#1085),
-through `revealSecretManifest` for the YAML, and stay redacted when it
-refuses. Keep the Edit screen read-only until the reader reveals. Apply stays
-off while placeholders are shown, or applying writes the placeholders over the
-values.
+through `redact_secret_data`. That is for every caller, MCP clients included,
+and it stays.
+
+The desktop app shows a Secret whole, with nothing redacted (#1085), and it
+does so through one read: `k8s.getSecret`, the audited, consent-gated one,
+which returns the values, the annotations and the manifest in server order.
+The detail pane's Overview, annotations and YAML and the Edit screen all draw
+from it. Do not un-redact an ungated read to feed a screen; read
+`k8s.getSecret` instead. When it refuses, a pane says so with a Retry: the
+YAML pane falls back to the ungated manifest, redacted again on arrival with
+`redactSecretManifest`, and the Edit screen opens nothing, because applying a
+blanked manifest writes the blanks over the values.
 
 **Add the redaction to the path, not to the file.** `k8s.getManifest` was left
 returning Secrets in the clear for two rounds because the fix went in beside

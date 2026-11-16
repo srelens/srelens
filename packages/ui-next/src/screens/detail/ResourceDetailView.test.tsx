@@ -16,7 +16,7 @@ const { getObject, getManifest, getSecret, listEvents, listCrds, deleteResource,
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
   // The audited read a Secret's values come through. Refused unless a test
   // says otherwise, which is what it was here before it was mocked at all.
-  getSecret: vi.fn(async (): Promise<{ data?: Record<string, string>; error?: string }> => ({ error: "refused" })),
+  getSecret: vi.fn(async (): Promise<{ data?: Record<string, string>; annotations?: Record<string, string>; yaml?: string; error?: string }> => ({ error: "refused" })),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
   listEvents: vi.fn(async (): Promise<{ events?: EventSummary[]; truncated?: boolean; error?: string }> => ({ events: [] })),
   listCrds: vi.fn(async (): Promise<{ crds?: CrdRef[]; error?: string }> => ({ crds: [] })),
@@ -911,33 +911,21 @@ describe("ResourceDetailView", () => {
       expect(screen.queryByRole("button", { name: /^Show / })).toBeNull();
     });
 
-    it("keeps a Secret's annotation value out of the document until asked, then hides it again", async () => {
-      // A `kubectl apply`-managed Secret: `last-applied-configuration` holds
-      // the ENTIRE applied manifest, base64 `data` map and all, and
-      // `k8s.getObject`'s Secret redaction never touches
-      // `metadata.annotations`.
-      await open("Secret", { annotations: { [APPLIED]: FIXTURE_VALUE } });
-
-      // Not as text, not as a title/aria-label/data-*, not anywhere in the
-      // markup — nothing under the toggle is mounted at all.
-      expect(documentContains(FIXTURE_VALUE)).toBe(false);
-
+    it("draws a Secret's annotations like any other kind's once the block is opened (#1085)", async () => {
+      // The object carries the keys with blanked values; the values are
+      // `k8s.getSecret`'s. No `Show N annotations` gate in front of them.
+      getSecret.mockResolvedValue({
+        data: {},
+        annotations: { "srelens.io/last-applied-by": "dana@acme.io" },
+        yaml: "",
+      });
+      await open("Secret", { annotations: { "srelens.io/last-applied-by": "" } });
       await expand("Annotations");
-      // Opening the BLOCK reveals the gate, never what is behind it.
-      expect(documentContains(FIXTURE_VALUE)).toBe(false);
-
-      const toggle = screen.getByRole("button", { name: "Show 1 annotation" });
-      expect(toggle.getAttribute("title")).toBeNull();
-      expect(toggle.getAttribute("aria-label")).toBeNull();
-
-      await userEvent.click(toggle);
-      await waitFor(() => expect(documentContains(FIXTURE_VALUE)).toBe(true));
-
-      await userEvent.click(screen.getByRole("button", { name: "Hide" }));
-      expect(documentContains(FIXTURE_VALUE)).toBe(false);
+      await waitFor(() => expect(documentContains("dana@acme.io")).toBe(true));
+      expect(screen.queryByRole("button", { name: /^Show / })).toBeNull();
     });
 
-    it("gates Secret and nothing else", async () => {
+    it("has no annotation gate on any kind", async () => {
       // The two rules must not be confused for one. `AnnotationLines` holds
       // the applied manifest back on EVERY kind, for legibility; the gate is a
       // different rule and applies to Secret alone. Asserted on an ordinary
@@ -1115,29 +1103,21 @@ describe("ResourceDetailView", () => {
       expect(screen.getByRole("button", { name: "Labels" }).getAttribute("aria-expanded")).toBe("false");
     });
 
-    it("leaves a Secret's annotations shut whatever any other kind's memory says", async () => {
-      // THE GATE, from the direction that would break it. `AnnotationsToggle`
-      // is a security control — a `kubectl apply`-managed Secret carries its
-      // whole base64 `data` map inside the applied-configuration annotation,
-      // and `k8s.getObject`'s redaction never touches annotations. A memory
-      // recorded on a Deployment is a different key and cannot reach it.
-      setSectionOpen("Deployment", "Annotations", true);
-      await open("Secret", { annotations: { "srelens.io/note": "fixture-only" } });
-      expect(screen.getByRole("button", { name: "Annotations" }).getAttribute("aria-expanded")).toBe("false");
-      expect(documentContains("fixture-only")).toBe(false);
+    it("shows a Secret's annotations as the cluster has them, with no second click (#1085)", async () => {
+      // `k8s.getObject` blanks a Secret's annotation values, so the object
+      // carries the KEYS; the values are `k8s.getSecret`'s.
+      getSecret.mockResolvedValue({ data: {}, annotations: { "srelens.io/note": "fixture-only" }, yaml: "" });
+      setSectionOpen("Secret", "Annotations", true);
+      await open("Secret", { annotations: { "srelens.io/note": "" } });
+      await waitFor(() => expect(screen.getByText("fixture-only")).toBeDefined());
+      expect(screen.queryByRole("button", { name: /^Show 1 annotation/ })).toBeNull();
     });
 
-    it("still gates a Secret's values behind the reader's own reveal when the block itself is remembered open", async () => {
-      // The memory can disclose the GATE and never what is behind it. The
-      // toggle keeps its own state, starts shut on every mount, and reads
-      // nothing from this store — so the only thing a remembered "open" can
-      // show is the words on its button.
+    it("does not draw a Secret's blanked annotations as empty values when they could not be read", async () => {
       setSectionOpen("Secret", "Annotations", true);
-      await open("Secret", { annotations: { "srelens.io/note": "fixture-only" } });
-      expect(screen.getByRole("button", { name: "Annotations" }).getAttribute("aria-expanded")).toBe("true");
-      expect(documentContains("fixture-only")).toBe(false);
-      await userEvent.click(screen.getByRole("button", { name: "Show 1 annotation" }));
-      await waitFor(() => expect(documentContains("fixture-only")).toBe(true));
+      await open("Secret", { annotations: { "srelens.io/note": "" } });
+      await waitFor(() => expect(screen.getAllByText("Values not available").length).toBeGreaterThan(0));
+      expect(screen.queryByText("srelens.io/note")).toBeNull();
     });
 
     it("keeps the run of blocks unbroken, so a shut block still draws its rule", async () => {
@@ -1163,34 +1143,31 @@ describe("ResourceDetailView", () => {
     };
     const editorText = (container: HTMLElement) => container.querySelector(".cm-content")?.textContent ?? "";
 
-    it("shows the data as the cluster has it, read through k8s.getSecret", async () => {
+    it("shows the manifest k8s.getSecret answered with: server order, nothing redacted", async () => {
       getObject.mockResolvedValue({ object: SECRET });
-      // What a current host sends on the ungated read: every value blanked.
-      getManifest.mockResolvedValue({
-        yaml: 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: s-1\ndata:\n  token: ""\n',
-      });
-      getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
+      const served = `apiVersion: v1
+kind: Secret
+metadata:
+  name: s-1
+  annotations:
+    note: annotation-fixture
+data:
+  token: ${FIXTURE_B64}
+type: Opaque
+`;
+      getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 }, annotations: { note: "annotation-fixture" }, yaml: served });
       const { container, queryByRole } = await openYaml();
 
       await waitFor(() => expect(editorText(container)).toContain(`token: ${FIXTURE_B64}`));
       expect(getSecret).toHaveBeenCalledWith("ctx", "default", "s-1");
+      expect(editorText(container)).toContain("note: annotation-fixture");
       expect(editorText(container)).not.toContain("REDACTED");
+      // `metadata` before `data`: as served, not re-sorted.
+      expect(editorText(container).indexOf("metadata:")).toBeLessThan(editorText(container).indexOf("data:"));
       // Nothing is missing from this manifest, so there is nothing to say.
       expect(queryByRole("status")).toBeNull();
-    });
-
-    it("keeps annotation values out, and says those are what is missing", async () => {
-      getObject.mockResolvedValue({ object: SECRET });
-      getManifest.mockResolvedValue({
-        yaml: `apiVersion: v1\nkind: Secret\nmetadata:\n  name: s-1\n  annotations:\n    note: annotation-fixture\ndata:\n  token: ""\n`,
-      });
-      getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
-      const { container, getByRole } = await openYaml();
-
-      await waitFor(() => expect(editorText(container)).toContain(`token: ${FIXTURE_B64}`));
-      expect(editorText(container)).toContain("note: REDACTED");
-      expect(documentContains("annotation-fixture")).toBe(false);
-      expect(getByRole("status").textContent).toContain("Annotation values redacted");
+      // The blanked, ungated read is the fallback only.
+      expect(getManifest).not.toHaveBeenCalled();
     });
   });
 
@@ -1247,7 +1224,10 @@ describe("ResourceDetailView", () => {
       await userEvent.click(getByRole("tab", { name: "YAML" }));
       await waitFor(() => expect(container.querySelector(".cm-content")?.textContent).toContain("REDACTED"));
 
-      getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
+      getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 }, annotations: {}, yaml: `kind: Secret
+data:
+  token: ${FIXTURE_B64}
+` });
       await userEvent.click(getByRole("button", { name: "Retry" }));
       await waitFor(() =>
         expect(container.querySelector(".cm-content")?.textContent).toContain(`token: ${FIXTURE_B64}`),
