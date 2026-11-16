@@ -807,6 +807,15 @@
               {
                 "label": "Paused",
                 "jsonPath": ".spec.pgbouncer.paused"
+              },
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Phase reason",
+                "jsonPath": ".status.phaseReason"
               }
             ]
           }
@@ -1318,22 +1327,45 @@
           {
             "when": [
               {
-                "jsonPath": ".spec.pgbouncer.paused",
-                "equals": true
+                "jsonPath": ".status.phase",
+                "equals": "failed"
               }
             ],
-            "status": "suspended",
-            "label": "Paused"
+            "status": "error",
+            "label": "Failed",
+            "reason": ".status.phaseReason"
           },
           {
             "when": [
               {
-                "jsonPath": ".status.instances",
-                "present": true
+                "jsonPath": ".status.phase",
+                "equals": "inactive"
+              }
+            ],
+            "status": "warning",
+            "label": "Inactive",
+            "reason": ".status.phaseReason"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "paused"
+              }
+            ],
+            "status": "suspended",
+            "label": "Paused",
+            "reason": ".status.phaseReason"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "active"
               }
             ],
             "status": "healthy",
-            "label": "Running"
+            "label": "Active"
           },
           {
             "when": [],
@@ -1462,6 +1494,20 @@
         "size": "m",
         "type": "countByStatus",
         "source": "poolers",
+        "target": {
+          "page": "poolers"
+        }
+      },
+      {
+        "id": "poolers-failed",
+        "title": "Failed poolers",
+        "size": "s",
+        "type": "count",
+        "source": "poolers",
+        "predicate": {
+          "jsonPath": ".status.phase",
+          "equals": "failed"
+        },
         "target": {
           "page": "poolers"
         }

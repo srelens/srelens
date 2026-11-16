@@ -277,3 +277,42 @@ fn every_example_app_installs_and_declares_what_its_row_says() {
         }
     }
 }
+
+/// What an example's status rules say about one object of a kind it lists.
+fn status_of(file: &str, kind: &str, object: Value) -> (String, String) {
+    let manifest = Manifest::parse(&source(file)).unwrap();
+    let rules = manifest.status_rules_for(kind).unwrap_or_else(|| panic!("{file}: no rules for {kind}"));
+    let resolved = srelens_capability::status::resolve_status(rules, &object);
+    let status = serde_json::to_value(resolved.status).unwrap().as_str().unwrap().to_owned();
+    (status, resolved.label)
+}
+
+/// CloudNativePG sets a Pooler's `status.instances` from its Deployment whatever the
+/// phase, so a replica count is not health: a failed pooler has one, and an empty one
+/// reports zero. The phase is the verdict.
+#[test]
+fn a_pooler_takes_its_status_from_its_phase_not_its_replica_count() {
+    let pooler = |spec: Value, status: Value| json!({"spec": spec, "status": status});
+    let of = |object| status_of("cloudnative-pg.json", "postgresql.cnpg.io/Pooler", object);
+    let healthy = ("healthy".to_owned(), "Active".to_owned());
+    assert_eq!(of(pooler(json!({}), json!({"phase": "active", "instances": 2}))), healthy);
+    assert_eq!(
+        of(pooler(json!({}), json!({"phase": "failed", "instances": 2, "phaseReason": "image catalog not found"}))),
+        ("error".to_owned(), "Failed".to_owned())
+    );
+    assert_eq!(
+        of(pooler(json!({}), json!({"phase": "inactive", "instances": 0}))),
+        ("warning".to_owned(), "Inactive".to_owned())
+    );
+    assert_eq!(
+        of(pooler(json!({"pgbouncer": {"paused": true}}), json!({"phase": "paused", "instances": 2}))),
+        ("suspended".to_owned(), "Paused".to_owned())
+    );
+    // An operator from before the phase existed reports only a count, zero included.
+    for instances in [0, 2] {
+        assert_eq!(
+            of(pooler(json!({}), json!({"instances": instances}))),
+            ("unknown".to_owned(), "Unknown".to_owned())
+        );
+    }
+}
