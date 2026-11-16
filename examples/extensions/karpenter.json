@@ -211,6 +211,29 @@
       ]
     },
     {
+      "name": "gcenodeclasses",
+      "title": "List GCE node classes",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "karpenter.k8s.gcp",
+        "version": "v1alpha1",
+        "plural": "gcenodeclasses",
+        "kind": "GCENodeClass",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
       "name": "events",
       "title": "List events",
       "target": "k8s.listEvents",
@@ -238,7 +261,8 @@
             "apiGroups": [
               "karpenter.sh",
               "karpenter.k8s.aws",
-              "karpenter.azure.com"
+              "karpenter.azure.com",
+              "karpenter.k8s.gcp"
             ]
           }
         }
@@ -268,6 +292,12 @@
         "id": "aksnodeclasses",
         "title": "AKS node classes",
         "capability": "aksnodeclasses",
+        "group": "Node classes"
+      },
+      {
+        "id": "gcenodeclasses",
+        "title": "GCE node classes",
+        "capability": "gcenodeclasses",
         "group": "Node classes"
       }
     ],
@@ -496,6 +526,36 @@
         ]
       },
       {
+        "id": "gcenodeclass-summary",
+        "title": "GCE node class",
+        "forKinds": [
+          "karpenter.k8s.gcp/GCENodeClass"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Image family",
+                "jsonPath": ".spec.imageFamily"
+              },
+              {
+                "label": "Service account",
+                "jsonPath": ".spec.serviceAccount"
+              },
+              {
+                "label": "Subnet range",
+                "jsonPath": ".spec.subnetRangeName"
+              },
+              {
+                "label": "Minimum CPU platform",
+                "jsonPath": ".spec.minCpuPlatform"
+              }
+            ]
+          }
+        ]
+      },
+      {
         "id": "karpenter-conditions",
         "title": "Conditions",
         "forKinds": [
@@ -503,7 +563,8 @@
           "karpenter.sh/NodeClaim",
           "karpenter.sh/NodeOverlay",
           "karpenter.k8s.aws/EC2NodeClass",
-          "karpenter.azure.com/AKSNodeClass"
+          "karpenter.azure.com/AKSNodeClass",
+          "karpenter.k8s.gcp/GCENodeClass"
         ],
         "sections": [
           {
@@ -556,6 +617,13 @@
         "title": "Open aKS node classes",
         "target": {
           "page": "aksnodeclasses"
+        }
+      },
+      {
+        "id": "open-gcenodeclasses",
+        "title": "Open gCE node classes",
+        "target": {
+          "page": "gcenodeclasses"
         }
       }
     ],
@@ -620,7 +688,8 @@
           "karpenter.sh/NodePool",
           "karpenter.sh/NodeOverlay",
           "karpenter.k8s.aws/EC2NodeClass",
-          "karpenter.azure.com/AKSNodeClass"
+          "karpenter.azure.com/AKSNodeClass",
+          "karpenter.k8s.gcp/GCENodeClass"
         ],
         "rules": [
           {
@@ -746,6 +815,24 @@
         "relation": "references",
         "match": {
           "path": ".spec.nodeClassRef"
+        }
+      },
+      {
+        "id": "nodeclaim-gcenodeclass",
+        "from": "karpenter.sh/NodeClaim",
+        "to": "karpenter.k8s.gcp/GCENodeClass",
+        "relation": "references",
+        "match": {
+          "path": ".spec.nodeClassRef"
+        }
+      },
+      {
+        "id": "nodepool-gcenodeclass",
+        "from": "karpenter.sh/NodePool",
+        "to": "karpenter.k8s.gcp/GCENodeClass",
+        "relation": "references",
+        "match": {
+          "path": ".spec.template.spec.nodeClassRef"
         }
       },
       {

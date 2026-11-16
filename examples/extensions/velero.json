@@ -50,7 +50,7 @@
           {
             "name": "Expires",
             "jsonPath": ".status.expiration",
-            "type": "date"
+            "type": "string"
           },
           {
             "name": "Storage Location",
@@ -293,11 +293,6 @@
           {
             "name": "Storage Location",
             "jsonPath": ".spec.backupStorageLocation",
-            "type": "string"
-          },
-          {
-            "name": "Node",
-            "jsonPath": ".status.node",
             "type": "string"
           },
           {

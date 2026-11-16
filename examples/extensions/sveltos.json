@@ -66,16 +66,6 @@
             "type": "integer"
           },
           {
-            "name": "Updated",
-            "jsonPath": ".status.updatedClusters",
-            "type": "integer"
-          },
-          {
-            "name": "Updating",
-            "jsonPath": ".status.updatingClusters",
-            "type": "integer"
-          },
-          {
             "name": "Suspended",
             "jsonPath": ".status.reconciliationSuspended",
             "type": "boolean"
@@ -106,16 +96,6 @@
           {
             "name": "Tier",
             "jsonPath": ".spec.tier",
-            "type": "integer"
-          },
-          {
-            "name": "Updated",
-            "jsonPath": ".status.updatedClusters",
-            "type": "integer"
-          },
-          {
-            "name": "Updating",
-            "jsonPath": ".status.updatingClusters",
             "type": "integer"
           },
           {
@@ -476,16 +456,6 @@
                 "jsonPath": ".spec.continueOnConflict"
               },
               {
-                "label": "Clusters updated",
-                "jsonPath": ".status.updatedClusters",
-                "format": "number"
-              },
-              {
-                "label": "Clusters updating",
-                "jsonPath": ".status.updatingClusters",
-                "format": "number"
-              },
-              {
                 "label": "Suspended",
                 "jsonPath": ".status.reconciliationSuspended"
               },
@@ -754,6 +724,16 @@
             ],
             "status": "error",
             "label": "Failing on a cluster"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.updatingClusters.clusters[0]",
+                "present": true
+              }
+            ],
+            "status": "progressing",
+            "label": "Updating clusters"
           },
           {
             "when": [

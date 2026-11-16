@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 struct App {
     file: &'static str,
     id: &'static str,
-    /// The upstream release whose CRDs the manifest was written against.
+    /// The upstream tag whose CRDs the manifest was written against.
     release: &'static str,
     /// Every `group/Kind` the app reads.
     kinds: &'static [&'static str],
@@ -59,7 +59,7 @@ const APPS: &[App] = &[
     App {
         file: "external-secrets.json",
         id: "org.srelens.external-secrets",
-        release: "v2.15.0",
+        release: "helm-chart-2.15.0",
         kinds: &[
             "external-secrets.io/ClusterExternalSecret",
             "external-secrets.io/ClusterSecretStore",
@@ -69,7 +69,8 @@ const APPS: &[App] = &[
         ],
         actions: &[action("force-sync", "k8s.annotate", "external-secrets.io/force-sync", false)],
     },
-    // Karpenter v1.15.1; the AWS and Azure node classes from their providers' v1.15.2.
+    // Karpenter v1.15.1; the AWS and Azure node classes from their providers' v1.15.2,
+    // and the GCE one from karpenter-provider-gcp v0.8.2.
     App {
         file: "karpenter.json",
         id: "org.srelens.karpenter",
@@ -77,6 +78,7 @@ const APPS: &[App] = &[
         kinds: &[
             "karpenter.azure.com/AKSNodeClass",
             "karpenter.k8s.aws/EC2NodeClass",
+            "karpenter.k8s.gcp/GCENodeClass",
             "karpenter.sh/NodeClaim",
             "karpenter.sh/NodeOverlay",
             "karpenter.sh/NodePool",
@@ -86,7 +88,7 @@ const APPS: &[App] = &[
     App {
         file: "kamaji.json",
         id: "org.srelens.kamaji",
-        release: "v26.11.4-edge",
+        release: "26.11.4-edge",
         kinds: &[
             "kamaji.clastix.io/DataStore",
             "kamaji.clastix.io/KubeconfigGenerator",
@@ -226,7 +228,7 @@ fn every_example_app_installs_and_declares_what_its_row_says() {
         assert_eq!(raw["id"], app.id, "{file}");
         assert_eq!(raw["srelensApiVersion"], "^0.5", "{file}");
         assert_eq!(raw["version"], "0.1.0", "{file}");
-        assert!(app.release.starts_with('v'), "{file}: no upstream release recorded");
+        assert!(!app.release.is_empty(), "{file}: no upstream release recorded");
 
         let kinds: BTreeSet<String> = raw["capabilities"]
             .as_array()
