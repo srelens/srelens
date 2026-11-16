@@ -49,6 +49,16 @@ function documentContains(value: string): boolean {
   return document.body.innerHTML.includes(value);
 }
 
+/** The one key's Reveal button, once the read has landed and it is live. */
+async function revealable(): Promise<HTMLButtonElement> {
+  let button: HTMLButtonElement | undefined;
+  await waitFor(() => {
+    button = screen.getByRole("button", { name: "Reveal" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+  });
+  return button!;
+}
+
 describe("SecretDetailsBody", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -57,38 +67,43 @@ describe("SecretDetailsBody", () => {
     podMetrics.mockResolvedValue({ metrics: [] });
   });
 
-  describe("showing the values (#1085)", () => {
-    it("shows a value, decoded, as soon as it is read — then hides it on Hide and shows it again on Reveal", async () => {
+  describe("revealing the values (#1085)", () => {
+    it("keeps a read value masked until Reveal, then shows it decoded, and hides it again on Hide", async () => {
       getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
       render(<SecretDetailsBody object={secret({ token: "" })} context="ctx" />);
 
       await waitFor(() => expect(getSecret).toHaveBeenCalledWith("ctx", "default", "s-1"));
-      // No click: the reader opened a Secret to read it.
-      await waitFor(() => expect(screen.getByText(FIXTURE_VALUE)).toBeDefined());
-
-      // Hidden is still OUT OF THE DOCUMENT, not merely out of sight — not as
-      // text, not as a title/aria-label/data-* attribute.
-      await userEvent.click(screen.getByRole("button", { name: "Hide" }));
+      const reveal = await revealable();
+      // Read, but masked: OUT OF THE DOCUMENT, not merely out of sight — not
+      // as text, not as a title/aria-label/data-* attribute.
       expect(documentContains(FIXTURE_VALUE)).toBe(false);
       expect(documentContains(FIXTURE_B64)).toBe(false);
       expect(screen.getByText("••••••••")).toBeDefined();
 
-      await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
+      await userEvent.click(reveal);
       expect(screen.getByText(FIXTURE_VALUE)).toBeDefined();
+
+      await userEvent.click(screen.getByRole("button", { name: "Hide" }));
+      expect(documentContains(FIXTURE_VALUE)).toBe(false);
     });
 
     it("never exposes the value through the toggle button's own accessible name", async () => {
       getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
       render(<SecretDetailsBody object={secret({ token: "" })} context="ctx" />);
-      const toggle = await screen.findByRole("button", { name: "Hide" });
+      await userEvent.click(await revealable());
+      const toggle = screen.getByRole("button", { name: "Hide" });
       expect(toggle.getAttribute("title")).toBeNull();
       expect(toggle.getAttribute("aria-label")).toBeNull();
     });
 
-    it("offers to copy a value that is shown, and not one that is hidden", async () => {
+    it("offers to copy a value only while it is revealed", async () => {
       getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
       render(<SecretDetailsBody object={secret({ token: "" })} context="ctx" />);
-      const copy = await screen.findByRole("button", { name: "Copy token" });
+      const reveal = await revealable();
+      expect(screen.queryByRole("button", { name: "Copy token" })).toBeNull();
+
+      await userEvent.click(reveal);
+      const copy = screen.getByRole("button", { name: "Copy token" });
       // Named for the key, never for what it copies.
       expect(copy.outerHTML).not.toContain(FIXTURE_VALUE);
 
@@ -198,7 +213,7 @@ lUc3RsBva1V3RlPz+Jo=
       expect(screen.getByText("Missing")).toBeDefined();
     });
 
-    it("still shows the Data section, with tls.crt and tls.key shown like any other key", async () => {
+    it("still shows the Data section, with tls.crt and tls.key masked behind Reveal like any other key", async () => {
       render(
         <SecretDetailsBody
           object={secret({ "tls.crt": btoa(CERT), "tls.key": btoa(KEY) }, { type: "kubernetes.io/tls" })}
@@ -208,9 +223,13 @@ lUc3RsBva1V3RlPz+Jo=
       await waitFor(() => expect(getSecret).toHaveBeenCalled());
       expect(screen.getByText("tls.crt")).toBeDefined();
       expect(screen.getByText("tls.key")).toBeDefined();
-      await waitFor(() => expect(screen.getAllByRole("button", { name: "Hide" })).toHaveLength(2));
-      expect(documentContains("FAKE-NOT-A-REAL-CERTIFICATE")).toBe(true);
-      expect(documentContains("FAKE-NOT-A-REAL-KEY")).toBe(true);
+      await waitFor(() => {
+        const toggles = screen.getAllByRole("button", { name: "Reveal" }) as HTMLButtonElement[];
+        expect(toggles).toHaveLength(2);
+        for (const t of toggles) expect(t.disabled).toBe(false);
+      });
+      expect(screen.queryByRole("button", { name: "Hide" })).toBeNull();
+      expect(documentContains("FAKE-NOT-A-REAL-KEY")).toBe(false);
     });
 
     describe("certificate facts (parsed via core's certificateRows)", () => {
@@ -451,7 +470,8 @@ describe("when the values could not be read (getSecret refused, getObject's blan
 
     getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
     await userEvent.click(retry);
-    await waitFor(() => expect(screen.getByText(FIXTURE_VALUE)).toBeDefined());
+    await userEvent.click(await revealable());
+    expect(screen.getByText(FIXTURE_VALUE)).toBeDefined();
     expect(getSecret).toHaveBeenCalledTimes(2);
     expect(screen.queryByText("This Secret's values could not be read")).toBeNull();
   });
@@ -482,7 +502,8 @@ describe("a Secret's annotations (#1085)", () => {
         <SecretAnnotationsSection context="ctx" namespace="default" name="s-1" blanked={{ note: "" }} />
       </>,
     );
-    await waitFor(() => expect(screen.getByText(FIXTURE_VALUE)).toBeDefined());
+    await revealable();
+    await waitFor(() => expect(document.body.textContent).toContain("annotation-fixture"));
     expect(getSecret).toHaveBeenCalledTimes(1);
   });
 
@@ -499,7 +520,7 @@ describe("a Secret's annotations (#1085)", () => {
 
     getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 }, annotations: { note: "annotation-fixture" } });
     await userEvent.click(retry);
-    await waitFor(() => expect(screen.getByText(FIXTURE_VALUE)).toBeDefined());
+    await revealable();
     await waitFor(() => expect(document.body.textContent).toContain("annotation-fixture"));
     expect(getSecret).toHaveBeenCalledTimes(2);
   });
@@ -517,7 +538,8 @@ describe("a shown value", () => {
   it("sits in the content's own ink, at the size of a value (#1001)", async () => {
     getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
     render(<SecretDetailsBody object={secret({ token: "" })} context="ctx" />);
-    const value = await screen.findByText(FIXTURE_VALUE);
+    await userEvent.click(await revealable());
+    const value = screen.getByText(FIXTURE_VALUE);
     expect(value.tagName).toBe("PRE");
     expect(value.className).toContain("text-ink");
     expect(value.className).toContain("text-[0.75rem]");

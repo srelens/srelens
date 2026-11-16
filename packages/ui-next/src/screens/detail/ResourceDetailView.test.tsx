@@ -1045,10 +1045,10 @@ describe("ResourceDetailView", () => {
         expect(screen.getByText("level=info")).toBeDefined();
       });
 
-      it("opens a Secret's Data too, with its values shown (#1085)", async () => {
-        // It used to stay shut, on "less disclosed by default". The reader
-        // opened a Secret to read it, and a shut block over masked values was
-        // two clicks per key before anything was on screen.
+      it("opens a Secret's Data too, its keys listed and each value masked until Reveal (#1085)", async () => {
+        // It used to stay shut, on "less disclosed by default". The block
+        // opens so the keys are on screen; the values stay masked, one Reveal
+        // per key, so a screen share does not show them.
         getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
         getObject.mockResolvedValue({
           object: {
@@ -1064,7 +1064,11 @@ describe("ResourceDetailView", () => {
         );
         await waitFor(() => expect(view.getByRole("tab", { name: "Overview" })).toBeDefined());
         expect(screen.getByRole("button", { name: /^Data/ }).getAttribute("aria-expanded")).toBe("true");
-        await waitFor(() => expect(screen.getByText(atob(FIXTURE_B64))).toBeDefined());
+        const reveal = await screen.findByRole("button", { name: "Reveal" });
+        await waitFor(() => expect((reveal as HTMLButtonElement).disabled).toBe(false));
+        expect(screen.queryByText(atob(FIXTURE_B64))).toBeNull();
+        await userEvent.click(reveal);
+        expect(screen.getByText(atob(FIXTURE_B64))).toBeDefined();
       });
     });
 

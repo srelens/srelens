@@ -105,13 +105,12 @@ const CERTIFICATE_COLUMNS: Column<CertificateRow>[] = [
 ];
 
 /**
- * One Secret entry — key and value, the value shown, decoded, as soon as
- * `k8s.getSecret` has answered (#1085). It used to sit behind a Reveal click
- * per key; the read that fetches it is the audited one either way, so the mask
- * hid nothing from anything but the reader who had just opened the Secret.
+ * One Secret entry — key and value, the value masked until the reader presses
+ * its Reveal, then shown decoded, with Hide to mask it again (#1085). Masked by
+ * default so opening a Secret on a shared screen does not put every value on
+ * it; the annotations, the YAML pane and the editor are not masked.
  *
- * Hide is the reader's own, per key, for a screen someone else can see — and a
- * hidden value is OUT OF THE DOCUMENT, not merely out of sight: the
+ * A masked value is OUT OF THE DOCUMENT, not merely out of sight: the
  * placeholder "••••••••" is the only value in the tree, and no `title`,
  * `aria-label` or `data-*` carries the value. Copy is offered only over a
  * value that is on screen.
@@ -124,9 +123,9 @@ const CERTIFICATE_COLUMNS: Column<CertificateRow>[] = [
  * merely out of reach, and the label beside it says why.
  */
 function SecretEntry({ name, value, state }: { name: string; value: string; state: SecretDataState }) {
-  const [hidden, setHidden] = useState(false);
+  const [revealed, setRevealed] = useState(false);
   const available = hasValues(state);
-  const shown = available && !hidden;
+  const shown = available && revealed;
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-2">
@@ -139,7 +138,7 @@ function SecretEntry({ name, value, state }: { name: string; value: string; stat
             variant="ghost"
             size="xs"
             disabled={!available}
-            onClick={() => setHidden((h) => !h)}
+            onClick={() => setRevealed((r) => !r)}
           >
             {shown ? "Hide" : "Reveal"}
           </Button>
@@ -328,8 +327,7 @@ function GeneralSection({ object, keyCount }: { object: K8sObject; keyCount: num
  * Fetch a Secret's real (base64) values via the gated `getSecret` —
  * `getObject` redacts Secret data (the keys are present, the values blank),
  * so this is how the detail view reaches the actual values. The fetched values
- * are shown as soon as they resolve: `SecretEntry` draws each one decoded,
- * with its own Hide (#1085).
+ * stay masked until the reader presses a key's Reveal in `SecretEntry` (#1085).
  *
  * Returns a {@link SecretDataState} rather than a bare map, and reads `r.error`
  * as well as `r.data`. It used to do neither: `.then((r) => { if (r.data)

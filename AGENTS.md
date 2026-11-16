@@ -88,7 +88,9 @@ The desktop app shows a Secret whole, with nothing redacted (#1085), and it
 does so through one read: `k8s.getSecret`, the audited, consent-gated one,
 which returns the values, the annotations and the manifest in server order.
 The detail pane's Overview, annotations and YAML and the Edit screen all draw
-from it. Do not un-redact an ungated read to feed a screen; read
+from it. The one mask left is the Overview's Data block: each value starts
+masked behind its own Reveal, so opening a Secret on a shared screen does not
+show them all. Do not un-redact an ungated read to feed a screen; read
 `k8s.getSecret` instead. When it refuses, a pane says so with a Retry: the
 YAML pane falls back to the ungated manifest, redacted again on arrival with
 `redactSecretManifest`, and the Edit screen opens nothing, because applying a
