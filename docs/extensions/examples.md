@@ -48,6 +48,82 @@ Two limits worth knowing when you copy one:
 - **Keep an overview short.** It holds a live stream for every page it lists, and an
   app may hold eight. The examples list at most six.
 
+## Screenshots
+
+Each app on a cluster that serves its CRDs, with sample objects and no controller running.
+
+<details>
+<summary>KEDA</summary>
+
+<img alt="The KEDA overview: counts by status for its main kinds" src="../assets/screenshots/apps/keda-overview.png" width="100%">
+
+<img alt="KEDA: a scaled object, with Pause, Scale to zero and Resume" src="../assets/screenshots/apps/keda-detail.png" width="100%">
+
+</details>
+
+<details>
+<summary>External Secrets</summary>
+
+<img alt="The External Secrets overview: counts by status for its main kinds" src="../assets/screenshots/apps/external-secrets-overview.png" width="100%">
+
+<img alt="External Secrets: an external secret, with Force sync" src="../assets/screenshots/apps/external-secrets-detail.png" width="100%">
+
+</details>
+
+<details>
+<summary>Karpenter</summary>
+
+<img alt="The Karpenter overview: counts by status for its main kinds" src="../assets/screenshots/apps/karpenter-overview.png" width="100%">
+
+<img alt="Karpenter: a node claim" src="../assets/screenshots/apps/karpenter-detail.png" width="100%">
+
+</details>
+
+<details>
+<summary>Kamaji</summary>
+
+<img alt="The Kamaji overview: counts by status for its main kinds" src="../assets/screenshots/apps/kamaji-overview.png" width="100%">
+
+<img alt="Kamaji: a tenant control plane" src="../assets/screenshots/apps/kamaji-detail.png" width="100%">
+
+</details>
+
+<details>
+<summary>Velero</summary>
+
+<img alt="The Velero overview: counts by status for its main kinds" src="../assets/screenshots/apps/velero-overview.png" width="100%">
+
+<img alt="Velero: a schedule, with Pause and Resume" src="../assets/screenshots/apps/velero-detail.png" width="100%">
+
+</details>
+
+<details>
+<summary>CloudNativePG</summary>
+
+<img alt="The CloudNativePG overview: counts by status for its main kinds" src="../assets/screenshots/apps/cloudnative-pg-overview.png" width="100%">
+
+<img alt="CloudNativePG: a cluster, with Restart, Reload configuration and Hibernate" src="../assets/screenshots/apps/cloudnative-pg-detail.png" width="100%">
+
+</details>
+
+<details>
+<summary>Sveltos</summary>
+
+<img alt="The Sveltos overview: counts by status for its main kinds" src="../assets/screenshots/apps/sveltos-overview.png" width="100%">
+
+<img alt="Sveltos: a managed cluster, with Pause and Resume" src="../assets/screenshots/apps/sveltos-detail.png" width="100%">
+
+</details>
+
+<details>
+<summary>KubeSwift</summary>
+
+<img alt="The KubeSwift overview: counts by status for its main kinds" src="../assets/screenshots/apps/kubeswift-overview.png" width="100%">
+
+<img alt="KubeSwift: a stopped guest, with Start" src="../assets/screenshots/apps/kubeswift-detail.png" width="100%">
+
+</details>
+
 ## Providers
 
 | App | What it adds |
