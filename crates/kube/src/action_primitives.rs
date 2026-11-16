@@ -1823,6 +1823,18 @@ mod tests {
         );
     }
 
+    /// A merge patch removes a key by setting it to null, which is how an app clears an
+    /// annotation it set: KEDA's Resume removes both of its pause annotations (#1099).
+    #[test]
+    fn a_merge_patch_may_remove_annotations_with_null() {
+        let patch = json!({"metadata": {"annotations": {
+            "autoscaling.keda.sh/paused": null,
+            "autoscaling.keda.sh/paused-replicas": null,
+        }}});
+        let sent = check_merge_patch("keda.sh", "ScaledObject", patch.as_object().unwrap())
+            .expect("a null in a merge patch is a removal, not a problem");
+        assert_eq!(sent, patch);
+    }
     #[test]
     fn the_merge_patch_deny_list_keeps_the_host_owned_paths_out_of_a_template() {
         let check = |patch: Value| {
