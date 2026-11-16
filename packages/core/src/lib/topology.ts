@@ -11,7 +11,7 @@ import { invokeCapability, type Invoker } from "../transport/transport";
  */
 
 /** Which column a node stands in, left to right. */
-export type TopologyLane = "route" | "service" | "workload" | "replicaset" | "external";
+export type TopologyLane = "gateway" | "route" | "service" | "workload" | "replicaset" | "external";
 
 /**
  * How well a node is serving, from ready-over-desired and nothing else.

@@ -193,6 +193,7 @@ export interface TopologyLayout {
 /** Within a tier, top to bottom: the way in, then the address, then what
  *  answers, then anything hanging off it. */
 const LANE_ORDER: Record<string, number> = {
+  gateway: -1,
   route: 0,
   service: 1,
   workload: 2,
@@ -201,6 +202,20 @@ const LANE_ORDER: Record<string, number> = {
 };
 
 /** Two decimal places, so the same graph produces byte-identical paths. */
+/**
+ * A way in, not part of a tier: an Ingress or a Gateway API route, and the
+ * Gateway a route hangs on (#1089). Each of the two lanes has a column of its
+ * own ahead of the entry tiers, gateways first.
+ */
+function isGate(lane: string | undefined): boolean {
+  return lane === "route" || lane === "gateway";
+}
+
+/** How many gate columns stand ahead of the entry tiers: none, one or two. */
+function gateColumns(nodes: FlowNode[]): number {
+  return (nodes.some((n) => n.lane === "gateway") ? 1 : 0) + (nodes.some((n) => n.lane === "route") ? 1 : 0);
+}
+
 function r(n: number): number {
   return Math.round(n * 100) / 100;
 }
@@ -355,7 +370,7 @@ export function rankNodes(nodes: FlowNode[], edges: TopologyEdge[]): Map<string,
         e.kind === "routes" &&
         present.has(e.from) &&
         present.has(e.to) &&
-        laneOf.get(e.from) !== "route",
+        !isGate(laneOf.get(e.from)),
     )
     .map((e) => [e.from, e.to]);
   const tierOf = new Map<string, string>();
@@ -431,11 +446,13 @@ export function rankNodes(nodes: FlowNode[], edges: TopologyEdge[]): Map<string,
   // With any Ingress in the picture the first column is theirs, and every
   // tier moves one along: the Services they front, and the Services nothing
   // calls, together at the entry level behind them.
-  const shift = nodes.some((n) => n.lane === "route") ? 1 : 0;
+  // Gateways first when there are any, then the routes, then the tiers.
+  const shift = gateColumns(nodes);
+  const gate = (lane: string | undefined) => (lane === "gateway" ? 0 : shift - 1);
   return new Map(
     ids.map((id) => [
       id,
-      laneOf.get(id) === "route" ? 0 : (tierRank.get(tierOf.get(id) as string) ?? 0) + shift,
+      isGate(laneOf.get(id)) ? gate(laneOf.get(id)) : (tierRank.get(tierOf.get(id) as string) ?? 0) + shift,
     ]),
   );
 }
@@ -550,7 +567,8 @@ export function orderColumn(
  * count from there. `entryRank` is the column the entry tiers stand in: one
  * when an Ingress column precedes them, zero when nothing does.
  */
-export function columnLabel(rank: number, entryRank = 0): string {
+export function columnLabel(rank: number, entryRank = 0, gateways = false): string {
+  if (rank === 0 && gateways) return "GATEWAY";
   if (rank < entryRank) return "INGRESS";
   if (rank === entryRank) return "ENTRY";
   return `HOP ${rank - entryRank}`;
@@ -791,7 +809,7 @@ export function onAPath(nodes: FlowNode[], edges: TopologyEdge[]): Set<string> {
     if (present.has(edge.from)) found.add(edge.from);
     if (present.has(edge.to)) found.add(edge.to);
   }
-  for (const node of nodes) if (node.lane === "route") found.add(node.id);
+  for (const node of nodes) if (isGate(node.lane)) found.add(node.id);
 
   const routed = new Map<string, string[]>();
   const join = (a: string, b: string) => {
@@ -899,9 +917,9 @@ export interface TierShape {
 }
 
 export function shapeTier(group: FlowNode[]): TierShape {
-  const routes = group.filter((n) => n.lane === "route");
+  const routes = group.filter((n) => isGate(n.lane));
   const services = group.filter((n) => n.lane === "service");
-  const others = group.filter((n) => n.lane !== "route" && n.lane !== "service");
+  const others = group.filter((n) => !isGate(n.lane) && n.lane !== "service");
   // Without a Service the pods take the left lane themselves; without pods the
   // Service stands alone. An external host or an orphan ReplicaSet is a tier
   // of one and goes left too.
@@ -1101,12 +1119,14 @@ function placeFlow(
    */
   // The links that hold a tier together — a Service and the pods answering it
   // stand in one column, and those two have to end up adjacent.
-  const isRoute = new Set(nodes.filter((n) => n.lane === "route").map((n) => n.id));
+  const isRoute = new Set(nodes.filter((n) => isGate(n.lane)).map((n) => n.id));
   const within: [string, string][] = edges
     .filter((edge) => edge.kind === "routes" && !isRoute.has(edge.from))
     .map((edge) => [edge.from, edge.to]);
   // The Ingresses have the first column to themselves when there are any.
-  const entryIndex = isRoute.size > 0 ? 1 : 0;
+  // A column for the gateways and one for the routes, whichever there are.
+  const entryIndex = gateColumns(nodes);
+  const gateX = (c: number) => PADDING + c * (NODE_WIDTH + COLUMN_GAP);
 
   let rows = new Map<string, number>();
   let ordered: FlowNode[][][] = members.map((column) => [column]);
@@ -1252,7 +1272,7 @@ function placeFlow(
       return c + l + (c > 0 && l > 0 ? GRID_GAP : 0);
     }),
   );
-  const entryLeft = PADDING + (entryIndex === 1 ? NODE_WIDTH + COLUMN_GAP : 0);
+  const entryLeft = gateX(entryIndex);
   const entryRight = entryLeft + entryWidth;
   const colWidth = ordered.map((column, c) =>
     c === entryIndex
@@ -1270,10 +1290,11 @@ function placeFlow(
   for (const plan of plans) {
     let bottom = top;
     const inner: PlacedNode[] = [];
-    if (entryIndex === 1) {
-      // The Ingresses, in one stack against the entries they route to.
-      const gates = ordered[0].filter((g) => laneOf(g) === plan.lane);
-      if (gates.length > 0) bottom = Math.max(bottom, pack(gates, 1, PADDING, 0, top).bottom);
+    for (let c = 0; c < entryIndex; c++) {
+      // The gateways, then the Ingresses and routes, each in one stack
+      // against what they lead to.
+      const gates = ordered[c].filter((g) => laneOf(g) === plan.lane);
+      if (gates.length > 0) bottom = Math.max(bottom, pack(gates, 1, gateX(c), c, top).bottom);
     }
     if (plan.kCallers > 0) {
       const out = pack(
@@ -1309,8 +1330,8 @@ function placeFlow(
 
   const columns: Column[] = ordered.map((column, c) => ({
     rank: c,
-    label: columnLabel(c, entryIndex),
-    x: c < entryIndex ? PADDING : c === entryIndex ? entryLeft : hopX(c),
+    label: columnLabel(c, entryIndex, nodes.some((n) => n.lane === "gateway")),
+    x: c <= entryIndex ? gateX(c) : hopX(c),
     count: column.reduce((n, g) => n + g.length, 0),
   }));
   const last = lanes.at(-1);

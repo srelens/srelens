@@ -829,7 +829,7 @@ const Edge = memo(function Edge({
  */
 function Glyph({ lane, x, y }: { lane: TopologyLane; x: number; y: number }) {
   const line = { className: "fill-none stroke-faint", strokeWidth: 1.3 } as const;
-  if (lane === "route") {
+  if (lane === "route" || lane === "gateway") {
     return (
       <path
         d={`M ${x} ${y + 5} h 7 m -3 -3 l 3 3 l -3 3`}
