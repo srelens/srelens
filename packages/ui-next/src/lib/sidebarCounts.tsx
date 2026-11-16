@@ -1,3 +1,4 @@
+import { isGatewayApi } from "./gatewayApi";
 import { useEffect, useMemo, useRef, useSyncExternalStore, type ReactNode } from "react";
 import {
   countResources,
@@ -103,9 +104,13 @@ export function useSidebarCounts({ ctx, paused, expanded, crds }: SidebarCountAr
     if (live) {
       const kinds = [...CLUSTER_KINDS, ...NAV_GROUPS.flatMap((group) => (open.has(group.id) ? group.kinds : []))];
       for (const slug of kinds) add(`kind:${slug}`, { kind: K8S_KIND[slug], namespaced: descriptorFor(slug)?.scope !== "cluster" });
-      if (open.has("crds")) {
-        for (const crd of crds) {
-          if (!open.has(`crdgroup:${crd.group || "core"}`)) continue;
+      for (const crd of crds) {
+        // The Gateway API's kinds stand under a fold of their own (#1089).
+        const shown = isGatewayApi(crd.group)
+          ? open.has("gatewayapi")
+          : open.has("crds") && open.has(`crdgroup:${crd.group || "core"}`);
+        {
+          if (!shown) continue;
           add(`crd:${crd.name}`, { kind: crd.kind, group: crd.group, version: crd.version, plural: crd.plural, namespaced: crd.namespaced });
         }
       }

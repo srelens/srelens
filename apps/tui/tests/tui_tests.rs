@@ -8068,6 +8068,7 @@ mod tests {
             nodes,
             edges,
             probe: None,
+            unread: Vec::new(),
         };
 
         let mut topo_state = TopologyViewState::new(vec!["default".to_string()]);

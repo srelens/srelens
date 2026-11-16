@@ -58,6 +58,14 @@ impl TopologyViewState {
         // 4. Revisions (ReplicaSets - only if present)
         // 5. External Dependencies (Databases, Third-party APIs)
         let mut lanes = Vec::new();
+        // 0. Gateway API gateways, ahead of the routes they carry (#1089).
+        if let Some(gateways) = lane_map.remove(&Lane::Gateway) {
+            lanes.push(LaneColumn {
+                lane: Lane::Gateway,
+                title: "GATEWAYS",
+                node_indices: gateways,
+            });
+        }
         lanes.push(LaneColumn {
             lane: Lane::Route,
             title: "ROUTES (INGRESS)",
@@ -232,6 +240,23 @@ impl TopologyViewState {
     }
 }
 
+/// The `group/version` to open a Gateway API node at (#1089), so a CRD of the
+/// same kind in another group is never read in its place. `None` for every
+/// other node: those keep the built-in kind lookup.
+pub fn pinned_api_version(node: &TopologyNode, crds: &[crate::commands::CrdMeta]) -> Option<String> {
+    use srelens_kube::topology::GATEWAY_API_GROUP;
+    let gateway_api = node.lane == Lane::Gateway
+        || (node.lane == Lane::Route && matches!(node.kind.as_str(), "HTTPRoute" | "GRPCRoute"));
+    if !gateway_api {
+        return None;
+    }
+    let version = crds
+        .iter()
+        .find(|c| c.group == GATEWAY_API_GROUP && c.kind == node.kind)
+        .map_or("v1", |c| c.version.as_str());
+    Some(format!("{GATEWAY_API_GROUP}/{version}"))
+}
+
 pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -278,6 +303,36 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
         f.render_widget(msg, inner);
         return;
     };
+
+    // Gateway API kinds the graph could not read (#1089): said on a line of
+    // their own above the graph, so their missing gateways and routes are not
+    // taken for a cluster that has none.
+    let mut inner = inner;
+    if !graph.unread.is_empty() {
+        // The hint first, so a long reason can never push it off the row; then
+        // each source on its own wrapped line, so every one stays readable.
+        let n = graph.unread.len();
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                format!("⚠ Could not read {n} Gateway API {}", if n == 1 { "list" } else { "lists" }),
+                Theme::status_warn(),
+            ),
+            Span::styled("  — press <r> to retry", Style::default().fg(Theme::dim())),
+        ])];
+        lines.extend(graph.unread.iter().map(|u| {
+            Line::from(Span::styled(format!("  {} in {}: {}", u.kind, u.namespace, u.reason), Style::default().fg(Theme::fg())))
+        }));
+        let width = inner.width.max(1) as usize;
+        let wrapped: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
+        // Never more than half the view: the graph is still the point.
+        let height = wrapped.min((inner.height / 2).max(1) as usize) as u16;
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(height), Constraint::Min(0)])
+            .split(inner);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
+        inner = rows[1];
+    }
 
     if graph.nodes.is_empty() {
         let msg = Paragraph::new(Line::from(vec![
@@ -661,7 +716,128 @@ mod tests {
             nodes,
             edges,
             probe: None,
+            unread: Vec::new(),
         }
+    }
+
+    /// What the view draws at 120x30, as one string.
+    fn drawn(state: &TopologyViewState) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render_topology_view(f, f.area(), state)).unwrap();
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn crd(group: &str, version: &str, kind: &str) -> crate::commands::CrdMeta {
+        serde_json::from_value(serde_json::json!({
+            "crd_name": format!("{}s.{group}", kind.to_lowercase()), "group": group, "version": version,
+            "kind": kind, "plural": format!("{}s", kind.to_lowercase()), "singular": kind.to_lowercase(),
+            "namespaced": true, "short_names": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_gateway_api_node_opens_in_its_own_group_not_a_same_named_kind() {
+        // acme.io sorts first; a bare "Gateway" would resolve to it (#1089).
+        let crds = vec![
+            crd("acme.io", "v1", "Gateway"),
+            crd("gateway.networking.k8s.io", "v1beta1", "Gateway"),
+            crd("gateway.networking.k8s.io", "v1beta1", "HTTPRoute"),
+        ];
+        let node = |kind: &str, lane| TopologyNode {
+            id: format!("{kind}/shop/edge"),
+            kind: kind.to_string(),
+            name: "edge".to_string(),
+            namespace: "shop".to_string(),
+            lane,
+            detail: String::new(),
+            ready: None,
+            desired: None,
+            health: Health::Ok,
+        };
+        assert_eq!(
+            pinned_api_version(&node("Gateway", Lane::Gateway), &crds).as_deref(),
+            Some("gateway.networking.k8s.io/v1beta1")
+        );
+        assert_eq!(
+            pinned_api_version(&node("HTTPRoute", Lane::Route), &crds).as_deref(),
+            Some("gateway.networking.k8s.io/v1beta1")
+        );
+        // Not discovered yet: still the Gateway API's, at its stable version.
+        assert_eq!(
+            pinned_api_version(&node("GRPCRoute", Lane::Route), &crds).as_deref(),
+            Some("gateway.networking.k8s.io/v1")
+        );
+        // Everything else keeps the built-in lookup.
+        assert_eq!(pinned_api_version(&node("Ingress", Lane::Route), &crds), None);
+        assert_eq!(pinned_api_version(&node("Service", Lane::Service), &crds), None);
+    }
+
+    #[test]
+    fn gateway_api_kinds_it_could_not_read_are_said_not_left_out() {
+        // AGENTS.md: a failed read must not pass for "there are none" (#1089).
+        let unread = vec![srelens_kube::topology::UnreadSource {
+            namespace: "shop".to_string(),
+            kind: "HTTPRoute".to_string(),
+            reason: "forbidden".to_string(),
+        }];
+        let mut with_nodes = TopologyViewState::new(vec!["shop".to_string()]);
+        with_nodes.set_graph(TopologyGraphOut { unread: unread.clone(), ..sample_graph() });
+        let screen = drawn(&with_nodes);
+        assert!(screen.contains("HTTPRoute in shop: forbidden"), "{screen}");
+        assert!(screen.contains("<r> to retry"), "{screen}");
+
+        // A real permission error is longer than a row: the retry hint and
+        // every later kind must still be on screen.
+        let long = "httproutes.gateway.networking.k8s.io is forbidden: User \"system:serviceaccount:team:reader\" cannot list resource \"httproutes\" in API group \"gateway.networking.k8s.io\" in the namespace \"shop\"";
+        let mut wordy = TopologyViewState::new(vec!["shop".to_string()]);
+        wordy.set_graph(TopologyGraphOut {
+            unread: vec![
+                srelens_kube::topology::UnreadSource { namespace: "shop".into(), kind: "HTTPRoute".into(), reason: long.into() },
+                srelens_kube::topology::UnreadSource { namespace: "shop".into(), kind: "GRPCRoute".into(), reason: "timed out".into() },
+            ],
+            ..sample_graph()
+        });
+        let screen = drawn(&wordy);
+        assert!(screen.contains("<r> to retry"), "{screen}");
+        assert!(screen.contains("GRPCRoute in shop: timed out"), "{screen}");
+
+        // Nothing else drawn is still not "nothing found".
+        let mut empty = TopologyViewState::new(vec!["shop".to_string()]);
+        empty.set_graph(TopologyGraphOut { nodes: vec![], edges: vec![], probe: None, unread });
+        let screen = drawn(&empty);
+        assert!(screen.contains("HTTPRoute in shop: forbidden"), "{screen}");
+        assert!(screen.contains("<r> to retry"), "{screen}");
+    }
+
+    #[test]
+    fn gateways_get_a_lane_of_their_own_ahead_of_routes() {
+        // #1089: a shared backend now sends Gateway nodes; a lane left out of
+        // the fixed list was never drawn, and Gateway→Route edges dangled.
+        let mut graph = sample_graph();
+        graph.nodes.push(TopologyNode {
+            id: "Gateway/prod/edge".to_string(),
+            kind: "Gateway".to_string(),
+            name: "edge".to_string(),
+            namespace: "prod".to_string(),
+            lane: Lane::Gateway,
+            detail: "HTTP:80".to_string(),
+            ready: None,
+            desired: None,
+            health: Health::Ok,
+        });
+        let mut state = TopologyViewState::new(vec!["prod".to_string()]);
+        state.set_graph(graph);
+        assert_eq!(state.lanes[0].lane, Lane::Gateway);
+        assert_eq!(state.lanes[0].title, "GATEWAYS");
+        assert_eq!(state.lanes[0].node_indices.len(), 1);
+        assert_eq!(state.lanes[1].lane, Lane::Route);
+
+        // No gateways, no empty column.
+        let mut plain = TopologyViewState::new(vec!["prod".to_string()]);
+        plain.set_graph(sample_graph());
+        assert!(plain.lanes.iter().all(|l| l.lane != Lane::Gateway));
     }
 
     #[test]
@@ -763,6 +939,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
             probe: None,
+            unread: Vec::new(),
         });
         terminal
             .draw(|f| {
@@ -853,6 +1030,7 @@ mod tests {
             nodes: Vec::new(),
             edges: Vec::new(),
             probe: None,
+            unread: Vec::new(),
         };
         for i in 0..15 {
             many_nodes_graph.nodes.push(TopologyNode {

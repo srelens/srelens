@@ -239,6 +239,15 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
                 {probeSummary(graph.data.probe)}
               </p>
             )}
+            {graph.data?.unread && graph.data.unread.length > 0 && (
+              // Missing gateways and routes, said as a failed read rather than
+              // left to look like a cluster that has none (#1089).
+              <FailureAlert
+                title={`Could not read ${graph.data.unread.map((u) => `${u.kind} in ${u.namespace}`).join(", ")}`}
+                error={graph.data.unread[0].reason}
+                onRetry={graph.reload}
+              />
+            )}
           </div>
           <div className="relative min-h-0 flex-1">
             {graph.status === "loading" && (
@@ -829,7 +838,7 @@ const Edge = memo(function Edge({
  */
 function Glyph({ lane, x, y }: { lane: TopologyLane; x: number; y: number }) {
   const line = { className: "fill-none stroke-faint", strokeWidth: 1.3 } as const;
-  if (lane === "route") {
+  if (lane === "route" || lane === "gateway") {
     return (
       <path
         d={`M ${x} ${y + 5} h 7 m -3 -3 l 3 3 l -3 3`}

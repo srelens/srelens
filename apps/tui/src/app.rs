@@ -8151,6 +8151,7 @@ impl App {
                         let name = node.name.clone();
                         let kind = node.kind.clone();
                         let ns = node.namespace.clone();
+                        let pin = crate::views::topology_view::pinned_api_version(node, &self.crds);
                         let is_workload = matches!(
                             kind.to_lowercase().as_str(),
                             "deployment" | "statefulset" | "daemonset" | "job" | "cronjob"
@@ -8170,7 +8171,7 @@ impl App {
                                 Theme::status_ok(),
                             );
                         } else if !kind.eq_ignore_ascii_case("External") {
-                            self.open_describe_view(
+                            self.open_describe_view_in_group(
                                 name,
                                 kind,
                                 if ns.is_empty() {
@@ -8178,6 +8179,7 @@ impl App {
                                 } else {
                                     Some(ns.clone())
                                 },
+                                pin,
                             )
                             .await;
                         }
@@ -8188,11 +8190,13 @@ impl App {
                         let name = node.name.clone();
                         let kind = node.kind.clone();
                         let ns = node.namespace.clone();
+                        let pin = crate::views::topology_view::pinned_api_version(node, &self.crds);
                         if !kind.eq_ignore_ascii_case("External") {
-                            self.open_describe_view(
+                            self.open_describe_view_in_group(
                                 name,
                                 kind,
                                 if ns.is_empty() { None } else { Some(ns) },
+                                pin,
                             )
                             .await;
                         }
@@ -8203,11 +8207,13 @@ impl App {
                         let name = node.name.clone();
                         let kind = node.kind.clone();
                         let ns = node.namespace.clone();
+                        let pin = crate::views::topology_view::pinned_api_version(node, &self.crds);
                         if !kind.eq_ignore_ascii_case("External") {
-                            self.open_yaml_view(
+                            self.open_yaml_view_in_group(
                                 name,
                                 kind,
                                 if ns.is_empty() { None } else { Some(ns) },
+                                pin,
                             )
                             .await;
                         }

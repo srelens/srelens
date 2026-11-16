@@ -152,6 +152,9 @@ pub struct TopologyGraphIn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Lane {
+    /// A Gateway API Gateway (#1089): the door its routes hang on, so it
+    /// stands ahead of them.
+    Gateway,
     Route,
     Service,
     Workload,
@@ -312,12 +315,25 @@ pub struct Unlisted {
     pub reason: String,
 }
 
+/// An optional source the graph could not read in one namespace (#1089).
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct UnreadSource {
+    pub namespace: String,
+    pub kind: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TopologyGraphOut {
     pub nodes: Vec<TopologyNode>,
     pub edges: Vec<TopologyEdge>,
     /// Present only when the reader asked for the connection probe.
     pub probe: Option<ProbeReport>,
+    /// Gateway API kinds that could not be listed, and why. Their gateways and
+    /// routes are missing from the graph, which is not the same as there
+    /// being none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread: Vec<UnreadSource>,
 }
 
 /// Ready and desired, reduced to a verdict.
@@ -1350,7 +1366,7 @@ pub fn build_graph(
 
     nodes.extend(externals.into_values());
 
-    let mut graph = TopologyGraphOut { nodes, edges, probe: None };
+    let mut graph = TopologyGraphOut { nodes, edges, probe: None, unread: Vec::new() };
     resolve_call_health(&mut graph);
     graph
 }
@@ -2073,6 +2089,205 @@ pub fn apply_observed(
     applied
 }
 
+pub const GATEWAY_API_GROUP: &str = "gateway.networking.k8s.io";
+
+/// A string field of a Gateway API object, or `""`.
+fn text<'v>(value: &'v serde_json::Value, key: &str) -> &'v str {
+    value.get(key).and_then(|v| v.as_str()).unwrap_or("")
+}
+
+/// The items of an array field, or none.
+fn items<'v>(value: &'v serde_json::Value, key: &str) -> &'v [serde_json::Value] {
+    value.get(key).and_then(|v| v.as_array()).map_or(&[], Vec::as_slice)
+}
+
+/// Whether a list of conditions holds `kind` with `status`.
+fn has_condition(conditions: &[serde_json::Value], kind: &str, status: &str) -> bool {
+    conditions
+        .iter()
+        .any(|c| text(c, "type") == kind && text(c, "status") == status)
+}
+
+/// Fold the Gateway API's Gateways and routes into a graph already built
+/// (#1089): a Gateway routes to each route that names it as a parent, and a
+/// route to each Service it names as a backend.
+///
+/// Over JSON rather than typed objects: these are CRDs, a cluster serves them
+/// or does not, and the handful of fields read here is not worth a dependency
+/// that would have to track the API's versions.
+///
+/// The Ingress rule holds for both ends: an edge only to a node that is drawn.
+/// A backend that is not a Service in view, or a parent Gateway outside the
+/// namespaces asked for, is a route pointing off the picture, and inventing
+/// the node would draw traffic arriving somewhere it cannot. A parent that is
+/// not a Gateway — a Service, for a mesh route — is not this lane's to draw.
+pub fn apply_gateway_api(
+    graph: &mut TopologyGraphOut,
+    gateways: &[serde_json::Value],
+    routes: &[serde_json::Value],
+) {
+    let mut drawn: BTreeMap<String, Health> = graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.clone(), n.health))
+        .collect();
+
+    for gateway in gateways {
+        let metadata = &gateway["metadata"];
+        let (namespace, name) = (text(metadata, "namespace"), text(metadata, "name"));
+        let listeners = items(&gateway["spec"], "listeners")
+            .iter()
+            .map(|l| format!("{}:{}", text(l, "protocol"), l["port"]))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let conditions = items(&gateway["status"], "conditions");
+        // Programmed is the controller saying the data plane took it. Absent,
+        // nobody has said — which is not the same as it having failed.
+        let health = if has_condition(conditions, "Programmed", "True") {
+            Health::Ok
+        } else if has_condition(conditions, "Programmed", "False") {
+            Health::Failing
+        } else {
+            Health::Unknown
+        };
+        let id = node_id("Gateway", namespace, name);
+        drawn.insert(id.clone(), health);
+        graph.nodes.push(TopologyNode {
+            id,
+            kind: "Gateway".into(),
+            name: name.into(),
+            namespace: namespace.into(),
+            lane: Lane::Gateway,
+            detail: listeners,
+            ready: None,
+            desired: None,
+            health,
+        });
+    }
+
+    let mut join = |from: String, to: String, health: Health| {
+        if graph.edges.iter().any(|e| e.from == from && e.to == to) {
+            return;
+        }
+        graph.edges.push(TopologyEdge {
+            from,
+            to,
+            kind: EdgeKind::Routes,
+            provenance: Provenance::Topology,
+            detail: String::new(),
+            weight: None,
+            unit: None,
+            health,
+        });
+    };
+
+    for route in routes {
+        let metadata = &route["metadata"];
+        let (namespace, name) = (text(metadata, "namespace"), text(metadata, "name"));
+        let kind = match text(route, "kind") {
+            "" => "HTTPRoute",
+            kind => kind,
+        };
+        let spec = &route["spec"];
+        let hostnames = items(spec, "hostnames")
+            .iter()
+            .filter_map(|h| h.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Refused by any parent is a route not carrying what it was written
+        // to carry. Accepted says only that it was taken, so there is nothing
+        // to count and no "ok" to claim — the same reading an Ingress gets.
+        // ResolvedRefs=False (a backend it may not reach) fails it too, as the
+        // detail pane's "Unresolved refs" does.
+        let refused = items(&route["status"], "parents").iter().any(|p| {
+            let conditions = items(p, "conditions");
+            has_condition(conditions, "Accepted", "False") || has_condition(conditions, "ResolvedRefs", "False")
+        });
+        let health = if refused { Health::Failing } else { Health::Unknown };
+        let id = node_id(kind, namespace, name);
+        graph.nodes.push(TopologyNode {
+            id: id.clone(),
+            kind: kind.into(),
+            name: name.into(),
+            namespace: namespace.into(),
+            lane: Lane::Route,
+            detail: hostnames,
+            ready: None,
+            desired: None,
+            health,
+        });
+
+        // Both references default the way the API does: to a Gateway, or a
+        // core Service, in the route's own namespace.
+        let or_own = |reference: &serde_json::Value| match text(reference, "namespace") {
+            "" => namespace.to_string(),
+            other => other.to_string(),
+        };
+        for parent in items(spec, "parentRefs") {
+            if !matches!(text(parent, "kind"), "" | "Gateway")
+                || !matches!(text(parent, "group"), "" | GATEWAY_API_GROUP)
+            {
+                continue;
+            }
+            let from = node_id("Gateway", &or_own(parent), text(parent, "name"));
+            if drawn.contains_key(&from) {
+                join(from, id.clone(), health);
+            }
+        }
+        for backend in items(spec, "rules")
+            .iter()
+            .flat_map(|rule| items(rule, "backendRefs"))
+        {
+            if !matches!(text(backend, "kind"), "" | "Service") || !text(backend, "group").is_empty() {
+                continue;
+            }
+            let to = node_id("Service", &or_own(backend), text(backend, "name"));
+            if let Some(target) = drawn.get(&to).copied() {
+                join(id.clone(), to, target);
+            }
+        }
+    }
+}
+
+/// One Gateway API kind's objects in a namespace, as JSON, for
+/// [`apply_gateway_api`].
+///
+/// `v1`, then `v1beta1` where the cluster does not serve `v1` — the same
+/// fields either way. Served at neither is a cluster without the CRDs: none.
+/// Anything else (refused, timed out) is `Err` with the reason, which the
+/// graph carries in [`TopologyGraphOut::unread`]: an optional source that must
+/// not take the graph down, but must not pass for an absent one either.
+async fn list_gateway_objects(
+    client: kube::Client,
+    namespace: &str,
+    kind: &'static str,
+    plural: &'static str,
+) -> Result<Vec<serde_json::Value>, String> {
+    for version in ["v1", "v1beta1"] {
+        let resource = crate::crds::custom_api_resource(GATEWAY_API_GROUP, version, kind, plural);
+        let api: Api<kube::api::DynamicObject> =
+            Api::namespaced_with(client.clone(), namespace, &resource);
+        match tokio::time::timeout(request_timeout(), api.list(&ListParams::default())).await {
+            Ok(Ok(list)) => {
+                return Ok(list
+                    .items
+                    .iter()
+                    .filter_map(|object| serde_json::to_value(object).ok())
+                    .map(|mut value| {
+                        // A list's items do not always carry their own kind.
+                        value["kind"] = kind.into();
+                        value
+                    })
+                    .collect());
+            }
+            Ok(Err(kube::Error::Api(status))) if status.code == 404 => continue,
+            Ok(Err(error)) => return Err(error.to_string()),
+            Err(_) => return Err("timed out".to_string()),
+        }
+    }
+    Ok(Vec::new())
+}
+
 /// Everything the graph is built from, accumulated across the namespaces asked
 /// for.
 #[derive(Default)]
@@ -2086,6 +2301,9 @@ struct Fetched {
     config_maps: Vec<ConfigMap>,
     endpointslices: Vec<EndpointSlice>,
     policies: Vec<NetworkPolicy>,
+    gateways: Vec<serde_json::Value>,
+    routes: Vec<serde_json::Value>,
+    unread: Vec<UnreadSource>,
 }
 
 /// `k8s.topologyGraph` — the route/service/workload/revision/dependency graph
@@ -2165,6 +2383,24 @@ pub async fn build_topology(
                     all.config_maps.extend(config_maps);
                     all.endpointslices.extend(endpointslices);
                     all.policies.extend(policies);
+                    // After the lists the graph cannot do without, which have
+                    // already failed the whole read if they were going to.
+                    let (gateways, http_routes, grpc_routes) = tokio::join!(
+                        list_gateway_objects(client.clone(), ns, "Gateway", "gateways"),
+                        list_gateway_objects(client.clone(), ns, "HTTPRoute", "httproutes"),
+                        list_gateway_objects(client.clone(), ns, "GRPCRoute", "grpcroutes"),
+                    );
+                    for (kind, listed) in [("Gateway", gateways), ("HTTPRoute", http_routes), ("GRPCRoute", grpc_routes)] {
+                        match listed {
+                            Ok(objects) if kind == "Gateway" => all.gateways.extend(objects),
+                            Ok(objects) => all.routes.extend(objects),
+                            Err(reason) => all.unread.push(UnreadSource {
+                                namespace: ns.clone(),
+                                kind: kind.to_string(),
+                                reason,
+                            }),
+                        }
+                    }
                 }
                 // Built once over everything, not once per namespace and merged:
                 // a `checkout` that calls `payments-api.payments.svc` only
@@ -2185,6 +2421,10 @@ pub async fn build_topology(
                     all.config_maps,
                     all.endpointslices,
                 );
+                // Before the policies and the telemetry, which both read the
+                // finished set of nodes.
+                apply_gateway_api(&mut graph, &all.gateways, &all.routes);
+                graph.unread = all.unread;
                 // Measured traffic, when there is somewhere to read it from.
                 // A metrics backend that cannot be reached must NOT take the
                 // graph down with it: the structural half is still true and
@@ -4047,5 +4287,199 @@ mod tests {
         let ds_node = find(&g, "DaemonSet/checkout/ingress-nginx");
         assert_eq!(ds_node.detail, "42/42");
         assert_eq!(ds_node.health, Health::Ok);
+    }
+
+    // --- Gateway API (#1089) ---
+
+    fn gateway(namespace: &str, name: &str, programmed: Option<&str>) -> serde_json::Value {
+        let conditions: Vec<serde_json::Value> = programmed
+            .map(|status| serde_json::json!({"type": "Programmed", "status": status}))
+            .into_iter()
+            .collect();
+        serde_json::json!({
+            "kind": "Gateway",
+            "metadata": {"name": name, "namespace": namespace},
+            "spec": {"listeners": [
+                {"name": "http", "protocol": "HTTP", "port": 80},
+                {"name": "https", "protocol": "HTTPS", "port": 443},
+            ]},
+            "status": {"conditions": conditions},
+        })
+    }
+
+    fn http_route(name: &str, parents: serde_json::Value, backends: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "HTTPRoute",
+            "metadata": {"name": name, "namespace": "checkout"},
+            "spec": {
+                "hostnames": ["shop.example.com"],
+                "parentRefs": parents,
+                "rules": [{"backendRefs": backends}],
+            },
+        })
+    }
+
+    fn shop() -> TopologyGraphOut {
+        build_graph(
+            vec![],
+            vec![service("web", &[("app", "web")], 80)],
+            vec![deployment("web", 1, 3, &[("app", "web")])],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn a_gateway_routes_to_its_route_and_the_route_to_its_service() {
+        let mut g = shop();
+        apply_gateway_api(
+            &mut g,
+            &[gateway("checkout", "edge", Some("True"))],
+            &[http_route(
+                "shop",
+                serde_json::json!([{"name": "edge"}]),
+                serde_json::json!([{"name": "web", "port": 80}]),
+            )],
+        );
+
+        let gw = find(&g, "Gateway/checkout/edge");
+        assert_eq!(gw.lane, Lane::Gateway);
+        assert_eq!(gw.detail, "HTTP:80 HTTPS:443");
+        assert_eq!(gw.health, Health::Ok);
+
+        let route = find(&g, "HTTPRoute/checkout/shop");
+        assert_eq!(route.lane, Lane::Route);
+        assert_eq!(route.detail, "shop.example.com");
+
+        assert!(has_edge(&g, "Gateway/checkout/edge", "HTTPRoute/checkout/shop", EdgeKind::Routes));
+        assert!(has_edge(&g, "HTTPRoute/checkout/shop", "Service/checkout/web", EdgeKind::Routes));
+        // A path into a degraded Service is drawn as one, as an Ingress's is.
+        let into_service = g
+            .edges
+            .iter()
+            .find(|e| e.from == "HTTPRoute/checkout/shop")
+            .unwrap();
+        assert_eq!(into_service.health, Health::Degraded);
+        assert_eq!(into_service.provenance, Provenance::Topology);
+    }
+
+    #[test]
+    fn a_backend_that_is_not_a_service_here_draws_nothing() {
+        let mut g = shop();
+        let before = g.nodes.len();
+        apply_gateway_api(
+            &mut g,
+            &[],
+            &[http_route(
+                "shop",
+                serde_json::json!([{"name": "edge"}]),
+                serde_json::json!([
+                    {"name": "gone", "port": 80},
+                    {"group": "multicluster.x-k8s.io", "kind": "ServiceImport", "name": "web"},
+                    {"name": "web", "namespace": "elsewhere"},
+                ]),
+            )],
+        );
+        // The route itself, and nothing invented for it to point at — nor a
+        // gateway nobody listed.
+        assert_eq!(g.nodes.len(), before + 1);
+        assert!(!g.edges.iter().any(|e| e.from == "HTTPRoute/checkout/shop" || e.to == "HTTPRoute/checkout/shop"));
+    }
+
+    #[test]
+    fn a_parent_in_another_namespace_is_joined_only_when_it_is_drawn() {
+        let route = http_route(
+            "shop",
+            serde_json::json!([{"name": "edge", "namespace": "infra"}, {"kind": "Service", "name": "web"}]),
+            serde_json::json!([]),
+        );
+        let mut without = shop();
+        apply_gateway_api(&mut without, &[], std::slice::from_ref(&route));
+        assert!(!without.edges.iter().any(|e| e.to == "HTTPRoute/checkout/shop"));
+
+        let mut with = shop();
+        apply_gateway_api(&mut with, &[gateway("infra", "edge", None)], &[route]);
+        assert!(has_edge(&with, "Gateway/infra/edge", "HTTPRoute/checkout/shop", EdgeKind::Routes));
+        // A Service parent is a mesh route, not a gateway's.
+        assert_eq!(with.edges.iter().filter(|e| e.to == "HTTPRoute/checkout/shop").count(), 1);
+        // Nobody has said whether this gateway is programmed.
+        assert_eq!(find(&with, "Gateway/infra/edge").health, Health::Unknown);
+    }
+
+    #[test]
+    fn a_gateway_that_is_not_programmed_and_a_route_that_was_refused_are_failing() {
+        let mut route = http_route("shop", serde_json::json!([{"name": "edge"}]), serde_json::json!([]));
+        route["status"] = serde_json::json!({"parents": [
+            {"conditions": [{"type": "Accepted", "status": "True"}]},
+            {"conditions": [{"type": "Accepted", "status": "False"}]},
+        ]});
+        let mut g = shop();
+        apply_gateway_api(&mut g, &[gateway("checkout", "edge", Some("False"))], &[route]);
+        assert_eq!(find(&g, "Gateway/checkout/edge").health, Health::Failing);
+        assert_eq!(find(&g, "HTTPRoute/checkout/shop").health, Health::Failing);
+        // The line from the gateway says what it leads to.
+        let to_route = g.edges.iter().find(|e| e.to == "HTTPRoute/checkout/shop").unwrap();
+        assert_eq!(to_route.health, Health::Failing);
+    }
+
+    /// A client answering every request with `status` and a `Status` body.
+    fn status_client(status: u16) -> kube::Client {
+        let service = tower::service_fn(move |_request: http::Request<kube::client::Body>| async move {
+            let body = serde_json::json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": status, "message": "gateways is forbidden"});
+            Ok::<_, std::convert::Infallible>(
+                http::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(body.to_string().into_bytes()))
+                    .unwrap(),
+            )
+        });
+        kube::Client::new(service, "default")
+    }
+
+    #[tokio::test]
+    async fn gateways_the_reader_may_not_list_are_a_failure_not_an_absence() {
+        // AGENTS.md: a failed read must not read as "there are none".
+        let reason = list_gateway_objects(status_client(403), "shop", "Gateway", "gateways")
+            .await
+            .unwrap_err();
+        assert!(reason.contains("forbidden"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_cluster_that_serves_no_gateway_api_has_none() {
+        let listed = list_gateway_objects(status_client(404), "shop", "Gateway", "gateways").await;
+        assert_eq!(listed.unwrap(), Vec::<serde_json::Value>::new());
+    }
+
+    #[test]
+    fn a_route_whose_backends_did_not_resolve_is_failing() {
+        // Accepted, but a backend it may not reach (no ReferenceGrant, a
+        // missing Service): the detail pane says "Unresolved refs", and the
+        // graph must not draw it as carrying traffic.
+        let mut route = http_route("shop", serde_json::json!([{"name": "edge"}]), serde_json::json!([]));
+        route["status"] = serde_json::json!({"parents": [{"conditions": [
+            {"type": "Accepted", "status": "True"},
+            {"type": "ResolvedRefs", "status": "False", "reason": "RefNotPermitted"},
+        ]}]});
+        let mut g = shop();
+        apply_gateway_api(&mut g, &[gateway("checkout", "edge", Some("True"))], &[route]);
+        assert_eq!(find(&g, "HTTPRoute/checkout/shop").health, Health::Failing);
+    }
+
+    #[test]
+    fn a_cluster_without_the_gateway_api_draws_what_it_drew() {
+        let mut g = shop();
+        let before = serde_json::to_string(&g).unwrap();
+        apply_gateway_api(&mut g, &[], &[]);
+        assert_eq!(serde_json::to_string(&g).unwrap(), before);
+    }
+
+    #[test]
+    fn the_gateway_lane_is_named_for_the_screen() {
+        assert_eq!(serde_json::to_string(&Lane::Gateway).unwrap(), "\"gateway\"");
     }
 }

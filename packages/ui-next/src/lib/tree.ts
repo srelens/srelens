@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { RESOURCE_LABELS, type CrdRef, type ResourceKind } from "@srelens/core";
 import type { IconComponent, ResourceNode } from "@srelens/ui-kit";
 import { crdIcon } from "./crdIcons";
+import { GATEWAY_API_GROUP } from "./gatewayApi";
 import { Icons } from "./icons";
 
 /**
@@ -145,6 +146,8 @@ export interface NavInput {
   apps?: ResourceNode[];
   /** What "Custom resources" holds: {@link crdNodes}, or its failure leaf. */
   crds: ResourceNode[];
+  /** What "Gateway API" holds: {@link gatewayNodes}. Empty or absent, there is no such group. */
+  gateway?: ResourceNode[];
   /** Whether the AI Assistant may act on this cluster: no Agent row where it may not (#968). */
   agent: boolean;
 }
@@ -156,7 +159,17 @@ export interface NavInput {
  * forwards, Topology, Incidents, Agent). Apps follow the built-ins, as they do
  * in Lens. The kit draws a rule where the band changes.
  */
-export function navNodes({ counts, apps = [], crds, agent }: NavInput): ResourceNode[] {
+export function navNodes({ counts, apps = [], crds, gateway = [], agent }: NavInput): ResourceNode[] {
+  const kinds = kindNodes(counts);
+  // After Network, which is what it is: the cluster's other way in (#1089).
+  if (gateway.length > 0) {
+    kinds.splice(kinds.findIndex((group) => group.id === "network") + 1, 0, {
+      id: "gatewayapi",
+      label: "Gateway API",
+      icon: crdIcon(GATEWAY_API_GROUP),
+      children: gateway,
+    });
+  }
   const inBand = (band: string) => (node: ResourceNode): ResourceNode => ({ ...node, band });
   const tools = TOOLS.filter((tool) => agent || tool.id !== "agent").map((tool) => ({
     id: `route:${tool.route}`,
@@ -176,7 +189,7 @@ export function navNodes({ counts, apps = [], crds, agent }: NavInput): Resource
       ...CLUSTER_KINDS.map((kind) => kindNode(kind, counts)),
     ].map(inBand("cluster")),
     ...[
-      ...kindNodes(counts),
+      ...kinds,
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crds },
     ].map(inBand("resources")),
     ...[...apps, ...tools].map(inBand("tools")),
@@ -219,6 +232,37 @@ export function crdNodes(crds: CrdRef[], counts?: NodeCounts): ResourceNode[] {
           .map((crd) => ({ id: `crd:${crd.name}`, label: crd.kind, icon, ...counted(`crd:${crd.name}`, counts) })),
       };
     });
+}
+
+/** A Gateway API kind's row label; a kind not listed keeps its own name. */
+const GATEWAY_LABELS: Record<string, string> = {
+  GatewayClass: "GatewayClasses",
+  Gateway: "Gateways",
+  HTTPRoute: "HTTPRoutes",
+  GRPCRoute: "GRPCRoutes",
+  TLSRoute: "TLSRoutes",
+  TCPRoute: "TCPRoutes",
+  UDPRoute: "UDPRoutes",
+  ReferenceGrant: "ReferenceGrants",
+  BackendTLSPolicy: "BackendTLSPolicies",
+};
+
+/**
+ * The Gateway API's kinds as the rows of a group of their own (#1089), in the
+ * order given — `splitGatewayCrds` has already put them in theirs.
+ *
+ * Each is still a `crd:` node: the kind is a custom resource whatever group
+ * the sidebar files it under, so its route, its count and its list are the
+ * ones every custom resource has.
+ */
+export function gatewayNodes(crds: CrdRef[], counts?: NodeCounts): ResourceNode[] {
+  const icon = crdIcon(GATEWAY_API_GROUP);
+  return crds.map((crd) => ({
+    id: `crd:${crd.name}`,
+    label: GATEWAY_LABELS[crd.kind] ?? crd.kind,
+    icon,
+    ...counted(`crd:${crd.name}`, counts),
+  }));
 }
 
 /**

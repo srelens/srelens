@@ -346,6 +346,46 @@ it("draws an installed package's logo on its app in the sidebar (#562)", async (
   expect(app.querySelector("image")?.getAttribute("href")).toBe(packageIcon);
 });
 
+describe("Gateway API (#1089)", () => {
+  const GATEWAYS: CrdRef = {
+    name: "gateways.gateway.networking.k8s.io",
+    group: "gateway.networking.k8s.io",
+    version: "v1",
+    kind: "Gateway",
+    plural: "gateways",
+    namespaced: true,
+  };
+
+  it("lists the served kinds in a group of their own, and not under Custom resources", async () => {
+    listCrds.mockResolvedValue({ crds: [GATEWAYS, CERTS] });
+    render(<Nav contexts={[PROD]} />);
+
+    await userEvent.click(await screen.findByRole("treeitem", { name: "Gateway API" }));
+    await userEvent.click(await screen.findByRole("treeitem", { name: /^Gateways/ }));
+    expect(currentWorkspace().tabs.at(-1)?.route).toBe("/k/gateways.gateway.networking.k8s.io");
+
+    await userEvent.click(screen.getByRole("treeitem", { name: "Custom resources" }));
+    expect(await screen.findByRole("treeitem", { name: "cert-manager.io" })).toBeTruthy();
+    expect(screen.queryByRole("treeitem", { name: "gateway.networking.k8s.io" })).toBeNull();
+  });
+
+  it("has no such group on a cluster without the CRDs", async () => {
+    listCrds.mockResolvedValue({ crds: [CERTS] });
+    render(<Nav contexts={[PROD]} />);
+    await userEvent.click(screen.getByRole("treeitem", { name: "Custom resources" }));
+    await screen.findByRole("treeitem", { name: "cert-manager.io" });
+    expect(screen.queryByRole("treeitem", { name: "Gateway API" })).toBeNull();
+  });
+
+  it("has no such group when discovery fails", async () => {
+    listCrds.mockResolvedValue({ error: "forbidden" });
+    render(<Nav contexts={[PROD]} />);
+    await waitFor(() => expect(listCrds).toHaveBeenCalled());
+    expect(screen.queryByRole("treeitem", { name: "Gateway API" })).toBeNull();
+    expect(screen.getByRole("treeitem", { name: "Network" })).toBeTruthy();
+  });
+});
+
 describe("two contexts that share a stable ID (#695)", () => {
   // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share `/kube/a#b#c` (#623);
   // a window opened for one of them pins its key.
