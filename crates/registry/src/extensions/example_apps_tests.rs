@@ -332,3 +332,19 @@ fn keda_pause_is_blocked_only_while_the_annotation_says_true() {
         }
     }
 }
+
+/// CloudNativePG reads an empty fencing list as no fencing at all, so a healthy cluster
+/// carrying `[]` is healthy; only a list that names instances is a warning.
+#[test]
+fn a_cluster_is_fenced_only_when_the_annotation_names_instances() {
+    let cluster = |fenced: &str| {
+        json!({
+            "metadata": {"annotations": {"cnpg.io/fencedInstances": fenced}},
+            "status": {"phase": "Cluster in healthy state", "conditions": [{"type": "Ready", "status": "True"}]},
+        })
+    };
+    let of = |object| status_of("cloudnative-pg.json", "postgresql.cnpg.io/Cluster", object);
+    assert_eq!(of(cluster("[]")), ("healthy".to_owned(), "Healthy".to_owned()));
+    assert_eq!(of(cluster("[\"orders-1\"]")), ("warning".to_owned(), "Fenced".to_owned()));
+    assert_eq!(of(cluster("[\"*\"]")), ("warning".to_owned(), "Fenced".to_owned()));
+}

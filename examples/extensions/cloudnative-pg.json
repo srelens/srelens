@@ -1158,6 +1158,10 @@
               {
                 "jsonPath": ".metadata.annotations['cnpg.io/fencedInstances']",
                 "present": true
+              },
+              {
+                "jsonPath": ".metadata.annotations['cnpg.io/fencedInstances']",
+                "notEquals": "[]"
               }
             ],
             "status": "warning",
