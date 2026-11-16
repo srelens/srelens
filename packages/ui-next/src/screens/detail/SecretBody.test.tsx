@@ -486,6 +486,24 @@ describe("a Secret's annotations (#1085)", () => {
     expect(getSecret).toHaveBeenCalledTimes(1);
   });
 
+  it("recovers the annotations too when the body's Retry succeeds, on one more read", async () => {
+    getSecret.mockResolvedValue({ error: "consent denied for k8s.getSecret" });
+    render(
+      <>
+        <SecretDetailsBody object={secret({ token: "" })} context="ctx" />
+        <SecretAnnotationsSection context="ctx" namespace="default" name="s-1" blanked={{ note: "" }} />
+      </>,
+    );
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(screen.queryByText("annotation-fixture")).toBeNull();
+
+    getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 }, annotations: { note: "annotation-fixture" } });
+    await userEvent.click(retry);
+    await waitFor(() => expect(screen.getByText(FIXTURE_VALUE)).toBeDefined());
+    await waitFor(() => expect(document.body.textContent).toContain("annotation-fixture"));
+    expect(getSecret).toHaveBeenCalledTimes(2);
+  });
+
   it("draws nothing for a Secret with no annotations", () => {
     getSecret.mockResolvedValue({ data: {}, annotations: {} });
     const { container } = render(

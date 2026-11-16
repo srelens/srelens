@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   absoluteTimestamp,
   certificateHealth,
@@ -364,6 +364,24 @@ function readSecret(context: string, namespace: string, name: string): ReturnTyp
   return read;
 }
 
+/**
+ * How many times each Secret has been asked for again. Shared, because the
+ * body and the annotations block each hold their own copy of the read: a Retry
+ * pressed in one must read again for both, or the values come back and the
+ * annotations stay "not available" with no control of their own. Both then ask
+ * in the same tick, so it is still one read.
+ */
+const attempts = new Map<string, number>();
+const attemptListeners = new Set<() => void>();
+function subscribeAttempts(listener: () => void): () => void {
+  attemptListeners.add(listener);
+  return () => attemptListeners.delete(listener);
+}
+function readAgain(key: string): void {
+  attempts.set(key, (attempts.get(key) ?? 0) + 1);
+  for (const listener of attemptListeners) listener();
+}
+
 function useSecretData(
   context: string,
   namespace: string,
@@ -372,7 +390,8 @@ function useSecretData(
   blankedAnnotations: Record<string, string> = {},
 ): SecretDataState {
   const [fetched, setFetched] = useState<Awaited<ReturnType<typeof getSecret>> | null>(null);
-  const [attempt, setAttempt] = useState(0);
+  const key = JSON.stringify([context, namespace, name]);
+  const attempt = useSyncExternalStore(subscribeAttempts, () => attempts.get(key) ?? 0);
   useEffect(() => {
     setFetched(null);
     if (!context) return;
@@ -394,7 +413,7 @@ function useSecretData(
   if (!context) return { status: "ready", ...blanked };
   if (fetched === null) return { status: "loading", ...blanked };
   if (fetched.error !== undefined) {
-    return { status: "error", ...blanked, error: fetched.error, retry: () => setAttempt((n) => n + 1) };
+    return { status: "error", ...blanked, error: fetched.error, retry: () => readAgain(key) };
   }
   return {
     status: "ready",
