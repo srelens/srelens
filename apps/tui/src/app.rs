@@ -3126,14 +3126,9 @@ impl App {
             }
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 if let Some(context) = self.consents.cancel() {
-                    let turn = if context == self.active_context {
-                        Some(&mut self.assistant_state)
-                    } else {
-                        self.assistant_states.get_mut(&context)
-                    };
-                    if let Some(turn) = turn {
-                        turn.cancel_turn();
-                    }
+                    // The focused pane, the parked one, or another chat (#1087).
+                    self.assistant_state_mut_for_context(Some(&context))
+                        .cancel_turn();
                 }
             } else {
                 self.consents.press(key, self.consent_arm_delay);
@@ -10435,6 +10430,11 @@ impl App {
         self.command_suggestion_idx = 0;
         self.command_tab_base = None;
         self.command_tab_target = None;
+        // The button's release will reach the other pane, so end a drag in
+        // this one's chat here, or its tick keeps scrolling it (#1087).
+        if self.assistant_state.is_selecting {
+            self.assistant_state.clear_selection();
+        }
 
         let mut mux = match self.mux_state.take() {
             Some(m) => m,

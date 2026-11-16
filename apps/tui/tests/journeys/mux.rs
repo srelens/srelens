@@ -1324,3 +1324,117 @@ async fn journey_mux_failed_custom_resource_list_stays_on_the_parked_table() {
     );
     assert!(!left.is_loading);
 }
+
+fn parked_chat(app: &srectl::app::App) -> &srectl::views::assistant_view::AssistantViewState {
+    &app.mux_state
+        .as_ref()
+        .and_then(|mux| mux.inactive_pane.as_ref())
+        .expect("the left pane should be parked")
+        .assistant_state
+}
+
+/// An agent in the parked pane can still ask for approval. Ctrl+C on its
+/// prompt declines it and must stop the parked pane's turn, as it stops the
+/// focused pane's (#1087).
+#[tokio::test]
+async fn journey_mux_ctrl_c_on_a_prompt_stops_the_parked_panes_turn() {
+    use srectl::consent::PendingConsent;
+    use srelens_mcp::policy::{ConsentKind, ConsentRequest, Decision};
+
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    split_with_the_left_focused(&mut app).await;
+    app.assistant_state.is_busy = true;
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-right");
+
+    let (reply, mut answer) = tokio::sync::oneshot::channel();
+    app.consents.push(PendingConsent {
+        request: ConsentRequest {
+            tool: "k8s.deletePod".into(),
+            args: serde_json::json!({ "name": "api-0", "namespace": "prod" }),
+            kind: ConsentKind::Destructive,
+            impact: srelens_capability::Impact::High,
+            confirm_text: Some("Delete pod prod/api-0?".into()),
+            caller: None,
+        },
+        agent: "claude".into(),
+        context: "cluster-left".into(),
+        reply,
+    });
+    press(&mut app, ctrl('c')).await;
+
+    assert_eq!(
+        answer.try_recv(),
+        Ok(Decision::Denied("declined in srectl".into()))
+    );
+    assert!(
+        !parked_chat(&app).is_busy,
+        "the parked pane's turn must stop"
+    );
+    assert!(app.is_running, "Ctrl+C on a prompt does not quit");
+}
+
+/// Dragging a selection past the edge of the left pane's chat scrolls it.
+/// Ctrl+b before the button comes up must end that drag: the release goes to
+/// the other pane, so the parked chat would keep scrolling out of sight and
+/// still be selecting on the way back (#1087).
+#[tokio::test]
+async fn journey_mux_a_chat_drag_ends_when_its_pane_loses_focus() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use srectl::views::assistant_view::ChatMessage;
+
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("cluster-left", "default").await;
+    split_with_the_left_focused(&mut app).await;
+    app.active_view = ActiveView::Assistant;
+    for i in 0..40 {
+        app.assistant_state.messages.push(ChatMessage {
+            role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
+            content: format!("Message line {i:03}: incident response diagnostics for pod-{i}"),
+            timestamp: "12:00:00".to_string(),
+            tool_calls: Vec::new(),
+            token_usage: None,
+        });
+    }
+    app.assistant_state.is_busy = true;
+    render_app(&mut app, 140, 40);
+    let vp = app.assistant_state.last_viewport_rect.get();
+    app.handle_mouse(click(vp.x + 5, vp.y + vp.height - 2))
+        .await;
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), vp.x + 5, 0))
+        .await;
+    assert!(
+        app.assistant_state.drag_scroll.is_some(),
+        "dragging past the top scrolls the chat"
+    );
+
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-right");
+    let scroll = parked_chat(&app).effective_scroll();
+    let spinner = parked_chat(&app).spinner_frame;
+    for _ in 0..7 {
+        app.handle_tick();
+    }
+    let parked = parked_chat(&app);
+    assert_eq!(
+        parked.effective_scroll(),
+        scroll,
+        "the parked chat must stay where it was"
+    );
+    assert!(!parked.is_selecting);
+    assert_eq!(parked.drag_scroll, None);
+    assert_ne!(
+        parked.spinner_frame, spinner,
+        "the parked turn's spinner keeps moving"
+    );
+
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), vp.x + 5, 0))
+        .await;
+    press(&mut app, ctrl('b')).await;
+    assert_eq!(app.active_context, "cluster-left");
+    assert!(
+        !app.assistant_state.is_selecting,
+        "back on the left, the chat is not still selecting"
+    );
+}
