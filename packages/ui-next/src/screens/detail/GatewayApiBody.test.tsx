@@ -122,14 +122,17 @@ describe("a Gateway's pane", () => {
         : { error: "forbidden" },
     );
     render(<GatewayApiBody object={GATEWAY} context="prod-eu" />);
-    expect(await screen.findByRole("heading", { name: "Routes (1)" })).toBeDefined();
+    // Only the gateway's namespace was read for HTTPRoute: a lower bound, said so.
+    expect(await screen.findByRole("heading", { name: "Routes (1+)" })).toBeDefined();
+    expect(screen.getByText("Listed HTTPRoute only in infra")).toBeDefined();
     expect(screen.getByText("local")).toBeDefined();
     expect(screen.getByText("Could not list GRPCRoute")).toBeDefined();
     // The shared failure display: the reason, and a way to ask again.
     const calls = listCustomResource.mock.calls.length;
-    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await userEvent.click(screen.getByRole("button", { name: "Retry listing GRPCRoute" }));
     await waitFor(() => expect(listCustomResource.mock.calls.length).toBeGreaterThan(calls));
-    expect(screen.getByText("local")).toBeDefined();
+    expect(await screen.findByText("local")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Retry listing HTTPRoute across the cluster" })).toBeDefined();
   });
 
   it("does not present a list cut at the row cap as complete", async () => {

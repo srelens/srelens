@@ -61,7 +61,13 @@ const ATTACHED_COLUMNS: Column<AttachedRoute>[] = [
  */
 function GatewayRoutesSection({ object, context }: { object: K8sObject; context: string }) {
   const gateway = { namespace: str(object.metadata?.namespace), name: str(object.metadata?.name) };
-  const state = useSectionList<{ rows: AttachedRoute[]; failed: { kind: string; error: string }[]; truncated: boolean }>(true, [context, gateway.namespace, gateway.name], async () => {
+  const state = useSectionList<{
+    rows: AttachedRoute[];
+    failed: { kind: string; error: string }[];
+    /** Kinds read only in the gateway's namespace, with why the cluster-wide list failed. */
+    local: { kind: string; error: string }[];
+    truncated: boolean;
+  }>(true, [context, gateway.namespace, gateway.name], async () => {
     const discovered = await listCrds(context);
     if (discovered.error) return { error: discovered.error };
     const kinds = (discovered.crds ?? []).filter(
@@ -73,7 +79,9 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
       kinds.map(async (crd) => {
         const ref = { ...crd, printerColumns: PARENT_COLUMNS };
         const all = await listCustomResource(context, ref, null);
-        return all.error ? listCustomResource(context, ref, gateway.namespace) : all;
+        if (!all.error) return all;
+        // Read here only: routes attached from other namespaces are not seen.
+        return { ...(await listCustomResource(context, ref, gateway.namespace)), local: all.error };
       }),
     );
     const failed = kinds.flatMap((crd, i) => {
@@ -81,9 +89,14 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
       return error ? [{ kind: crd.kind, error }] : [];
     });
     if (kinds.length > 0 && failed.length === kinds.length) return { error: lists[0].error };
+    const local = kinds.flatMap((crd, i) => {
+      const list = lists[i];
+      return "local" in list && list.local && !list.error ? [{ kind: crd.kind, error: list.local }] : [];
+    });
     return {
       data: {
         failed,
+        local,
         // Filtered from a list cut at the row cap, the routes that attach
         // here may be the ones past it: say so rather than claim the count.
         truncated: lists.some((list) => list.truncated),
@@ -100,13 +113,16 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
   const rows = state.data?.rows ?? [];
   const failed = state.data?.failed ?? [];
   const truncated = state.data?.truncated ?? false;
+  const local = state.data?.local ?? [];
+  // Anything not read in full makes the count a lower bound, not an answer.
+  const partial = truncated || failed.length > 0 || local.length > 0;
   const open = (route: AttachedRoute) =>
     openTab(detailRoute(route.kind, route.namespace, route.name, { cluster: context, group: GATEWAY_API_GROUP }), {
       clusterName: context,
     });
 
   return (
-    <Section title={state.status === "ready" ? `Routes (${rows.length}${truncated ? "+" : ""})` : "Routes"} id="Routes">
+    <Section title={state.status === "ready" ? `Routes (${rows.length}${partial ? "+" : ""})` : "Routes"} id="Routes">
       {state.status === "loading" ? (
         <LoadingState compact label={`Loading routes attached to ${gateway.name}`} />
       ) : state.status === "error" ? (
@@ -119,6 +135,18 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
               title={`Could not list ${failed.map((f) => f.kind).join(", ")}`}
               error={failed[0].error}
               onRetry={state.retry}
+              retryLabel={`Retry listing ${failed.map((f) => f.kind).join(", ")}`}
+              className="mb-2"
+            />
+          )}
+          {local.length > 0 && (
+            <FailureAlert
+              tone="info"
+              title={`Listed ${local.map((l) => l.kind).join(", ")} only in ${gateway.namespace}`}
+              detail="Routes attached from other namespaces are not shown: the cluster-wide list failed."
+              error={local[0].error}
+              onRetry={state.retry}
+              retryLabel={`Retry listing ${local.map((l) => l.kind).join(", ")} across the cluster`}
               className="mb-2"
             />
           )}
@@ -132,7 +160,7 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
             columns={ATTACHED_COLUMNS}
             data={rows}
             getRowKey={(r) => `${r.kind}/${r.namespace}/${r.name}`}
-            emptyText={truncated ? "None among the routes read" : "No routes attach to this gateway"}
+            emptyText={partial ? "None among the routes read" : "No routes attach to this gateway"}
             onRowClick={open}
             onRowActivate={open}
           />
