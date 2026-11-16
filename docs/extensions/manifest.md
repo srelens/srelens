@@ -5,7 +5,8 @@ fields are normative and live in [specification.md](specification.md); this page
 the field reference. Complete examples: [argocd.json](../../examples/extensions/argocd.json)
 and [flux.json](../../examples/extensions/flux.json), and the reference providers
 [prometheus.json](../../examples/extensions/prometheus.json) and
-[loki.json](../../examples/extensions/loki.json).
+[loki.json](../../examples/extensions/loki.json). [Example apps](examples.md) lists the
+rest.
 
 ## JSON Schema
 
