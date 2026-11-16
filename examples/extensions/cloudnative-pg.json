@@ -1,0 +1,1901 @@
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "id": "org.srelens.cloudnative-pg",
+  "name": "CloudNativePG",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.5",
+  "kind": "declarative",
+  "permissions": [
+    "k8s.listCustomResource",
+    "k8s.listEvents",
+    "k8s.setFields",
+    "k8s.annotate",
+    "k8s.mergePatch"
+  ],
+  "capabilities": [
+    {
+      "name": "clusters",
+      "title": "List Clusters",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "clusters",
+        "kind": "Cluster",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Instances",
+            "jsonPath": ".status.instances",
+            "type": "integer"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.readyInstances",
+            "type": "integer"
+          },
+          {
+            "name": "Status",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "Primary",
+            "jsonPath": ".status.currentPrimary",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "backups",
+      "title": "List Backups",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "backups",
+        "kind": "Backup",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Cluster",
+            "jsonPath": ".spec.cluster.name",
+            "type": "string"
+          },
+          {
+            "name": "Method",
+            "jsonPath": ".spec.method",
+            "type": "string"
+          },
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "Error",
+            "jsonPath": ".status.error",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "scheduledbackups",
+      "title": "List Scheduled backups",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "scheduledbackups",
+        "kind": "ScheduledBackup",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Cluster",
+            "jsonPath": ".spec.cluster.name",
+            "type": "string"
+          },
+          {
+            "name": "Last Backup",
+            "jsonPath": ".status.lastScheduleTime",
+            "type": "date"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "objectstores",
+      "title": "List Object stores",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "barmancloud.cnpg.io",
+        "version": "v1",
+        "plural": "objectstores",
+        "kind": "ObjectStore",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Destination",
+            "jsonPath": ".spec.configuration.destinationPath",
+            "type": "string"
+          },
+          {
+            "name": "Retention",
+            "jsonPath": ".spec.retentionPolicy",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "poolers",
+      "title": "List Poolers",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "poolers",
+        "kind": "Pooler",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Cluster",
+            "jsonPath": ".spec.cluster.name",
+            "type": "string"
+          },
+          {
+            "name": "Type",
+            "jsonPath": ".spec.type",
+            "type": "string"
+          },
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "databases",
+      "title": "List Databases",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "databases",
+        "kind": "Database",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Cluster",
+            "jsonPath": ".spec.cluster.name",
+            "type": "string"
+          },
+          {
+            "name": "PG Name",
+            "jsonPath": ".spec.name",
+            "type": "string"
+          },
+          {
+            "name": "Applied",
+            "jsonPath": ".status.applied",
+            "type": "boolean"
+          },
+          {
+            "name": "Message",
+            "jsonPath": ".status.message",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "databaseroles",
+      "title": "List Roles",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "databaseroles",
+        "kind": "DatabaseRole",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Cluster",
+            "jsonPath": ".spec.cluster.name",
+            "type": "string"
+          },
+          {
+            "name": "PG Name",
+            "jsonPath": ".spec.name",
+            "type": "string"
+          },
+          {
+            "name": "Applied",
+            "jsonPath": ".status.applied",
+            "type": "boolean"
+          },
+          {
+            "name": "Message",
+            "jsonPath": ".status.message",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "publications",
+      "title": "List Publications",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "publications",
+        "kind": "Publication",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Cluster",
+            "jsonPath": ".spec.cluster.name",
+            "type": "string"
+          },
+          {
+            "name": "PG Name",
+            "jsonPath": ".spec.name",
+            "type": "string"
+          },
+          {
+            "name": "Applied",
+            "jsonPath": ".status.applied",
+            "type": "boolean"
+          },
+          {
+            "name": "Message",
+            "jsonPath": ".status.message",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "subscriptions",
+      "title": "List Subscriptions",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "subscriptions",
+        "kind": "Subscription",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Cluster",
+            "jsonPath": ".spec.cluster.name",
+            "type": "string"
+          },
+          {
+            "name": "PG Name",
+            "jsonPath": ".spec.name",
+            "type": "string"
+          },
+          {
+            "name": "Applied",
+            "jsonPath": ".status.applied",
+            "type": "boolean"
+          },
+          {
+            "name": "Message",
+            "jsonPath": ".status.message",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "failoverquorums",
+      "title": "List Failover quorums",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "failoverquorums",
+        "kind": "FailoverQuorum",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Method",
+            "jsonPath": ".status.method",
+            "type": "string"
+          },
+          {
+            "name": "Primary",
+            "jsonPath": ".status.primary",
+            "type": "string"
+          },
+          {
+            "name": "Standbys",
+            "jsonPath": ".status.standbyNumber",
+            "type": "integer"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "imagecatalogs",
+      "title": "List Image catalogs",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "imagecatalogs",
+        "kind": "ImageCatalog",
+        "namespaced": true
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "clusterimagecatalogs",
+      "title": "List Cluster image catalogs",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "postgresql.cnpg.io",
+        "version": "v1",
+        "plural": "clusterimagecatalogs",
+        "kind": "ClusterImageCatalog",
+        "namespaced": false
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "events",
+      "title": "List events",
+      "target": "k8s.listEvents",
+      "arguments": {},
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    }
+  ],
+  "contributions": {
+    "pages": [
+      {
+        "id": "overview",
+        "title": "Overview",
+        "capability": "clusters",
+        "dashboard": {
+          "pages": [
+            "clusters",
+            "backups",
+            "scheduledbackups",
+            "poolers",
+            "databases",
+            "databaseroles"
+          ],
+          "events": {
+            "capability": "events",
+            "apiGroups": [
+              "postgresql.cnpg.io",
+              "barmancloud.cnpg.io"
+            ]
+          }
+        }
+      },
+      {
+        "id": "clusters",
+        "title": "Clusters",
+        "capability": "clusters"
+      },
+      {
+        "id": "backups",
+        "title": "Backups",
+        "capability": "backups",
+        "group": "Backups"
+      },
+      {
+        "id": "scheduledbackups",
+        "title": "Scheduled backups",
+        "capability": "scheduledbackups",
+        "group": "Backups"
+      },
+      {
+        "id": "objectstores",
+        "title": "Object stores",
+        "capability": "objectstores",
+        "group": "Backups"
+      },
+      {
+        "id": "poolers",
+        "title": "Poolers",
+        "capability": "poolers"
+      },
+      {
+        "id": "databases",
+        "title": "Databases",
+        "capability": "databases",
+        "group": "Databases"
+      },
+      {
+        "id": "databaseroles",
+        "title": "Roles",
+        "capability": "databaseroles",
+        "group": "Databases"
+      },
+      {
+        "id": "publications",
+        "title": "Publications",
+        "capability": "publications",
+        "group": "Databases"
+      },
+      {
+        "id": "subscriptions",
+        "title": "Subscriptions",
+        "capability": "subscriptions",
+        "group": "Databases"
+      },
+      {
+        "id": "failoverquorums",
+        "title": "Failover quorums",
+        "capability": "failoverquorums"
+      },
+      {
+        "id": "imagecatalogs",
+        "title": "Image catalogs",
+        "capability": "imagecatalogs",
+        "group": "Images"
+      },
+      {
+        "id": "clusterimagecatalogs",
+        "title": "Cluster image catalogs",
+        "capability": "clusterimagecatalogs",
+        "group": "Images"
+      }
+    ],
+    "joins": [
+      {
+        "id": "objectstores-self",
+        "capability": "objectstores",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "failoverquorums-self",
+        "capability": "failoverquorums",
+        "match": {
+          "name": true
+        }
+      }
+    ],
+    "tableColumns": [
+      {
+        "id": "objectstores-destination",
+        "title": "Destination",
+        "forKinds": [
+          "barmancloud.cnpg.io/ObjectStore"
+        ],
+        "source": {
+          "join": "objectstores-self",
+          "jsonPath": ".spec.configuration.destinationPath"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "objectstores-retention",
+        "title": "Retention",
+        "forKinds": [
+          "barmancloud.cnpg.io/ObjectStore"
+        ],
+        "source": {
+          "join": "objectstores-self",
+          "jsonPath": ".spec.retentionPolicy"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "failoverquorums-method",
+        "title": "Method",
+        "forKinds": [
+          "postgresql.cnpg.io/FailoverQuorum"
+        ],
+        "source": {
+          "join": "failoverquorums-self",
+          "jsonPath": ".status.method"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "failoverquorums-primary",
+        "title": "Primary",
+        "forKinds": [
+          "postgresql.cnpg.io/FailoverQuorum"
+        ],
+        "source": {
+          "join": "failoverquorums-self",
+          "jsonPath": ".status.primary"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "failoverquorums-standbys",
+        "title": "Standbys",
+        "forKinds": [
+          "postgresql.cnpg.io/FailoverQuorum"
+        ],
+        "source": {
+          "join": "failoverquorums-self",
+          "jsonPath": ".status.standbyNumber"
+        },
+        "format": "number",
+        "sortable": true
+      }
+    ],
+    "detailPanels": [
+      {
+        "id": "cluster-summary",
+        "title": "PostgreSQL cluster",
+        "forKinds": [
+          "postgresql.cnpg.io/Cluster"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase"
+              },
+              {
+                "label": "Phase reason",
+                "jsonPath": ".status.phaseReason"
+              },
+              {
+                "label": "Instances",
+                "jsonPath": ".spec.instances",
+                "format": "number"
+              },
+              {
+                "label": "Ready instances",
+                "jsonPath": ".status.readyInstances",
+                "format": "number"
+              },
+              {
+                "label": "Primary",
+                "jsonPath": ".status.currentPrimary"
+              },
+              {
+                "label": "Target primary",
+                "jsonPath": ".status.targetPrimary"
+              },
+              {
+                "label": "Image",
+                "jsonPath": ".status.image"
+              },
+              {
+                "label": "Timeline",
+                "jsonPath": ".status.timelineID",
+                "format": "number"
+              },
+              {
+                "label": "Storage size",
+                "jsonPath": ".spec.storage.size"
+              },
+              {
+                "label": "Storage class",
+                "jsonPath": ".spec.storage.storageClass"
+              },
+              {
+                "label": "Read-write service",
+                "jsonPath": ".status.writeService"
+              },
+              {
+                "label": "Read service",
+                "jsonPath": ".status.readService"
+              },
+              {
+                "label": "Last successful backup",
+                "jsonPath": ".status.lastSuccessfulBackup",
+                "format": "date"
+              },
+              {
+                "label": "First recoverability point",
+                "jsonPath": ".status.firstRecoverabilityPoint",
+                "format": "date"
+              },
+              {
+                "label": "Maintenance in progress",
+                "jsonPath": ".spec.nodeMaintenanceWindow.inProgress"
+              }
+            ]
+          },
+          {
+            "type": "conditions",
+            "jsonPath": ".status.conditions"
+          }
+        ]
+      },
+      {
+        "id": "backup-summary",
+        "title": "Backup",
+        "forKinds": [
+          "postgresql.cnpg.io/Backup"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Cluster",
+                "jsonPath": ".spec.cluster.name"
+              },
+              {
+                "label": "Method",
+                "jsonPath": ".spec.method"
+              },
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Error",
+                "jsonPath": ".status.error"
+              },
+              {
+                "label": "Started",
+                "jsonPath": ".status.startedAt",
+                "format": "date"
+              },
+              {
+                "label": "Stopped",
+                "jsonPath": ".status.stoppedAt",
+                "format": "date"
+              },
+              {
+                "label": "Backup ID",
+                "jsonPath": ".status.backupId"
+              },
+              {
+                "label": "Destination",
+                "jsonPath": ".status.destinationPath"
+              },
+              {
+                "label": "Server name",
+                "jsonPath": ".status.serverName"
+              },
+              {
+                "label": "First WAL",
+                "jsonPath": ".status.beginWal"
+              },
+              {
+                "label": "Last WAL",
+                "jsonPath": ".status.endWal"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "scheduledbackup-summary",
+        "title": "Scheduled backup",
+        "forKinds": [
+          "postgresql.cnpg.io/ScheduledBackup"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Cluster",
+                "jsonPath": ".spec.cluster.name"
+              },
+              {
+                "label": "Schedule",
+                "jsonPath": ".spec.schedule"
+              },
+              {
+                "label": "Suspended",
+                "jsonPath": ".spec.suspend"
+              },
+              {
+                "label": "Method",
+                "jsonPath": ".spec.method"
+              },
+              {
+                "label": "Back up on creation",
+                "jsonPath": ".spec.immediate"
+              },
+              {
+                "label": "Last run",
+                "jsonPath": ".status.lastScheduleTime",
+                "format": "date"
+              },
+              {
+                "label": "Next run",
+                "jsonPath": ".status.nextScheduleTime",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "pooler-summary",
+        "title": "Pooler",
+        "forKinds": [
+          "postgresql.cnpg.io/Pooler"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Cluster",
+                "jsonPath": ".spec.cluster.name"
+              },
+              {
+                "label": "Type",
+                "jsonPath": ".spec.type"
+              },
+              {
+                "label": "Instances",
+                "jsonPath": ".spec.instances",
+                "format": "number"
+              },
+              {
+                "label": "Running instances",
+                "jsonPath": ".status.instances",
+                "format": "number"
+              },
+              {
+                "label": "Pool mode",
+                "jsonPath": ".spec.pgbouncer.poolMode"
+              },
+              {
+                "label": "Paused",
+                "jsonPath": ".spec.pgbouncer.paused"
+              },
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Phase reason",
+                "jsonPath": ".status.phaseReason"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "declared-object-summary",
+        "title": "Declared object",
+        "forKinds": [
+          "postgresql.cnpg.io/Database",
+          "postgresql.cnpg.io/DatabaseRole",
+          "postgresql.cnpg.io/Publication",
+          "postgresql.cnpg.io/Subscription"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Cluster",
+                "jsonPath": ".spec.cluster.name"
+              },
+              {
+                "label": "PostgreSQL name",
+                "jsonPath": ".spec.name"
+              },
+              {
+                "label": "Applied",
+                "jsonPath": ".status.applied"
+              },
+              {
+                "label": "Message",
+                "jsonPath": ".status.message"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "database-summary",
+        "title": "Database",
+        "forKinds": [
+          "postgresql.cnpg.io/Database"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Owner",
+                "jsonPath": ".spec.owner"
+              },
+              {
+                "label": "Encoding",
+                "jsonPath": ".spec.encoding"
+              },
+              {
+                "label": "Tablespace",
+                "jsonPath": ".spec.tablespace"
+              },
+              {
+                "label": "Ensure",
+                "jsonPath": ".spec.ensure"
+              },
+              {
+                "label": "When deleted",
+                "jsonPath": ".spec.databaseReclaimPolicy"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "objectstore-summary",
+        "title": "Object store",
+        "forKinds": [
+          "barmancloud.cnpg.io/ObjectStore"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Destination",
+                "jsonPath": ".spec.configuration.destinationPath"
+              },
+              {
+                "label": "Endpoint",
+                "jsonPath": ".spec.configuration.endpointURL"
+              },
+              {
+                "label": "Retention",
+                "jsonPath": ".spec.retentionPolicy"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "failoverquorum-summary",
+        "title": "Failover quorum",
+        "forKinds": [
+          "postgresql.cnpg.io/FailoverQuorum"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Method",
+                "jsonPath": ".status.method"
+              },
+              {
+                "label": "Primary",
+                "jsonPath": ".status.primary"
+              },
+              {
+                "label": "Standbys required",
+                "jsonPath": ".status.standbyNumber",
+                "format": "number"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "detailTabs": [],
+    "detailLinks": [],
+    "commands": [
+      {
+        "id": "open-overview",
+        "title": "Open overview",
+        "target": {
+          "page": "overview"
+        }
+      },
+      {
+        "id": "open-clusters",
+        "title": "Open clusters",
+        "target": {
+          "page": "clusters"
+        }
+      },
+      {
+        "id": "open-backups",
+        "title": "Open backups",
+        "target": {
+          "page": "backups"
+        }
+      },
+      {
+        "id": "open-scheduledbackups",
+        "title": "Open scheduled backups",
+        "target": {
+          "page": "scheduledbackups"
+        }
+      },
+      {
+        "id": "open-objectstores",
+        "title": "Open object stores",
+        "target": {
+          "page": "objectstores"
+        }
+      },
+      {
+        "id": "open-poolers",
+        "title": "Open poolers",
+        "target": {
+          "page": "poolers"
+        }
+      },
+      {
+        "id": "open-databases",
+        "title": "Open databases",
+        "target": {
+          "page": "databases"
+        }
+      },
+      {
+        "id": "open-databaseroles",
+        "title": "Open roles",
+        "target": {
+          "page": "databaseroles"
+        }
+      },
+      {
+        "id": "open-publications",
+        "title": "Open publications",
+        "target": {
+          "page": "publications"
+        }
+      },
+      {
+        "id": "open-subscriptions",
+        "title": "Open subscriptions",
+        "target": {
+          "page": "subscriptions"
+        }
+      },
+      {
+        "id": "open-failoverquorums",
+        "title": "Open failover quorums",
+        "target": {
+          "page": "failoverquorums"
+        }
+      },
+      {
+        "id": "open-imagecatalogs",
+        "title": "Open image catalogs",
+        "target": {
+          "page": "imagecatalogs"
+        }
+      },
+      {
+        "id": "open-clusterimagecatalogs",
+        "title": "Open cluster image catalogs",
+        "target": {
+          "page": "clusterimagecatalogs"
+        }
+      },
+      {
+        "id": "restart",
+        "title": "Restart PostgreSQL cluster",
+        "target": {
+          "action": "restart"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/Cluster"
+        ]
+      },
+      {
+        "id": "reload",
+        "title": "Reload configuration",
+        "target": {
+          "action": "reload"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/Cluster"
+        ]
+      },
+      {
+        "id": "hibernate",
+        "title": "Hibernate PostgreSQL cluster",
+        "target": {
+          "action": "hibernate"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/Cluster"
+        ]
+      },
+      {
+        "id": "wake",
+        "title": "Wake up PostgreSQL cluster",
+        "target": {
+          "action": "wake"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/Cluster"
+        ]
+      },
+      {
+        "id": "start-maintenance",
+        "title": "Start node maintenance",
+        "target": {
+          "action": "start-maintenance"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/Cluster"
+        ]
+      },
+      {
+        "id": "end-maintenance",
+        "title": "End node maintenance",
+        "target": {
+          "action": "end-maintenance"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/Cluster"
+        ]
+      },
+      {
+        "id": "suspend-backups",
+        "title": "Suspend scheduled backup",
+        "target": {
+          "action": "suspend-backups"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/ScheduledBackup"
+        ]
+      },
+      {
+        "id": "resume-backups",
+        "title": "Resume scheduled backup",
+        "target": {
+          "action": "resume-backups"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/ScheduledBackup"
+        ]
+      },
+      {
+        "id": "pause-pooler",
+        "title": "Pause pooler",
+        "target": {
+          "action": "pause-pooler"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/Pooler"
+        ]
+      },
+      {
+        "id": "resume-pooler",
+        "title": "Resume pooler",
+        "target": {
+          "action": "resume-pooler"
+        },
+        "forKinds": [
+          "postgresql.cnpg.io/Pooler"
+        ]
+      }
+    ],
+    "statusResolvers": [
+      {
+        "forKinds": [
+          "postgresql.cnpg.io/Cluster"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".metadata.annotations['cnpg.io/hibernation']",
+                "equals": "on"
+              }
+            ],
+            "status": "suspended",
+            "label": "Hibernated"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".metadata.annotations['cnpg.io/fencedInstances']",
+                "present": true
+              },
+              {
+                "jsonPath": ".metadata.annotations['cnpg.io/fencedInstances']",
+                "notEquals": "[]"
+              }
+            ],
+            "status": "warning",
+            "label": "Fenced"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "warning",
+            "label": "Not ready",
+            "reason": ".status.phase"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"ContinuousArchiving\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "warning",
+            "label": "WAL archiving failing",
+            "reason": ".status.conditions[?(@.type==\"ContinuousArchiving\")].message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "healthy",
+            "label": "Healthy",
+            "reason": ".status.phase"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "postgresql.cnpg.io/Backup"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "completed"
+              }
+            ],
+            "status": "healthy",
+            "label": "Completed"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "failed"
+              }
+            ],
+            "status": "error",
+            "label": "Failed",
+            "reason": ".status.error"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "walArchivingFailing"
+              }
+            ],
+            "status": "error",
+            "label": "WAL archiving failing",
+            "reason": ".status.error"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "running"
+              }
+            ],
+            "status": "progressing",
+            "label": "Running"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "started"
+              }
+            ],
+            "status": "progressing",
+            "label": "Started"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "finalizing"
+              }
+            ],
+            "status": "progressing",
+            "label": "Finalizing"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "pending"
+              }
+            ],
+            "status": "progressing",
+            "label": "Pending"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "postgresql.cnpg.io/ScheduledBackup"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".spec.suspend",
+                "equals": true
+              }
+            ],
+            "status": "suspended",
+            "label": "Suspended"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.lastScheduleTime",
+                "present": true
+              }
+            ],
+            "status": "healthy",
+            "label": "Active"
+          },
+          {
+            "when": [],
+            "status": "progressing",
+            "label": "Not yet run"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "postgresql.cnpg.io/Pooler"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "failed"
+              }
+            ],
+            "status": "error",
+            "label": "Failed",
+            "reason": ".status.phaseReason"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "inactive"
+              }
+            ],
+            "status": "warning",
+            "label": "Inactive",
+            "reason": ".status.phaseReason"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "paused"
+              }
+            ],
+            "status": "suspended",
+            "label": "Paused",
+            "reason": ".status.phaseReason"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "active"
+              }
+            ],
+            "status": "healthy",
+            "label": "Active"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "postgresql.cnpg.io/Database",
+          "postgresql.cnpg.io/DatabaseRole",
+          "postgresql.cnpg.io/Publication",
+          "postgresql.cnpg.io/Subscription"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.applied",
+                "equals": true
+              }
+            ],
+            "status": "healthy",
+            "label": "Applied"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.applied",
+                "equals": false
+              }
+            ],
+            "status": "error",
+            "label": "Not applied",
+            "reason": ".status.message"
+          },
+          {
+            "when": [],
+            "status": "progressing",
+            "label": "Pending"
+          }
+        ]
+      }
+    ],
+    "dashboardCards": [
+      {
+        "id": "clusters-by-status",
+        "title": "Clusters by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "clusters",
+        "target": {
+          "page": "clusters"
+        }
+      },
+      {
+        "id": "clusters-not-ready",
+        "title": "Clusters not ready",
+        "size": "s",
+        "type": "count",
+        "source": "clusters",
+        "predicate": {
+          "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+          "equals": "False"
+        },
+        "target": {
+          "page": "clusters"
+        }
+      },
+      {
+        "id": "clusters-archiving-failing",
+        "title": "Clusters failing to archive WAL",
+        "size": "s",
+        "type": "count",
+        "source": "clusters",
+        "predicate": {
+          "jsonPath": ".status.conditions[?(@.type==\"ContinuousArchiving\")].status",
+          "equals": "False"
+        },
+        "target": {
+          "page": "clusters"
+        }
+      },
+      {
+        "id": "backups-by-status",
+        "title": "Backups by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "backups",
+        "target": {
+          "page": "backups"
+        }
+      },
+      {
+        "id": "backups-failed",
+        "title": "Failed backups",
+        "size": "s",
+        "type": "count",
+        "source": "backups",
+        "predicate": {
+          "jsonPath": ".status.phase",
+          "equals": "failed"
+        },
+        "target": {
+          "page": "backups"
+        }
+      },
+      {
+        "id": "scheduledbackups-suspended",
+        "title": "Suspended scheduled backups",
+        "size": "s",
+        "type": "count",
+        "source": "scheduledbackups",
+        "predicate": {
+          "jsonPath": ".spec.suspend",
+          "equals": true
+        },
+        "target": {
+          "page": "scheduledbackups"
+        }
+      },
+      {
+        "id": "poolers-by-status",
+        "title": "Poolers by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "poolers",
+        "target": {
+          "page": "poolers"
+        }
+      },
+      {
+        "id": "poolers-failed",
+        "title": "Failed poolers",
+        "size": "s",
+        "type": "count",
+        "source": "poolers",
+        "predicate": {
+          "jsonPath": ".status.phase",
+          "equals": "failed"
+        },
+        "target": {
+          "page": "poolers"
+        }
+      },
+      {
+        "id": "databases-not-applied",
+        "title": "Databases not applied",
+        "size": "s",
+        "type": "count",
+        "source": "databases",
+        "predicate": {
+          "jsonPath": ".status.applied",
+          "equals": false
+        },
+        "target": {
+          "page": "databases"
+        }
+      }
+    ],
+    "resourceLinks": [
+      {
+        "id": "backups-cluster",
+        "from": "postgresql.cnpg.io/Backup",
+        "to": "postgresql.cnpg.io/Cluster",
+        "relation": "references",
+        "match": {
+          "path": ".spec.cluster"
+        }
+      },
+      {
+        "id": "scheduledbackups-cluster",
+        "from": "postgresql.cnpg.io/ScheduledBackup",
+        "to": "postgresql.cnpg.io/Cluster",
+        "relation": "references",
+        "match": {
+          "path": ".spec.cluster"
+        }
+      },
+      {
+        "id": "poolers-cluster",
+        "from": "postgresql.cnpg.io/Pooler",
+        "to": "postgresql.cnpg.io/Cluster",
+        "relation": "references",
+        "match": {
+          "path": ".spec.cluster"
+        }
+      },
+      {
+        "id": "databases-cluster",
+        "from": "postgresql.cnpg.io/Database",
+        "to": "postgresql.cnpg.io/Cluster",
+        "relation": "references",
+        "match": {
+          "path": ".spec.cluster"
+        }
+      },
+      {
+        "id": "databaseroles-cluster",
+        "from": "postgresql.cnpg.io/DatabaseRole",
+        "to": "postgresql.cnpg.io/Cluster",
+        "relation": "references",
+        "match": {
+          "path": ".spec.cluster"
+        }
+      },
+      {
+        "id": "publications-cluster",
+        "from": "postgresql.cnpg.io/Publication",
+        "to": "postgresql.cnpg.io/Cluster",
+        "relation": "references",
+        "match": {
+          "path": ".spec.cluster"
+        }
+      },
+      {
+        "id": "subscriptions-cluster",
+        "from": "postgresql.cnpg.io/Subscription",
+        "to": "postgresql.cnpg.io/Cluster",
+        "relation": "references",
+        "match": {
+          "path": ".spec.cluster"
+        }
+      },
+      {
+        "id": "pod-cluster",
+        "from": "/Pod",
+        "to": "postgresql.cnpg.io/Cluster",
+        "relation": "managedBy",
+        "match": {
+          "label": "cnpg.io/cluster"
+        }
+      },
+      {
+        "id": "failoverquorum-cluster",
+        "from": "postgresql.cnpg.io/FailoverQuorum",
+        "to": "postgresql.cnpg.io/Cluster",
+        "relation": "ownedBy",
+        "match": {
+          "ownerReference": true
+        }
+      },
+      {
+        "id": "cluster-write-service",
+        "from": "postgresql.cnpg.io/Cluster",
+        "to": "/Service",
+        "relation": "exposedBy",
+        "match": {
+          "path": ".status.writeService"
+        }
+      },
+      {
+        "id": "cluster-read-service",
+        "from": "postgresql.cnpg.io/Cluster",
+        "to": "/Service",
+        "relation": "exposedBy",
+        "match": {
+          "path": ".status.readService"
+        }
+      },
+      {
+        "id": "cluster-superuser-secret",
+        "from": "postgresql.cnpg.io/Cluster",
+        "to": "/Secret",
+        "relation": "references",
+        "match": {
+          "path": ".spec.superuserSecret"
+        }
+      },
+      {
+        "id": "cluster-image-catalog",
+        "from": "postgresql.cnpg.io/Cluster",
+        "to": "postgresql.cnpg.io/ImageCatalog",
+        "relation": "references",
+        "match": {
+          "path": ".spec.imageCatalogRef"
+        }
+      },
+      {
+        "id": "cluster-cluster-image-catalog",
+        "from": "postgresql.cnpg.io/Cluster",
+        "to": "postgresql.cnpg.io/ClusterImageCatalog",
+        "relation": "references",
+        "match": {
+          "path": ".spec.imageCatalogRef"
+        }
+      }
+    ]
+  },
+  "actions": [
+    {
+      "name": "restart",
+      "title": "Restart",
+      "target": "k8s.annotate",
+      "resource": "clusters",
+      "arguments": {
+        "key": "kubectl.kubernetes.io/restartedAt",
+        "value": "$now"
+      }
+    },
+    {
+      "name": "reload",
+      "title": "Reload configuration",
+      "target": "k8s.annotate",
+      "resource": "clusters",
+      "arguments": {
+        "key": "cnpg.io/reloadedAt",
+        "value": "$now"
+      }
+    },
+    {
+      "name": "hibernate",
+      "title": "Hibernate",
+      "target": "k8s.mergePatch",
+      "resource": "clusters",
+      "arguments": {
+        "patch": {
+          "metadata": {
+            "annotations": {
+              "cnpg.io/hibernation": "on"
+            }
+          }
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".metadata.annotations['cnpg.io/hibernation']",
+          "notEquals": "on",
+          "reason": "This cluster is already hibernated"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".metadata.annotations['cnpg.io/hibernation']",
+          "notEquals": "on",
+          "reason": "This cluster is already hibernated"
+        }
+      ]
+    },
+    {
+      "name": "wake",
+      "title": "Wake up",
+      "target": "k8s.mergePatch",
+      "resource": "clusters",
+      "arguments": {
+        "patch": {
+          "metadata": {
+            "annotations": {
+              "cnpg.io/hibernation": "off"
+            }
+          }
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".metadata.annotations['cnpg.io/hibernation']",
+          "equals": "on",
+          "reason": "This cluster is not hibernated"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".metadata.annotations['cnpg.io/hibernation']",
+          "equals": "on",
+          "reason": "This cluster is not hibernated"
+        }
+      ]
+    },
+    {
+      "name": "start-maintenance",
+      "title": "Start node maintenance",
+      "target": "k8s.setFields",
+      "resource": "clusters",
+      "arguments": {
+        "fields": {
+          "/spec/nodeMaintenanceWindow/inProgress": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.nodeMaintenanceWindow.inProgress",
+          "notEquals": true,
+          "reason": "A maintenance window is already in progress"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.nodeMaintenanceWindow.inProgress",
+          "notEquals": true,
+          "reason": "A maintenance window is already in progress"
+        }
+      ]
+    },
+    {
+      "name": "end-maintenance",
+      "title": "End node maintenance",
+      "target": "k8s.setFields",
+      "resource": "clusters",
+      "arguments": {
+        "fields": {
+          "/spec/nodeMaintenanceWindow/inProgress": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.nodeMaintenanceWindow.inProgress",
+          "equals": true,
+          "reason": "No maintenance window is in progress"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.nodeMaintenanceWindow.inProgress",
+          "equals": true,
+          "reason": "No maintenance window is in progress"
+        }
+      ]
+    },
+    {
+      "name": "suspend-backups",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "scheduledbackups",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This scheduled backup is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This scheduled backup is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "resume-backups",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "scheduledbackups",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This scheduled backup is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This scheduled backup is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "pause-pooler",
+      "title": "Pause",
+      "target": "k8s.mergePatch",
+      "resource": "poolers",
+      "arguments": {
+        "patch": {
+          "spec": {
+            "pgbouncer": {
+              "paused": true
+            }
+          }
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.pgbouncer.paused",
+          "notEquals": true,
+          "reason": "This pooler is already paused"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.pgbouncer.paused",
+          "notEquals": true,
+          "reason": "This pooler is already paused"
+        }
+      ]
+    },
+    {
+      "name": "resume-pooler",
+      "title": "Resume",
+      "target": "k8s.mergePatch",
+      "resource": "poolers",
+      "arguments": {
+        "patch": {
+          "spec": {
+            "pgbouncer": {
+              "paused": false
+            }
+          }
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.pgbouncer.paused",
+          "equals": true,
+          "reason": "This pooler is not paused"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.pgbouncer.paused",
+          "equals": true,
+          "reason": "This pooler is not paused"
+        }
+      ]
+    }
+  ]
+}

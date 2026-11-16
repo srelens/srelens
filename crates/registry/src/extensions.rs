@@ -10,6 +10,8 @@ mod catalog;
 mod columns;
 pub(crate) mod crd;
 #[cfg(test)]
+mod example_apps_tests;
+#[cfg(test)]
 mod executable_tests;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;

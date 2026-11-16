@@ -1,0 +1,1215 @@
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "id": "org.srelens.sveltos",
+  "name": "Sveltos",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.5",
+  "kind": "declarative",
+  "permissions": [
+    "k8s.listCustomResource",
+    "k8s.listEvents",
+    "k8s.setFields"
+  ],
+  "capabilities": [
+    {
+      "name": "sveltosclusters",
+      "title": "List Clusters",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "lib.projectsveltos.io",
+        "version": "v1beta1",
+        "plural": "sveltosclusters",
+        "kind": "SveltosCluster",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.ready",
+            "type": "boolean"
+          },
+          {
+            "name": "ConnectionStatus",
+            "jsonPath": ".status.connectionStatus",
+            "type": "string"
+          },
+          {
+            "name": "Version",
+            "jsonPath": ".status.version",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "clusterprofiles",
+      "title": "List Cluster profiles",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "config.projectsveltos.io",
+        "version": "v1beta1",
+        "plural": "clusterprofiles",
+        "kind": "ClusterProfile",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Sync Mode",
+            "jsonPath": ".spec.syncMode",
+            "type": "string"
+          },
+          {
+            "name": "Tier",
+            "jsonPath": ".spec.tier",
+            "type": "integer"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".status.reconciliationSuspended",
+            "type": "boolean"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "profiles",
+      "title": "List Profiles",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "config.projectsveltos.io",
+        "version": "v1beta1",
+        "plural": "profiles",
+        "kind": "Profile",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Sync Mode",
+            "jsonPath": ".spec.syncMode",
+            "type": "string"
+          },
+          {
+            "name": "Tier",
+            "jsonPath": ".spec.tier",
+            "type": "integer"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".status.reconciliationSuspended",
+            "type": "boolean"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "clustersummaries",
+      "title": "List Add-ons",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "config.projectsveltos.io",
+        "version": "v1beta1",
+        "plural": "clustersummaries",
+        "kind": "ClusterSummary",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Cluster",
+            "jsonPath": ".spec.clusterName",
+            "type": "string"
+          },
+          {
+            "name": "Cluster Namespace",
+            "jsonPath": ".spec.clusterNamespace",
+            "type": "string"
+          },
+          {
+            "name": "HelmCharts",
+            "jsonPath": ".status.featureSummaries[?(@.featureID==\"Helm\")].status",
+            "type": "string"
+          },
+          {
+            "name": "KustomizeRefs",
+            "jsonPath": ".status.featureSummaries[?(@.featureID==\"Kustomize\")].status",
+            "type": "string"
+          },
+          {
+            "name": "PolicyRefs",
+            "jsonPath": ".status.featureSummaries[?(@.featureID==\"Resources\")].status",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "clusterreports",
+      "title": "List Dry-run reports",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "config.projectsveltos.io",
+        "version": "v1beta1",
+        "plural": "clusterreports",
+        "kind": "ClusterReport",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Cluster",
+            "jsonPath": ".spec.clusterName",
+            "type": "string"
+          },
+          {
+            "name": "Cluster Namespace",
+            "jsonPath": ".spec.clusterNamespace",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "clusterconfigurations",
+      "title": "List Cluster configurations",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "config.projectsveltos.io",
+        "version": "v1beta1",
+        "plural": "clusterconfigurations",
+        "kind": "ClusterConfiguration",
+        "namespaced": true
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "eventsources",
+      "title": "List Event sources",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "lib.projectsveltos.io",
+        "version": "v1beta1",
+        "plural": "eventsources",
+        "kind": "EventSource",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Collect Resources",
+            "jsonPath": ".spec.collectResources",
+            "type": "boolean"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "eventtriggers",
+      "title": "List Event triggers",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "lib.projectsveltos.io",
+        "version": "v1beta1",
+        "plural": "eventtriggers",
+        "kind": "EventTrigger",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Event Source",
+            "jsonPath": ".spec.eventSourceName",
+            "type": "string"
+          },
+          {
+            "name": "One Per Event",
+            "jsonPath": ".spec.oneForEvent",
+            "type": "boolean"
+          },
+          {
+            "name": "Sync Mode",
+            "jsonPath": ".spec.syncMode",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "classifiers",
+      "title": "List Classifiers",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "lib.projectsveltos.io",
+        "version": "v1beta1",
+        "plural": "classifiers",
+        "kind": "Classifier",
+        "namespaced": false
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "events",
+      "title": "List events",
+      "target": "k8s.listEvents",
+      "arguments": {},
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    }
+  ],
+  "contributions": {
+    "pages": [
+      {
+        "id": "overview",
+        "title": "Overview",
+        "capability": "sveltosclusters",
+        "dashboard": {
+          "pages": [
+            "sveltosclusters",
+            "clusterprofiles",
+            "profiles",
+            "clustersummaries"
+          ],
+          "events": {
+            "capability": "events",
+            "apiGroups": [
+              "lib.projectsveltos.io",
+              "config.projectsveltos.io"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sveltosclusters",
+        "title": "Clusters",
+        "capability": "sveltosclusters"
+      },
+      {
+        "id": "clusterprofiles",
+        "title": "Cluster profiles",
+        "capability": "clusterprofiles",
+        "group": "Profiles"
+      },
+      {
+        "id": "profiles",
+        "title": "Profiles",
+        "capability": "profiles",
+        "group": "Profiles"
+      },
+      {
+        "id": "clustersummaries",
+        "title": "Add-ons",
+        "capability": "clustersummaries",
+        "group": "Deployments"
+      },
+      {
+        "id": "clusterreports",
+        "title": "Dry-run reports",
+        "capability": "clusterreports",
+        "group": "Deployments"
+      },
+      {
+        "id": "clusterconfigurations",
+        "title": "Cluster configurations",
+        "capability": "clusterconfigurations",
+        "group": "Deployments"
+      },
+      {
+        "id": "eventsources",
+        "title": "Event sources",
+        "capability": "eventsources",
+        "group": "Events"
+      },
+      {
+        "id": "eventtriggers",
+        "title": "Event triggers",
+        "capability": "eventtriggers",
+        "group": "Events"
+      },
+      {
+        "id": "classifiers",
+        "title": "Classifiers",
+        "capability": "classifiers"
+      }
+    ],
+    "joins": [
+      {
+        "id": "clusterprofiles-self",
+        "capability": "clusterprofiles",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "profiles-self",
+        "capability": "profiles",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "clustersummaries-self",
+        "capability": "clustersummaries",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "clusterreports-self",
+        "capability": "clusterreports",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "eventsources-self",
+        "capability": "eventsources",
+        "match": {
+          "name": true
+        }
+      },
+      {
+        "id": "eventtriggers-self",
+        "capability": "eventtriggers",
+        "match": {
+          "name": true
+        }
+      }
+    ],
+    "tableColumns": [
+      {
+        "id": "clusterprofiles-sync-mode",
+        "title": "Sync Mode",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterProfile"
+        ],
+        "source": {
+          "join": "clusterprofiles-self",
+          "jsonPath": ".spec.syncMode"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clusterprofiles-tier",
+        "title": "Tier",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterProfile"
+        ],
+        "source": {
+          "join": "clusterprofiles-self",
+          "jsonPath": ".spec.tier"
+        },
+        "format": "number",
+        "sortable": true
+      },
+      {
+        "id": "clusterprofiles-suspended",
+        "title": "Suspended",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterProfile"
+        ],
+        "source": {
+          "join": "clusterprofiles-self",
+          "jsonPath": ".status.reconciliationSuspended"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "profiles-sync-mode",
+        "title": "Sync Mode",
+        "forKinds": [
+          "config.projectsveltos.io/Profile"
+        ],
+        "source": {
+          "join": "profiles-self",
+          "jsonPath": ".spec.syncMode"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "profiles-tier",
+        "title": "Tier",
+        "forKinds": [
+          "config.projectsveltos.io/Profile"
+        ],
+        "source": {
+          "join": "profiles-self",
+          "jsonPath": ".spec.tier"
+        },
+        "format": "number",
+        "sortable": true
+      },
+      {
+        "id": "profiles-suspended",
+        "title": "Suspended",
+        "forKinds": [
+          "config.projectsveltos.io/Profile"
+        ],
+        "source": {
+          "join": "profiles-self",
+          "jsonPath": ".status.reconciliationSuspended"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clustersummaries-cluster",
+        "title": "Cluster",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterSummary"
+        ],
+        "source": {
+          "join": "clustersummaries-self",
+          "jsonPath": ".spec.clusterName"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clustersummaries-cluster-namespace",
+        "title": "Cluster Namespace",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterSummary"
+        ],
+        "source": {
+          "join": "clustersummaries-self",
+          "jsonPath": ".spec.clusterNamespace"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clusterreports-cluster",
+        "title": "Cluster",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterReport"
+        ],
+        "source": {
+          "join": "clusterreports-self",
+          "jsonPath": ".spec.clusterName"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "clusterreports-cluster-namespace",
+        "title": "Cluster Namespace",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterReport"
+        ],
+        "source": {
+          "join": "clusterreports-self",
+          "jsonPath": ".spec.clusterNamespace"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "eventsources-collect-resources",
+        "title": "Collect Resources",
+        "forKinds": [
+          "lib.projectsveltos.io/EventSource"
+        ],
+        "source": {
+          "join": "eventsources-self",
+          "jsonPath": ".spec.collectResources"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "eventtriggers-event-source",
+        "title": "Event Source",
+        "forKinds": [
+          "lib.projectsveltos.io/EventTrigger"
+        ],
+        "source": {
+          "join": "eventtriggers-self",
+          "jsonPath": ".spec.eventSourceName"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "eventtriggers-one-per-event",
+        "title": "One Per Event",
+        "forKinds": [
+          "lib.projectsveltos.io/EventTrigger"
+        ],
+        "source": {
+          "join": "eventtriggers-self",
+          "jsonPath": ".spec.oneForEvent"
+        },
+        "format": "text",
+        "sortable": true
+      },
+      {
+        "id": "eventtriggers-sync-mode",
+        "title": "Sync Mode",
+        "forKinds": [
+          "lib.projectsveltos.io/EventTrigger"
+        ],
+        "source": {
+          "join": "eventtriggers-self",
+          "jsonPath": ".spec.syncMode"
+        },
+        "format": "text",
+        "sortable": true
+      }
+    ],
+    "detailPanels": [
+      {
+        "id": "sveltoscluster-summary",
+        "title": "Managed cluster",
+        "forKinds": [
+          "lib.projectsveltos.io/SveltosCluster"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Ready",
+                "jsonPath": ".status.ready"
+              },
+              {
+                "label": "Connection",
+                "jsonPath": ".status.connectionStatus"
+              },
+              {
+                "label": "Connection failures",
+                "jsonPath": ".status.connectionFailures",
+                "format": "number"
+              },
+              {
+                "label": "Failure",
+                "jsonPath": ".status.failureMessage"
+              },
+              {
+                "label": "Kubernetes version",
+                "jsonPath": ".status.version"
+              },
+              {
+                "label": "Paused",
+                "jsonPath": ".spec.paused"
+              },
+              {
+                "label": "Pull mode",
+                "jsonPath": ".spec.pullMode"
+              },
+              {
+                "label": "Kubeconfig secret",
+                "jsonPath": ".spec.kubeconfigName"
+              },
+              {
+                "label": "Agent last reported",
+                "jsonPath": ".status.agentLastReportTime",
+                "format": "date"
+              },
+              {
+                "label": "Next pause",
+                "jsonPath": ".status.nextPause",
+                "format": "date"
+              },
+              {
+                "label": "Next unpause",
+                "jsonPath": ".status.nextUnpause",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "profile-summary",
+        "title": "Profile",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterProfile",
+          "config.projectsveltos.io/Profile"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Sync mode",
+                "jsonPath": ".spec.syncMode"
+              },
+              {
+                "label": "Tier",
+                "jsonPath": ".spec.tier",
+                "format": "number"
+              },
+              {
+                "label": "Stop matching behaviour",
+                "jsonPath": ".spec.stopMatchingBehavior"
+              },
+              {
+                "label": "Continue on error",
+                "jsonPath": ".spec.continueOnError"
+              },
+              {
+                "label": "Continue on conflict",
+                "jsonPath": ".spec.continueOnConflict"
+              },
+              {
+                "label": "Suspended",
+                "jsonPath": ".status.reconciliationSuspended"
+              },
+              {
+                "label": "Suspension reason",
+                "jsonPath": ".status.suspensionReason"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "clustersummary-summary",
+        "title": "Add-ons",
+        "forKinds": [
+          "config.projectsveltos.io/ClusterSummary"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Cluster",
+                "jsonPath": ".spec.clusterName"
+              },
+              {
+                "label": "Cluster namespace",
+                "jsonPath": ".spec.clusterNamespace"
+              },
+              {
+                "label": "Cluster type",
+                "jsonPath": ".spec.clusterType"
+              },
+              {
+                "label": "Helm charts",
+                "jsonPath": ".status.featureSummaries[?(@.featureID==\"Helm\")].status",
+                "format": "status"
+              },
+              {
+                "label": "Kustomize",
+                "jsonPath": ".status.featureSummaries[?(@.featureID==\"Kustomize\")].status",
+                "format": "status"
+              },
+              {
+                "label": "Resources",
+                "jsonPath": ".status.featureSummaries[?(@.featureID==\"Resources\")].status",
+                "format": "status"
+              },
+              {
+                "label": "Failure",
+                "jsonPath": ".status.failureMessage"
+              },
+              {
+                "label": "Next reconcile",
+                "jsonPath": ".status.nextReconcileTime",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "eventtrigger-summary",
+        "title": "Event trigger",
+        "forKinds": [
+          "lib.projectsveltos.io/EventTrigger"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Event source",
+                "jsonPath": ".spec.eventSourceName"
+              },
+              {
+                "label": "One profile per event",
+                "jsonPath": ".spec.oneForEvent"
+              },
+              {
+                "label": "Sync mode",
+                "jsonPath": ".spec.syncMode"
+              },
+              {
+                "label": "Tier",
+                "jsonPath": ".spec.tier",
+                "format": "number"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "detailTabs": [],
+    "detailLinks": [],
+    "commands": [
+      {
+        "id": "open-overview",
+        "title": "Open overview",
+        "target": {
+          "page": "overview"
+        }
+      },
+      {
+        "id": "open-sveltosclusters",
+        "title": "Open clusters",
+        "target": {
+          "page": "sveltosclusters"
+        }
+      },
+      {
+        "id": "open-clusterprofiles",
+        "title": "Open cluster profiles",
+        "target": {
+          "page": "clusterprofiles"
+        }
+      },
+      {
+        "id": "open-profiles",
+        "title": "Open profiles",
+        "target": {
+          "page": "profiles"
+        }
+      },
+      {
+        "id": "open-clustersummaries",
+        "title": "Open add-ons",
+        "target": {
+          "page": "clustersummaries"
+        }
+      },
+      {
+        "id": "open-clusterreports",
+        "title": "Open dry-run reports",
+        "target": {
+          "page": "clusterreports"
+        }
+      },
+      {
+        "id": "open-clusterconfigurations",
+        "title": "Open cluster configurations",
+        "target": {
+          "page": "clusterconfigurations"
+        }
+      },
+      {
+        "id": "open-eventsources",
+        "title": "Open event sources",
+        "target": {
+          "page": "eventsources"
+        }
+      },
+      {
+        "id": "open-eventtriggers",
+        "title": "Open event triggers",
+        "target": {
+          "page": "eventtriggers"
+        }
+      },
+      {
+        "id": "open-classifiers",
+        "title": "Open classifiers",
+        "target": {
+          "page": "classifiers"
+        }
+      },
+      {
+        "id": "pause-cluster",
+        "title": "Pause managed cluster",
+        "target": {
+          "action": "pause-cluster"
+        },
+        "forKinds": [
+          "lib.projectsveltos.io/SveltosCluster"
+        ]
+      },
+      {
+        "id": "resume-cluster",
+        "title": "Resume managed cluster",
+        "target": {
+          "action": "resume-cluster"
+        },
+        "forKinds": [
+          "lib.projectsveltos.io/SveltosCluster"
+        ]
+      }
+    ],
+    "statusResolvers": [
+      {
+        "forKinds": [
+          "lib.projectsveltos.io/SveltosCluster"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".spec.paused",
+                "equals": true
+              }
+            ],
+            "status": "suspended",
+            "label": "Paused"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.connectionStatus",
+                "equals": "Down"
+              }
+            ],
+            "status": "error",
+            "label": "Unreachable",
+            "reason": ".status.failureMessage"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.ready",
+                "equals": true
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.ready",
+                "equals": false
+              }
+            ],
+            "status": "error",
+            "label": "Not ready",
+            "reason": ".status.failureMessage"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "config.projectsveltos.io/ClusterProfile",
+          "config.projectsveltos.io/Profile"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.reconciliationSuspended",
+                "equals": true
+              }
+            ],
+            "status": "suspended",
+            "label": "Suspended",
+            "reason": ".status.suspensionReason"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.failedClusters[0]",
+                "present": true
+              }
+            ],
+            "status": "error",
+            "label": "Failing on a cluster"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.updatingClusters.clusters[0]",
+                "present": true
+              }
+            ],
+            "status": "progressing",
+            "label": "Updating clusters"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.matchingClusters[0]",
+                "present": true
+              }
+            ],
+            "status": "healthy",
+            "label": "Matching clusters"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "No matching clusters"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "config.projectsveltos.io/ClusterSummary"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.reconciliationSuspended",
+                "equals": true
+              }
+            ],
+            "status": "suspended",
+            "label": "Suspended",
+            "reason": ".status.suspensionReason"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.featureSummaries[?(@.status==\"Failed\")].featureID",
+                "present": true
+              }
+            ],
+            "status": "error",
+            "label": "Failed",
+            "reason": ".status.featureSummaries[?(@.status==\"Failed\")].failureMessage"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.featureSummaries[?(@.status==\"FailedNonRetriable\")].featureID",
+                "present": true
+              }
+            ],
+            "status": "error",
+            "label": "Failed",
+            "reason": ".status.featureSummaries[?(@.status==\"FailedNonRetriable\")].failureMessage"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.featureSummaries[?(@.status==\"Provisioning\")].featureID",
+                "present": true
+              }
+            ],
+            "status": "progressing",
+            "label": "Provisioning"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.featureSummaries[?(@.status==\"Removing\")].featureID",
+                "present": true
+              }
+            ],
+            "status": "progressing",
+            "label": "Removing"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.featureSummaries[?(@.status==\"Provisioned\")].featureID",
+                "present": true
+              }
+            ],
+            "status": "healthy",
+            "label": "Provisioned"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      }
+    ],
+    "dashboardCards": [
+      {
+        "id": "sveltosclusters-by-status",
+        "title": "Clusters by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "sveltosclusters",
+        "target": {
+          "page": "sveltosclusters"
+        }
+      },
+      {
+        "id": "sveltosclusters-not-ready",
+        "title": "Clusters not ready",
+        "size": "s",
+        "type": "count",
+        "source": "sveltosclusters",
+        "predicate": {
+          "jsonPath": ".status.ready",
+          "equals": false
+        },
+        "target": {
+          "page": "sveltosclusters"
+        }
+      },
+      {
+        "id": "sveltosclusters-paused",
+        "title": "Paused clusters",
+        "size": "s",
+        "type": "count",
+        "source": "sveltosclusters",
+        "predicate": {
+          "jsonPath": ".spec.paused",
+          "equals": true
+        },
+        "target": {
+          "page": "sveltosclusters"
+        }
+      },
+      {
+        "id": "clustersummaries-by-status",
+        "title": "Add-on deployments by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "clustersummaries",
+        "target": {
+          "page": "clustersummaries"
+        }
+      },
+      {
+        "id": "clusterprofiles-by-status",
+        "title": "Cluster profiles by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "clusterprofiles",
+        "target": {
+          "page": "clusterprofiles"
+        }
+      },
+      {
+        "id": "profiles-by-status",
+        "title": "Profiles by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "profiles",
+        "target": {
+          "page": "profiles"
+        }
+      }
+    ],
+    "resourceLinks": [
+      {
+        "id": "clustersummary-clusterprofile",
+        "from": "config.projectsveltos.io/ClusterSummary",
+        "to": "config.projectsveltos.io/ClusterProfile",
+        "relation": "ownedBy",
+        "match": {
+          "ownerReference": true
+        }
+      },
+      {
+        "id": "clustersummary-profile",
+        "from": "config.projectsveltos.io/ClusterSummary",
+        "to": "config.projectsveltos.io/Profile",
+        "relation": "ownedBy",
+        "match": {
+          "ownerReference": true
+        }
+      },
+      {
+        "id": "eventtrigger-eventsource",
+        "from": "lib.projectsveltos.io/EventTrigger",
+        "to": "lib.projectsveltos.io/EventSource",
+        "relation": "references",
+        "match": {
+          "path": ".spec.eventSourceName"
+        }
+      },
+      {
+        "id": "sveltoscluster-kubeconfig",
+        "from": "lib.projectsveltos.io/SveltosCluster",
+        "to": "/Secret",
+        "relation": "references",
+        "match": {
+          "path": ".spec.kubeconfigName"
+        }
+      }
+    ]
+  },
+  "actions": [
+    {
+      "name": "pause-cluster",
+      "title": "Pause",
+      "target": "k8s.setFields",
+      "resource": "sveltosclusters",
+      "arguments": {
+        "fields": {
+          "/spec/paused": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.paused",
+          "notEquals": true,
+          "reason": "This cluster is already paused"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.paused",
+          "notEquals": true,
+          "reason": "This cluster is already paused"
+        }
+      ]
+    },
+    {
+      "name": "resume-cluster",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "sveltosclusters",
+      "arguments": {
+        "fields": {
+          "/spec/paused": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.paused",
+          "equals": true,
+          "reason": "This cluster is not paused"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.paused",
+          "equals": true,
+          "reason": "This cluster is not paused"
+        }
+      ]
+    }
+  ]
+}
