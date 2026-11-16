@@ -3160,9 +3160,16 @@ async fn opening_a_resource_tree_without_a_cluster_reports_the_error_through_the
     assert!(matches!(&app.active_view, ActiveView::Tree(t) if t.is_loading));
 
     let ev = wait_for(&mut rx, |e| matches!(e, AppEvent::LineageResult { .. })).await;
-    let AppEvent::LineageResult { kind, name, result } = ev else {
+    let AppEvent::LineageResult {
+        context,
+        kind,
+        name,
+        result,
+    } = ev
+    else {
         unreachable!()
     };
+    assert_eq!(context, app.active_context, "the reply names its cluster");
     assert_eq!((kind.as_str(), name.as_str()), ("Deployment", "web"));
     let err = result.expect_err("no cluster behind the test");
     assert!(err.starts_with("Failed to connect to cluster: "), "{err}");
@@ -3208,9 +3215,15 @@ async fn opening_the_node_inspector_seeds_history_and_reports_the_connection_err
         matches!(e, AppEvent::NodeInspectorResult { .. })
     })
     .await;
-    let AppEvent::NodeInspectorResult { node_name, result } = ev else {
+    let AppEvent::NodeInspectorResult {
+        context,
+        node_name,
+        result,
+    } = ev
+    else {
         unreachable!()
     };
+    assert_eq!(context, app.active_context, "the reply names its cluster");
     assert_eq!(node_name, "gpu-1");
     let err = result.expect_err("no cluster behind the test");
 

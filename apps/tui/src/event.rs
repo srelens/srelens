@@ -32,11 +32,16 @@ pub enum AppEvent {
         result: Result<String, String>,
     },
     LineageResult {
+        /// The cluster it was read from, so it reaches the pane that asked
+        /// even after `:mux` moved focus.
+        context: String,
         kind: String,
         name: String,
         result: Result<srelens_kube::lineage::LineageNode, String>,
     },
     NodeInspectorResult {
+        /// The cluster it was read from, as for `LineageResult`.
+        context: String,
         node_name: String,
         result: Result<srelens_kube::node_inspector::NodeInspectorDetails, String>,
     },
