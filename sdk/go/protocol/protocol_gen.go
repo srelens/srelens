@@ -8,7 +8,7 @@ import (
 )
 
 // APIVersion is the sidecar API version this file was generated for.
-const APIVersion = "0.2.0"
+const APIVersion = "0.3.0"
 
 // MaxMessageBytes is the longest line either side may write, not counting its line ending.
 const MaxMessageBytes = 4194304
@@ -34,6 +34,7 @@ const (
 	MethodHealth                  = "health"
 	MethodHostAction              = "host/action"
 	MethodHostBindingAvailability = "host/bindingAvailability"
+	MethodHostConnect             = "host/connect"
 	MethodHostRead                = "host/read"
 	MethodHostResource            = "host/resource"
 	MethodHostRunJob              = "host/runJob"
@@ -44,6 +45,9 @@ const (
 	MethodStreamData              = "stream/data"
 	MethodStreamError             = "stream/error"
 	MethodStreamOpen              = "stream/open"
+	MethodTunnelClose             = "tunnel/close"
+	MethodTunnelCredit            = "tunnel/credit"
+	MethodTunnelData              = "tunnel/data"
 )
 
 // MethodDirections is who sends each method: "hostToSidecar", "sidecarToHost" or "both".
@@ -54,6 +58,7 @@ var MethodDirections = map[string]string{
 	"health":                   "hostToSidecar",
 	"host/action":              "sidecarToHost",
 	"host/bindingAvailability": "sidecarToHost",
+	"host/connect":             "sidecarToHost",
 	"host/read":                "sidecarToHost",
 	"host/resource":            "sidecarToHost",
 	"host/runJob":              "sidecarToHost",
@@ -64,6 +69,9 @@ var MethodDirections = map[string]string{
 	"stream/data":              "sidecarToHost",
 	"stream/error":             "sidecarToHost",
 	"stream/open":              "hostToSidecar",
+	"tunnel/close":             "both",
+	"tunnel/credit":            "both",
+	"tunnel/data":              "both",
 }
 
 // CallContext: The cluster and namespace one call names. Every call from a sidecar carries one: srelens has no current cluster to assume.
@@ -97,6 +105,21 @@ type HostActionParams struct {
 type HostBindingAvailabilityParams struct {
 	Bindings []string    `json:"bindings"`
 	Context  CallContext `json:"context"`
+}
+
+// HostConnectParams: Open a TCP connection to a pod's port as tunnel `tunnel`, under the declared `capability` (API 0.3). Names exactly one of `pod` and `service`; `name` picks one of the capability's declared ports.
+type HostConnectParams struct {
+	Capability string     `json:"capability"`
+	Context    JobContext `json:"context"`
+	Name       *string    `json:"name,omitempty"`
+	Pod        *string    `json:"pod,omitempty"`
+	Service    *string    `json:"service,omitempty"`
+	Tunnel     uint64     `json:"tunnel"`
+}
+
+// HostConnectResult: The answer to `host/connect`: the pod the tunnel reaches (a service's resolves to one of its ready pods).
+type HostConnectResult struct {
+	Pod string `json:"pod"`
 }
 
 // HostReadParams: `host/read`'s params: read one of the app's declared readers, or one of its `network.http` requests.
@@ -205,6 +228,24 @@ type StreamOpenParams struct {
 	Stream uint64 `json:"stream"`
 }
 
+// TunnelCloseParams: `tunnel/close`'s params: tunnel `tunnel` ended, and why if it failed.
+type TunnelCloseParams struct {
+	Message *string `json:"message,omitempty"`
+	Tunnel  uint64  `json:"tunnel"`
+}
+
+// TunnelCreditParams: `tunnel/credit`'s params: the sender of this frame may send `bytes` more on tunnel `tunnel`.
+type TunnelCreditParams struct {
+	Bytes  uint64 `json:"bytes"`
+	Tunnel uint64 `json:"tunnel"`
+}
+
+// TunnelDataParams: `tunnel/data`'s params: bytes for tunnel `tunnel`, in base64.
+type TunnelDataParams struct {
+	Data   string `json:"data"`
+	Tunnel uint64 `json:"tunnel"`
+}
+
 // UnsupportedAPIVersion: The `data` of error -32001, the answer to `initialize` from a sidecar that speaks none of the offered versions.
 type UnsupportedAPIVersion struct {
 	// The versions it does speak.
@@ -221,6 +262,10 @@ var fieldShapes = map[string]fieldShape{
 	"HostActionParams.resourceVersion":             {pattern: regexp.MustCompile("^[!-~]{1,128}$"), maxLength: 128, not: []string(nil)},
 	"HostActionParams.uid":                         {pattern: regexp.MustCompile("^[!-~]{1,128}$"), maxLength: 128, not: []string(nil)},
 	"HostBindingAvailabilityParams.bindings.items": {pattern: regexp.MustCompile("^[A-Za-z0-9-]{1,64}$"), maxLength: 64, not: []string(nil)},
+	"HostConnectParams.capability":                 {pattern: regexp.MustCompile("^[A-Za-z0-9-]{1,64}$"), maxLength: 64, not: []string(nil)},
+	"HostConnectParams.name":                       {pattern: regexp.MustCompile("^[A-Za-z0-9.-]{1,253}$"), maxLength: 253, not: []string{".", ".."}},
+	"HostConnectParams.pod":                        {pattern: regexp.MustCompile("^[A-Za-z0-9.-]{1,253}$"), maxLength: 253, not: []string{".", ".."}},
+	"HostConnectParams.service":                    {pattern: regexp.MustCompile("^[A-Za-z0-9.-]{1,253}$"), maxLength: 253, not: []string{".", ".."}},
 	"HostReadParams.capability":                    {pattern: regexp.MustCompile("^[A-Za-z0-9-]{1,64}$"), maxLength: 64, not: []string(nil)},
 	"HostReadParams.cursor":                        {pattern: regexp.MustCompile("^[!-~]*$"), maxLength: 8192, not: []string(nil)},
 	"HostResourceParams.capability":                {pattern: regexp.MustCompile("^[A-Za-z0-9-]{1,64}$"), maxLength: 64, not: []string(nil)},

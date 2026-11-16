@@ -173,7 +173,7 @@ func TestAPatternedFieldGetsItsShape(t *testing.T) {
 }
 
 func TestGenerationIsDeterministic(t *testing.T) {
-	schema, err := os.ReadFile("../../../../schemas/sidecar-protocol.v0.2.json")
+	schema, err := os.ReadFile("../../../../schemas/sidecar-protocol.v0.3.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestGenerationIsDeterministic(t *testing.T) {
 // The committed protocol_gen.go is what the committed schema generates. CI
 // also regenerates it and fails on any difference; this says so locally.
 func TestTheCommittedFileIsCurrent(t *testing.T) {
-	schema, err := os.ReadFile("../../../../schemas/sidecar-protocol.v0.2.json")
+	schema, err := os.ReadFile("../../../../schemas/sidecar-protocol.v0.3.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,5 +211,45 @@ func TestTheCommittedFileIsCurrent(t *testing.T) {
 	got = bytes.ReplaceAll(got, []byte("\r\n"), []byte("\n"))
 	if !bytes.Equal(got, want) {
 		t.Fatal("protocol/protocol_gen.go is stale: run go generate ./... in sdk/go")
+	}
+}
+
+// A oneOf of bare "required" alternatives only says which fields a value
+// names; the fields it constrains are still generated, and the rule is left to
+// the code that builds the value.
+func TestADefinitionOneOfRequiredAlternativesGenerates(t *testing.T) {
+	code, err := generate(minimal(`"Pick": {"type":"object","additionalProperties":false,"required":["id"],"oneOf":[{"required":["a"]},{"required":["b"]}],"properties":{"id":{"type":"integer","minimum":1},"a":{"type":"string"},"b":{"type":"string"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(code, []byte("type Pick struct")) {
+		t.Fatalf("no Pick: %s", code)
+	}
+}
+
+func TestADefinitionOneOfThatIsNotRequiredAlternativesIsRefused(t *testing.T) {
+	_, err := generate(minimal(`"Pick": {"type":"object","oneOf":[{"type":"string"}],"properties":{}}`))
+	if err == nil || !strings.Contains(err.Error(), "oneOf") {
+		t.Fatalf("expected a refusal naming oneOf, got %v", err)
+	}
+}
+
+func TestAnIntegerMaximumGeneratesAnUnsignedField(t *testing.T) {
+	code, err := generate(minimal(`"Credit": {"type":"object","additionalProperties":false,"required":["bytes"],"properties":{"bytes":{"type":"integer","minimum":1,"maximum":262144}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(code, []byte("Bytes uint64")) {
+		t.Fatalf("no uint64 Bytes: %s", code)
+	}
+}
+
+func TestAPatternWithoutAMaxLengthIsNoFieldShape(t *testing.T) {
+	code, err := generate(minimal(`"Blob": {"type":"object","additionalProperties":false,"required":["data"],"properties":{"data":{"type":"string","pattern":"^[A-Za-z0-9+/=]*$"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(code, []byte(`"Blob.data"`)) {
+		t.Fatalf("an unbounded pattern became a shape: %s", code)
 	}
 }

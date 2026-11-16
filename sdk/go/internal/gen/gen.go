@@ -33,8 +33,8 @@ var initialisms = map[string]string{"id": "ID", "api": "API", "uid": "UID", "rpc
 var (
 	rootKeywords = set("$id", "$schema", "anyOf", "definitions", "description", "title",
 		"x-srelens-apiVersion", "x-srelens-errorCodes", "x-srelens-errorData", "x-srelens-maxMessageBytes", "x-srelens-methods")
-	definitionKeywords = set("type", "properties", "required", "additionalProperties", "description")
-	propertyKeywords   = set("type", "$ref", "anyOf", "items", "pattern", "minLength", "maxLength", "minimum", "minItems", "maxItems", "uniqueItems", "not", "description", "additionalProperties", "propertyNames", "maxProperties")
+	definitionKeywords = set("type", "properties", "required", "additionalProperties", "description", "oneOf")
+	propertyKeywords   = set("type", "$ref", "anyOf", "items", "pattern", "minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems", "uniqueItems", "not", "description", "additionalProperties", "propertyNames", "maxProperties")
 	methodKeywords     = set("direction", "kind", "params", "result")
 )
 
@@ -281,6 +281,23 @@ func (g *generator) refName(o object, path string) (string, error) {
 	return goName(name), nil
 }
 
+// requiredAlternatives accepts a definition's oneOf only as bare {"required":
+// [...]} alternatives: which fields a value names, a rule the generated type
+// cannot hold and its builder checks.
+func requiredAlternatives(v any, path string) error {
+	if v == nil {
+		return nil
+	}
+	alts, _ := v.([]any)
+	for _, alt := range alts {
+		o, _ := alt.(object)
+		if _, ok := o["required"]; !ok || len(o) != 1 {
+			return fmt.Errorf(`%s: oneOf is supported only as {"required": [...]} alternatives`, path)
+		}
+	}
+	return nil
+}
+
 func (g *generator) definition(name string, v any) error {
 	path := "definitions." + name
 	def, ok := v.(object)
@@ -288,6 +305,9 @@ func (g *generator) definition(name string, v any) error {
 		return fmt.Errorf("%s is not an object schema", path)
 	}
 	if err := only(def, definitionKeywords, path); err != nil {
+		return err
+	}
+	if err := requiredAlternatives(def["oneOf"], path); err != nil {
 		return err
 	}
 	if ap, ok := def["additionalProperties"]; ok && ap != false {
@@ -520,7 +540,10 @@ func (g *generator) shapes() error {
 			}
 			max, ok := p["maxLength"].(json.Number)
 			if !ok {
-				return fmt.Errorf("definitions.%s.properties.%s: a pattern needs a maxLength", name, prop)
+				// A pattern with no maxLength (tunnel/data's base64) is no field
+				// rule for a broker to hold: the line size bounds it, and the SDK
+				// writes it with encoding/base64 rather than checking it.
+				continue
 			}
 			var not []string
 			if n, ok := p["not"].(object); ok {

@@ -109,7 +109,7 @@ func TestEachHostCallNamesItsContextAndGetsTheHostsAnswer(t *testing.T) {
 }
 
 func TestBindingAvailabilityNeedsNewProtocolAndPreservesPinnedContext(t *testing.T) {
-	for _, version := range []string{"0.1.0", "0.2.0"} {
+	for _, version := range []string{"0.1.0", "0.2.0", "0.3.0"} {
 		t.Run(version, func(t *testing.T) {
 			s := sidecar.New("t", "1")
 			sidecar.Operation(s, "availability", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
@@ -145,7 +145,7 @@ func TestBindingAvailabilityNeedsNewProtocolAndPreservesPinnedContext(t *testing
 }
 
 func TestJobCallbackNamesItsNamespaceAndRejectsOldProtocol(t *testing.T) {
-	for _, version := range []string{"0.1.0", "0.2.0"} {
+	for _, version := range []string{"0.1.0", "0.2.0", "0.3.0"} {
 		t.Run(version, func(t *testing.T) {
 			s := sidecar.New("t", "1")
 			sidecar.Operation(s, "scan", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
@@ -499,6 +499,38 @@ func TestJobRejectsOptionInjectionBeforeCallingHost(t *testing.T) {
 			id := h.request("scan", map[string]any{})
 			if h.answer(id)["error"] == nil {
 				t.Fatal("Job option injection accepted")
+			}
+			if err := h.finish(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestReadPageWorksFromAPI02UpAndIsRefusedOn01(t *testing.T) {
+	for _, version := range []string{"0.1.0", "0.2.0", "0.3.0"} {
+		t.Run(version, func(t *testing.T) {
+			s := sidecar.New("t", "1")
+			sidecar.Operation(s, "page", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+				return sidecar.HostFrom(ctx).ReadPage(ctx, prod(t), "images", "")
+			})
+			h := start(t, s)
+			h.answer(h.request("initialize", initializeParams([]string{version}, h.DataDir, defaultLimits())))
+			h.answer(h.request("activate", map[string]any{}))
+			id := h.request("page", map[string]any{})
+			if version == "0.1.0" {
+				if h.answer(id)["error"] == nil {
+					t.Fatal("API 0.1.0 accepted a paged read")
+				}
+			} else {
+				call := h.call()
+				if call["method"] != "host/read" {
+					t.Fatalf("wrong call: %v", call)
+				}
+				h.reply(call["id"], map[string]any{"items": []any{}}, nil)
+				if h.answer(id)["error"] != nil {
+					t.Fatal("the paged read failed")
+				}
 			}
 			if err := h.finish(); err != nil {
 				t.Fatal(err)

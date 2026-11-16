@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"context"
+	"slices"
 
 	"github.com/srelens/srelens/sdk/go/protocol"
 )
@@ -51,4 +52,11 @@ func APIVersion(ctx context.Context) string {
 		return sh.apiVersion
 	}
 	return ""
+}
+
+// atLeast reports whether the version srelens and the sidecar agreed on is
+// min or newer; false for a context the SDK did not make.
+func atLeast(ctx context.Context, min string) bool {
+	have := slices.Index(supportedVersions, APIVersion(ctx))
+	return have >= 0 && have >= slices.Index(supportedVersions, min)
 }
