@@ -58,6 +58,14 @@ impl TopologyViewState {
         // 4. Revisions (ReplicaSets - only if present)
         // 5. External Dependencies (Databases, Third-party APIs)
         let mut lanes = Vec::new();
+        // 0. Gateway API gateways, ahead of the routes they carry (#1089).
+        if let Some(gateways) = lane_map.remove(&Lane::Gateway) {
+            lanes.push(LaneColumn {
+                lane: Lane::Gateway,
+                title: "GATEWAYS",
+                node_indices: gateways,
+            });
+        }
         lanes.push(LaneColumn {
             lane: Lane::Route,
             title: "ROUTES (INGRESS)",
@@ -662,6 +670,35 @@ mod tests {
             edges,
             probe: None,
         }
+    }
+
+    #[test]
+    fn gateways_get_a_lane_of_their_own_ahead_of_routes() {
+        // #1089: a shared backend now sends Gateway nodes; a lane left out of
+        // the fixed list was never drawn, and Gateway→Route edges dangled.
+        let mut graph = sample_graph();
+        graph.nodes.push(TopologyNode {
+            id: "Gateway/prod/edge".to_string(),
+            kind: "Gateway".to_string(),
+            name: "edge".to_string(),
+            namespace: "prod".to_string(),
+            lane: Lane::Gateway,
+            detail: "HTTP:80".to_string(),
+            ready: None,
+            desired: None,
+            health: Health::Ok,
+        });
+        let mut state = TopologyViewState::new(vec!["prod".to_string()]);
+        state.set_graph(graph);
+        assert_eq!(state.lanes[0].lane, Lane::Gateway);
+        assert_eq!(state.lanes[0].title, "GATEWAYS");
+        assert_eq!(state.lanes[0].node_indices.len(), 1);
+        assert_eq!(state.lanes[1].lane, Lane::Route);
+
+        // No gateways, no empty column.
+        let mut plain = TopologyViewState::new(vec!["prod".to_string()]);
+        plain.set_graph(sample_graph());
+        assert!(plain.lanes.iter().all(|l| l.lane != Lane::Gateway));
     }
 
     #[test]

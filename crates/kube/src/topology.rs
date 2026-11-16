@@ -2184,9 +2184,12 @@ pub fn apply_gateway_api(
         // Refused by any parent is a route not carrying what it was written
         // to carry. Accepted says only that it was taken, so there is nothing
         // to count and no "ok" to claim — the same reading an Ingress gets.
-        let refused = items(&route["status"], "parents")
-            .iter()
-            .any(|p| has_condition(items(p, "conditions"), "Accepted", "False"));
+        // ResolvedRefs=False (a backend it may not reach) fails it too, as the
+        // detail pane's "Unresolved refs" does.
+        let refused = items(&route["status"], "parents").iter().any(|p| {
+            let conditions = items(p, "conditions");
+            has_condition(conditions, "Accepted", "False") || has_condition(conditions, "ResolvedRefs", "False")
+        });
         let health = if refused { Health::Failing } else { Health::Unknown };
         let id = node_id(kind, namespace, name);
         graph.nodes.push(TopologyNode {
@@ -4396,6 +4399,21 @@ mod tests {
         // The line from the gateway says what it leads to.
         let to_route = g.edges.iter().find(|e| e.to == "HTTPRoute/checkout/shop").unwrap();
         assert_eq!(to_route.health, Health::Failing);
+    }
+
+    #[test]
+    fn a_route_whose_backends_did_not_resolve_is_failing() {
+        // Accepted, but a backend it may not reach (no ReferenceGrant, a
+        // missing Service): the detail pane says "Unresolved refs", and the
+        // graph must not draw it as carrying traffic.
+        let mut route = http_route("shop", serde_json::json!([{"name": "edge"}]), serde_json::json!([]));
+        route["status"] = serde_json::json!({"parents": [{"conditions": [
+            {"type": "Accepted", "status": "True"},
+            {"type": "ResolvedRefs", "status": "False", "reason": "RefNotPermitted"},
+        ]}]});
+        let mut g = shop();
+        apply_gateway_api(&mut g, &[gateway("checkout", "edge", Some("True"))], &[route]);
+        assert_eq!(find(&g, "HTTPRoute/checkout/shop").health, Health::Failing);
     }
 
     #[test]
