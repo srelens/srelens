@@ -31,7 +31,10 @@ mod supervisor;
 mod tunnel;
 
 pub use crate::app_log::{AppLog, LogLevel, LogLine, LogSource, LOG_LINES, LOG_LINE_BYTES};
-pub use broker::{AppIdentity, CallContext, CapabilityBroker, Consent, ConsentRequest, NoConsent};
+pub use broker::{
+    AppIdentity, CallContext, CapabilityBroker, Consent, ConsentRequest, NoConsent, NoPodConnector,
+    PodConnector,
+};
 pub use connection::{Broker, NoBroker, RequestError, SidecarStream, StreamEvent, STREAM_BUFFER};
 pub use limits::{Limits, Policy};
 pub use metrics::{Inspect, Latency, RequestMetrics, SidecarMetrics, LATENCY_SAMPLES};

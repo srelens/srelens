@@ -38,15 +38,18 @@ use srelens_capability::audit::{self, AuditSink, Source};
 use srelens_capability::{CapabilityError, Impact, Registry};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use super::connection::Broker;
 use super::protocol::{code, method, RpcError};
+use super::tunnel::Tunnel;
 use srelens_sidecar_protocol::shape::{
     is_cluster_id, is_identifier, is_namespace, is_object_name, is_token,
 };
 pub use srelens_sidecar_protocol::CallContext;
-use srelens_sidecar_protocol::MAX_CLUSTER_ID_BYTES;
+use srelens_sidecar_protocol::{HostConnectParams, MAX_CLUSTER_ID_BYTES, MAX_CONNECTS_PER_MINUTE};
 
 /// Who the sidecar is: the installed app its supervisor started it for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,12 +124,45 @@ impl Consent for NoConsent {
     }
 }
 
+/// Who opens a sidecar's connections to pods (#1091). It is given the app the
+/// supervisor started, never one the sidecar names.
+pub trait PodConnector: Send + Sync + 'static {
+    fn connect<'a>(
+        &'a self,
+        app: &'a AppIdentity,
+        ask: &'a HostConnectParams,
+    ) -> Pin<Box<dyn Future<Output = Result<Tunnel, RpcError>> + Send + 'a>>;
+}
+
+/// The default: nothing here can reach a pod, so every call is refused.
+pub struct NoPodConnector;
+
+impl PodConnector for NoPodConnector {
+    fn connect<'a>(
+        &'a self,
+        _app: &'a AppIdentity,
+        _ask: &'a HostConnectParams,
+    ) -> Pin<Box<dyn Future<Output = Result<Tunnel, RpcError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(RpcError::new(
+                code::METHOD_NOT_FOUND,
+                "this srelens process opens no pod connections",
+            ))
+        })
+    }
+}
+
 /// The broker for one app's sidecar.
 pub struct CapabilityBroker {
     registry: Arc<Registry>,
     app: AppIdentity,
     audit: Arc<dyn AuditSink>,
     consent: Arc<dyn Consent>,
+    pods: Arc<dyn PodConnector>,
+    /// The current minute of `host/connect`: when it began, how many calls it
+    /// has had, and whether the limit has been audited in it.
+    // ponytail: fixed window, a sliding one if bursts at the boundary matter
+    connects: Mutex<(Instant, u32, bool)>,
 }
 
 // Ordinary approved writes finish in their task; cancelled Jobs also need an
@@ -161,7 +197,48 @@ impl CapabilityBroker {
             app,
             audit,
             consent,
+            pods: Arc::new(NoPodConnector),
+            connects: Mutex::new((Instant::now(), 0, false)),
         }
+    }
+
+    /// The broker's pod connections go through `pods`.
+    pub fn with_pods(mut self, pods: Arc<dyn PodConnector>) -> Self {
+        self.pods = pods;
+        self
+    }
+
+    /// Counts this `host/connect` against the minute. `Err` when it is over,
+    /// with the limit audited the first time in the minute and not again, so a
+    /// sidecar cannot flood the audit log through the limit itself.
+    fn count_connect(&self, ask: &HostConnectParams) -> Result<(), RpcError> {
+        let mut window = self.connects.lock().unwrap();
+        if window.0.elapsed() >= Duration::from_secs(60) {
+            *window = (Instant::now(), 0, false);
+        }
+        window.1 = window.1.saturating_add(1);
+        if window.1 <= MAX_CONNECTS_PER_MINUTE {
+            return Ok(());
+        }
+        let why = format!(
+            "{} opens at most {MAX_CONNECTS_PER_MINUTE} pod connections a minute",
+            self.app.name
+        );
+        if !std::mem::replace(&mut window.2, true) {
+            self.audit.record(audit::AuditRecord {
+                result_bytes: None,
+                source: Source::Sidecar,
+                tool: "k8s.connectPod".into(),
+                args: json!({"capability": ask.capability, "pod": ask.pod, "service": ask.service}),
+                app: Some(audit::AppRef { id: self.app.id.clone(), revision: self.app.revision }),
+                cluster: Some(ask.context.cluster_id.clone()),
+                resource: ask.pod.as_ref().map(|pod| format!("{}/{pod}", ask.context.namespace)),
+                decision: "denied",
+                outcome: audit::OUTCOME_REJECTED,
+                error: Some(why.clone()),
+            });
+        }
+        Err(RpcError::new(code::INTERNAL_ERROR, why))
     }
 
     async fn serve(&self, name: &str, params: Value) -> Result<Value, RpcError> {
@@ -413,10 +490,11 @@ pub(crate) fn host_call(name: &str, params: Value) -> Result<HostCall, RpcError>
             return Err(RpcError::new(
                 code::METHOD_NOT_FOUND,
                 format!(
-                    "srelens takes no `{name}` call from a sidecar; it takes {}, {} and {}",
+                    "srelens takes no `{name}` call from a sidecar; it takes {}, {}, {} and {}",
                     method::HOST_READ,
                     method::HOST_RESOURCE,
-                    method::HOST_ACTION
+                    method::HOST_ACTION,
+                    method::HOST_CONNECT
                 ),
             ))
         }
@@ -471,6 +549,16 @@ impl Broker for CapabilityBroker {
         params: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>> {
         Box::pin(self.serve(method, params))
+    }
+
+    fn connect<'a>(
+        &'a self,
+        ask: HostConnectParams,
+    ) -> Pin<Box<dyn Future<Output = Result<Tunnel, RpcError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.count_connect(&ask)?;
+            self.pods.connect(&self.app, &ask).await
+        })
     }
 }
 
@@ -1481,5 +1569,141 @@ mod tests {
         // Guards the guard: both verdicts are exercised.
         assert!(accepted >= 30, "{accepted} accepted");
         assert!(refused >= 100, "{refused} refused");
+    }
+
+    /// Keeps the identity it is asked for, and refuses when told to.
+    #[derive(Default)]
+    struct Pods {
+        asked: Mutex<Vec<AppIdentity>>,
+        refuse: bool,
+    }
+
+    impl PodConnector for Pods {
+        fn connect<'a>(
+            &'a self,
+            app: &'a AppIdentity,
+            _ask: &'a HostConnectParams,
+        ) -> Pin<Box<dyn Future<Output = Result<Tunnel, RpcError>> + Send + 'a>> {
+            self.asked.lock().unwrap().push(app.clone());
+            let refuse = self.refuse;
+            Box::pin(async move {
+                if refuse {
+                    return Err(RpcError::new(code::CAPABILITY_FAILED, "no"));
+                }
+                let (io, _far) = tokio::io::duplex(64);
+                Ok(Tunnel {
+                    io: Box::new(io),
+                    pod: "kafka-0".into(),
+                    ended: Box::pin(std::future::pending()),
+                })
+            })
+        }
+    }
+
+    fn connect_params() -> Value {
+        json!({
+            "context": {"clusterId": "c1", "namespace": "team"},
+            "capability": "bootstrap",
+            "pod": "kafka-0",
+            "tunnel": 1
+        })
+    }
+
+    fn connect_ask() -> HostConnectParams {
+        serde_json::from_value(connect_params()).unwrap()
+    }
+
+    fn with_pods(refuse: bool) -> (CapabilityBroker, Arc<Pods>, Arc<Spy>) {
+        let pods = Arc::new(Pods { refuse, ..Pods::default() });
+        let audit = Arc::new(Spy::default());
+        let broker = CapabilityBroker::new(
+            Arc::new(Registry::new()),
+            app(),
+            audit.clone(),
+            Arc::new(NoConsent),
+        )
+        .with_pods(pods.clone());
+        (broker, pods, audit)
+    }
+
+    #[tokio::test]
+    async fn connect_goes_to_the_connector_with_the_supervisors_identity() {
+        let (broker, pods, _) = with_pods(false);
+        assert!(broker.connect(connect_ask()).await.is_ok());
+        assert_eq!(*pods.asked.lock().unwrap(), vec![app()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_sixty_first_connect_in_a_minute_is_refused() {
+        let (broker, pods, audit) = with_pods(false);
+        for _ in 0..60 {
+            assert!(broker.connect(connect_ask()).await.is_ok());
+        }
+        for _ in 0..2 {
+            let error = broker.connect(connect_ask()).await.err().unwrap();
+            assert_eq!(error.code, code::INTERNAL_ERROR);
+        }
+        assert_eq!(pods.asked.lock().unwrap().len(), 60);
+        let records = audit.records();
+        assert_eq!(records.len(), 1, "one record for the limit, not one per refusal");
+        assert_eq!(records[0].tool, "k8s.connectPod");
+        assert!(matches!(records[0].source, Source::Sidecar));
+        assert_eq!(records[0].outcome, audit::OUTCOME_REJECTED);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_minute_passes() {
+        let (broker, pods, _) = with_pods(false);
+        for _ in 0..61 {
+            let _ = broker.connect(connect_ask()).await;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        assert!(broker.connect(connect_ask()).await.is_ok());
+        assert_eq!(pods.asked.lock().unwrap().len(), 61);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_connect_counts() {
+        let (broker, pods, _) = with_pods(true);
+        for _ in 0..60 {
+            let error = broker.connect(connect_ask()).await.err().unwrap();
+            assert_eq!(error.code, code::CAPABILITY_FAILED);
+        }
+        let error = broker.connect(connect_ask()).await.err().unwrap();
+        assert_eq!(error.code, code::INTERNAL_ERROR);
+        assert_eq!(pods.asked.lock().unwrap().len(), 60);
+    }
+
+    /// `host/connect` is read by the connection, not by `host_call`, so its
+    /// verdict here is the parse into `HostConnectParams`.
+    #[test]
+    fn the_protocol_schema_takes_the_connect_params_the_connection_takes() {
+        let root = srelens_sidecar_protocol::schema();
+        let validator = jsonschema::draft7::new(&json!({
+            "definitions": root["definitions"],
+            "allOf": [{"$ref": "#/definitions/HostConnectParams"}],
+        }))
+        .expect("the schema compiles");
+        let mut cases = vec![connect_params()];
+        for field in ["context", "capability", "tunnel"] {
+            let mut missing = connect_params();
+            missing.as_object_mut().unwrap().remove(field);
+            cases.push(missing);
+        }
+        for (field, value) in [
+            ("tunnel", json!(0)),
+            ("tunnel", json!("1")),
+            ("capability", json!(7)),
+            ("context", json!({"clusterId": "c1"})),
+            ("extra", json!(true)),
+        ] {
+            let mut case = connect_params();
+            case[field] = value;
+            cases.push(case);
+        }
+        for params in cases {
+            let parsed = serde_json::from_value::<HostConnectParams>(params.clone()).is_ok();
+            assert_eq!(parsed, validator.is_valid(&params), "{params}");
+        }
     }
 }
