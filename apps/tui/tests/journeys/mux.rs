@@ -1662,3 +1662,30 @@ async fn journey_mux_late_helm_release_reaches_the_parked_pane() {
         "revision 1 comes from the same cluster"
     );
 }
+
+/// A Helm fetch still out when `:ctx` leaves its cluster must not block the
+/// next cluster's `:helm`. Its answer names a cluster no pane shows and frees
+/// nothing (one fetch at a time is per pane), so the switch frees the guard
+/// (#1097).
+#[tokio::test]
+async fn journey_a_helm_fetch_for_a_cluster_left_behind_does_not_block_the_next() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, mut rx) = common::app_with("cluster-left", "default").await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "helm").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.helm_refreshing);
+
+    app.switch_context_forced("cluster-right".into()).await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "helm").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    app.handle_helm_releases_result("cluster-left", "default", Ok(vec![]));
+
+    assert!(
+        next_helm_answer(&mut rx, "cluster-right", 10)
+            .await
+            .is_some(),
+        "the new cluster's Helm list must be asked for"
+    );
+}

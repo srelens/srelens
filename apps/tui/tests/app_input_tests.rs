@@ -822,40 +822,6 @@ async fn failed_helm_refresh_keeps_rows_stale_and_blocks_rollback_until_success(
     );
 }
 
-/// A Helm fetch still out when `:ctx` leaves its cluster must not block the
-/// next cluster's `:helm`. Its answer names a cluster no pane shows and frees
-/// nothing (one fetch at a time is per pane), so the switch frees the guard
-/// (#1097).
-#[tokio::test]
-async fn a_helm_fetch_for_a_cluster_left_behind_does_not_block_the_next() {
-    let _settings = common::env::isolate_settings();
-    let (mut app, mut rx) = common::app().await;
-    app.active_view = ActiveView::Helm(srectl::views::helm_view::HelmViewState::new());
-    app.active_context = "test-cluster".into();
-    app.active_namespace = "default".into();
-    app.refresh_helm_releases();
-    assert!(app.helm_refreshing);
-
-    app.switch_context_forced("kind-dev".into()).await;
-    app.execute_colon_command("helm").await;
-    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![]));
-
-    let asked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            if let Some(AppEvent::HelmReleasesResult { context, .. }) = rx.recv().await {
-                if context == "kind-dev" {
-                    break;
-                }
-            }
-        }
-    })
-    .await;
-    assert!(
-        asked.is_ok(),
-        "the new cluster's Helm list must be asked for"
-    );
-}
-
 #[tokio::test]
 async fn helm_refresh_in_flight_survives_namespace_switch_and_refetches_new_target() {
     let _settings = common::env::isolate_settings();
