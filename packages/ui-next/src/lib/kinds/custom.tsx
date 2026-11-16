@@ -9,6 +9,7 @@ import {
 import type { Column } from "@srelens/ui-kit";
 import type { KindActions, KindDescriptor } from "./types";
 import { AgeCell } from "../ageCell";
+import { gatewayFlagged, withGatewayColumns } from "../gatewayApi";
 
 /**
  * Matches `MAX_COLUMNS` in `crates/kube/src/crds.rs` / `MAX_PRINTER_COLUMNS`
@@ -60,7 +61,10 @@ export function customColumns(crd: CrdRef): Column<CustomRow>[] {
 export const CUSTOM_RESOURCE_ACTIONS: KindActions = {};
 
 /** The descriptor for one discovered CRD. */
-export function customDescriptor(crd: CrdRef): KindDescriptor<CustomRow> {
+export function customDescriptor(discovered: CrdRef): KindDescriptor<CustomRow> {
+  // A Gateway API kind lists one column more than its CRD prints, and flags by it (#1089).
+  const crd = withGatewayColumns(discovered);
+  const flagged = gatewayFlagged(crd);
   return {
     k8sKind: crd.kind,
     group: crd.group,
@@ -74,5 +78,6 @@ export function customDescriptor(crd: CrdRef): KindDescriptor<CustomRow> {
         error: o.error,
       })),
     actions: CUSTOM_RESOURCE_ACTIONS,
+    ...(flagged ? { flagged } : {}),
   };
 }
