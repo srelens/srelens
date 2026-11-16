@@ -343,7 +343,8 @@ has both combinations, on purpose:
   reaches the response. `k8s.getManifest` runs the same redactor for the
   same reason.
 - `k8s.getSecret` is sensitive **and** confirm-gated, because unlike a diff
-  it returns actual secret values. That combination is its own class,
+  it returns the Secret whole: its values, its annotations and its manifest,
+  nothing redacted. That combination is its own class,
   **sensitive read**, gated behind `--mcp-allow-sensitive-reads` rather than
   `--mcp-allow-destructive` — reading a Secret is not a mutation, so it
   would be wrong to lump it in with tools that drain nodes or delete

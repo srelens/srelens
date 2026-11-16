@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   absoluteTimestamp,
   certificateHealth,
@@ -14,10 +14,10 @@ import {
   type DockerRegistryRow,
   type K8sObject,
 } from "@srelens/core";
-import { Button, EmptyState, KV, LoadingState, StatusPill, Table, type Column } from "@srelens/ui-kit";
+import { Button, CopyButton, EmptyState, KV, LoadingState, StatusPill, Table, type Column } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { Section } from "./Section";
-import { StringList } from "./sections";
+import { AnnotationLines, StringList } from "./sections";
 
 /**
  * What this pane knows about a Secret's VALUES — which is a different question
@@ -50,6 +50,9 @@ export interface SecretDataState {
   /** What to render keys from — the fetched values once `ready`, `getObject`'s
    *  blanked (but correctly KEYED) map otherwise. */
   data: Record<string, string>;
+  /** The annotations as the cluster has them once `ready`; `getObject`'s
+   *  blanked (but correctly KEYED) map otherwise. */
+  annotations: Record<string, string>;
   /** The refusal, raw, exactly as the backend gave it — worded by `describeError`
    *  at the surface, per this package's error rule. */
   error?: string;
@@ -102,16 +105,15 @@ const CERTIFICATE_COLUMNS: Column<CertificateRow>[] = [
 ];
 
 /**
- * One Secret entry — key and value, the value masked until the reader
- * explicitly reveals it (classic's `ConfigDataEntry` with `secret: true`).
+ * One Secret entry — key and value, the value masked until the reader presses
+ * its Reveal, then shown decoded, with Hide to mask it again (#1085). Masked by
+ * default so opening a Secret on a shared screen does not put every value on
+ * it; the annotations, the YAML pane and the editor are not masked.
  *
- * THE RULING THIS PORTS EXACTLY: a Secret's values are secret. Before
- * `revealed` flips true, `decodeBase64(value)` is never called and the
- * decoded text never becomes a child of anything — the masked placeholder
- * "••••••••" is the only value in the tree, so there is nothing for a
- * screen reader, a DOM inspector or a copy-all to find. No `title`,
- * `aria-label`, or `data-*` carries the value either; the toggle's own label
- * is just "Reveal"/"Hide", never the key's value.
+ * A masked value is OUT OF THE DOCUMENT, not merely out of sight: the
+ * placeholder "••••••••" is the only value in the tree, and no `title`,
+ * `aria-label` or `data-*` carries the value. Copy is offered only over a
+ * value that is on screen.
  *
  * The toggle is DISABLED, with the reason beside it, when the values are not on
  * hand ({@link SecretDataState}). Left enabled it decodes `""` and reveals an
@@ -123,12 +125,14 @@ const CERTIFICATE_COLUMNS: Column<CertificateRow>[] = [
 function SecretEntry({ name, value, state }: { name: string; value: string; state: SecretDataState }) {
   const [revealed, setRevealed] = useState(false);
   const available = hasValues(state);
+  const shown = available && revealed;
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-2">
         <span className="font-mono text-[0.75rem] font-medium">{name}</span>
         <div className="flex items-center gap-2">
           {!available && <span className="text-[0.75rem] text-muted">{withheldReason(state)}</span>}
+          {shown && <CopyButton iconOnly label={`Copy ${name}`} text={() => decodeBase64(value)} />}
           <Button
             type="button"
             variant="ghost"
@@ -136,26 +140,26 @@ function SecretEntry({ name, value, state }: { name: string; value: string; stat
             disabled={!available}
             onClick={() => setRevealed((r) => !r)}
           >
-            {revealed ? "Hide" : "Reveal"}
+            {shown ? "Hide" : "Reveal"}
           </Button>
         </div>
       </div>
       <pre className="whitespace-pre-wrap break-all font-mono text-[0.75rem] text-ink">
-        {available && revealed ? decodeBase64(value) : "••••••••"}
+        {shown ? decodeBase64(value) : "••••••••"}
       </pre>
     </div>
   );
 }
 
 /**
- * A Secret's `data` keys, each behind its own reveal toggle — classic's
+ * A Secret's `data` keys, each shown with its own Hide — classic's
  * `SecretData`, shared by all three Secret bodies below (TLS and Docker
  * secrets show it after their own summary section; a general Secret shows it
  * as its only section besides "Secret summary").
  *
  * The key names and the count are `getObject`'s, and they survive a `getSecret`
  * refusal intact — so this section is drawn in full either way, and only the
- * per-key reveal is withheld.
+ * per-key value is withheld.
  */
 function SecretDataSection({ state }: { state: SecretDataState }) {
   const keys = Object.keys(state.data);
@@ -163,7 +167,7 @@ function SecretDataSection({ state }: { state: SecretDataState }) {
     // Remembered as `Data`, not as `Data (3 keys)`: the heading counts what
     // is in the object, and a memory keyed on it would be lost the first
     // time someone added a key.
-    <Section id="Data" title={`Data (${plural(keys.length, "key")})`}>
+    <Section id="Data" title={`Data (${plural(keys.length, "key")})`} defaultOpen>
       {keys.length === 0 ? (
         <EmptyState title="No data" />
       ) : (
@@ -189,9 +193,8 @@ function SecretDataSection({ state }: { state: SecretDataState }) {
  * via a dynamic `import()`, not a static one, so it stays out of the main
  * bundle for every consumer, ui-next included).
  *
- * None of these facts come from the private key, so none of them sit behind
- * the reveal gate — same as classic. Only the raw `tls.crt`/`tls.key` bytes
- * stay masked, via `SecretDataSection` below.
+ * None of these facts come from the private key. The raw `tls.crt`/`tls.key`
+ * bytes are shown beneath, in `SecretDataSection`, like any other key.
  */
 function TlsSection({ state }: { state: SecretDataState }) {
   const { data } = state;
@@ -324,8 +327,7 @@ function GeneralSection({ object, keyCount }: { object: K8sObject; keyCount: num
  * Fetch a Secret's real (base64) values via the gated `getSecret` —
  * `getObject` redacts Secret data (the keys are present, the values blank),
  * so this is how the detail view reaches the actual values. The fetched values
- * sit in memory once resolved, but nothing here renders them: `SecretEntry`
- * keeps every value masked until its own reveal toggle is used.
+ * stay masked until the reader presses a key's Reveal in `SecretEntry` (#1085).
  *
  * Returns a {@link SecretDataState} rather than a bare map, and reads `r.error`
  * as well as `r.data`. It used to do neither: `.then((r) => { if (r.data)
@@ -341,19 +343,58 @@ function GeneralSection({ object, keyCount }: { object: K8sObject; keyCount: num
  * in is all there is. The one thing that must never be `ready` is a read that
  * was attempted and did not answer.
  */
+/**
+ * One `k8s.getSecret` read for the surfaces that ask in the same breath. The
+ * body and the annotations block mount together and each need the read;
+ * without this the audit trail would record two for one opened Secret. Shared
+ * only within one tick: a Retry, a later visit, or a read that never settled
+ * always reads again.
+ */
+const sameTick = new Map<string, ReturnType<typeof getSecret>>();
+function readSecret(context: string, namespace: string, name: string): ReturnType<typeof getSecret> {
+  const key = JSON.stringify([context, namespace, name]);
+  let read = sameTick.get(key);
+  if (!read) {
+    read = getSecret(context, namespace, name);
+    sameTick.set(key, read);
+    queueMicrotask(() => sameTick.delete(key));
+  }
+  return read;
+}
+
+/**
+ * How many times each Secret has been asked for again. Shared, because the
+ * body and the annotations block each hold their own copy of the read: a Retry
+ * pressed in one must read again for both, or the values come back and the
+ * annotations stay "not available" with no control of their own. Both then ask
+ * in the same tick, so it is still one read.
+ */
+const attempts = new Map<string, number>();
+const attemptListeners = new Set<() => void>();
+function subscribeAttempts(listener: () => void): () => void {
+  attemptListeners.add(listener);
+  return () => attemptListeners.delete(listener);
+}
+function readAgain(key: string): void {
+  attempts.set(key, (attempts.get(key) ?? 0) + 1);
+  for (const listener of attemptListeners) listener();
+}
+
 function useSecretData(
   context: string,
   namespace: string,
   name: string,
   redacted: Record<string, string>,
+  blankedAnnotations: Record<string, string> = {},
 ): SecretDataState {
-  const [fetched, setFetched] = useState<{ data?: Record<string, string>; error?: string } | null>(null);
-  const [attempt, setAttempt] = useState(0);
+  const [fetched, setFetched] = useState<Awaited<ReturnType<typeof getSecret>> | null>(null);
+  const key = JSON.stringify([context, namespace, name]);
+  const attempt = useSyncExternalStore(subscribeAttempts, () => attempts.get(key) ?? 0);
   useEffect(() => {
     setFetched(null);
     if (!context) return;
     let active = true;
-    getSecret(context, namespace, name).then(
+    readSecret(context, namespace, name).then(
       (r) => {
         if (active) setFetched(r);
       },
@@ -366,13 +407,52 @@ function useSecretData(
     };
   }, [context, namespace, name, attempt]);
 
-  if (!context) return { status: "ready", data: redacted };
-  if (fetched === null) return { status: "loading", data: redacted };
+  const blanked = { data: redacted, annotations: blankedAnnotations };
+  if (!context) return { status: "ready", ...blanked };
+  if (fetched === null) return { status: "loading", ...blanked };
   if (fetched.error !== undefined) {
-    return { status: "error", data: redacted, error: fetched.error, retry: () => setAttempt((n) => n + 1) };
+    return { status: "error", ...blanked, error: fetched.error, retry: () => readAgain(key) };
   }
-  if (fetched.data === undefined) return { status: "ready", data: redacted };
-  return { status: "ready", data: fetched.data };
+  return {
+    status: "ready",
+    data: fetched.data ?? redacted,
+    annotations: fetched.annotations ?? blankedAnnotations,
+  };
+}
+
+/**
+ * A Secret's annotations, as the cluster has them, open like any other kind's
+ * (#1085). `k8s.getObject` blanks every annotation value on a Secret, so the
+ * object the screen holds has the KEYS only; the values are `k8s.getSecret`'s,
+ * the same read the body makes.
+ *
+ * Until that read answers, and when it refuses, the block says so and prints
+ * no pairs: `key=` with nothing after it would state that the annotation is
+ * empty.
+ */
+export function SecretAnnotationsSection({
+  context,
+  namespace,
+  name,
+  blanked,
+}: {
+  context: string;
+  namespace: string;
+  name: string;
+  /** `getObject`'s annotations: real keys, blanked values. */
+  blanked: Record<string, string>;
+}) {
+  const state = useSecretData(context, namespace, name, {}, blanked);
+  if (Object.keys(blanked).length === 0) return null;
+  return (
+    <Section title="Annotations">
+      {hasValues(state) ? (
+        <AnnotationLines annotations={state.annotations} />
+      ) : (
+        <p className="text-[0.75rem] text-muted">{withheldReason(state)}</p>
+      )}
+    </Section>
+  );
 }
 
 /**

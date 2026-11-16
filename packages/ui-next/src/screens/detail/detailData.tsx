@@ -2,6 +2,7 @@ import { createElement, useEffect, useRef, useState, type ReactNode } from "reac
 import {
   eventVerdict,
   getManifest,
+  getSecret,
   listEvents,
   redactSecretManifest,
   resourceStatusLine,
@@ -20,7 +21,7 @@ import {
   type Column,
   type TabItem,
 } from "@srelens/ui-kit";
-import { FailureState } from "../../lib/errorCopy";
+import { FailureAlert, FailureState } from "../../lib/errorCopy";
 import { descriptorFor } from "../../lib/kinds/descriptors";
 import { SLUG_BY_K8S_KIND, isCustomKind, resolveCrdGvk } from "../../lib/crdGvk";
 import { useObject } from "../../lib/useObject";
@@ -35,7 +36,7 @@ import { JobDetailsBody } from "./JobBody";
 import { NodeDetailsBody } from "./NodeBody";
 import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
 import { AnnotationsSection, LabelsSection } from "./sections";
-import { SecretDetailsBody } from "./SecretBody";
+import { SecretAnnotationsSection, SecretDetailsBody } from "./SecretBody";
 import { ServiceDetailsBody } from "./ServiceBody";
 import { useDeployRevisions, WorkloadDetailsBody, workloadFacts, type RevisionsState } from "./WorkloadBody";
 import type { DetailFact, FactsFor } from "./facts";
@@ -435,7 +436,19 @@ export function useDetailSubject({
         : null,
     metricsPane: bodyProps && MetricsBody ? createElement(MetricsBody, bodyProps) : null,
     labels: <LabelsSection labels={meta.labels ?? {}} />,
-    annotations: <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />,
+    // A Secret's annotation values are blanked on `getObject`; its own block
+    // reads them through `k8s.getSecret`, as its body reads the data.
+    annotations:
+      !custom && kind === "Secret" ? (
+        <SecretAnnotationsSection
+          context={context}
+          namespace={namespace ?? ""}
+          name={name}
+          blanked={meta.annotations ?? {}}
+        />
+      ) : (
+        <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />
+      ),
     isSecret: !custom && kind === "Secret",
   };
 }
@@ -528,16 +541,26 @@ export function useDetailPaneState({
   // custom-resource manifest — see `resolveCrdGvk`'s own doc comment for why
   // this is looked up here rather than threaded in from a descriptor.
   const custom = isCustomKind(kind, group);
-  // The Overview pane keeps a Secret's values out of the DOM until the reader
-  // reveals them, and `k8s.getManifest` is an ungated read. The host blanks a
-  // Secret's values on it (#661, `crates/kube/src/manifest.rs`); this redacts
-  // again on arrival rather than trust that alone, because without it the
-  // reveal gate is worth nothing to anyone who clicks one tab over. The
-  // redaction goes here, on the result, rather than inside `getManifest`,
-  // because other callers of that function handle a Secret their own way.
-  // Classic's drawer YAML view does exactly this too (#659).
+  // A Secret's manifest is the one `k8s.getSecret`, the audited read, answers
+  // with: the server's key order, nothing blanked (#1085). `k8s.getManifest`
+  // is an ungated read whose Secret the host blanks for every caller (#661,
+  // `crates/kube/src/manifest.rs`), so it is only the fallback here, for when
+  // that read refuses: redacted again on arrival rather than trusted, shown
+  // under this pane's own refusal and Retry.
   const isSecret = !custom && kind === "Secret";
-  const yamlState = useLoad<string>(openedPanes.has(PANE_YAML), target, async () => {
+  const yamlState = useLoad<ManifestShown>(openedPanes.has(PANE_YAML), target, async () => {
+    if (isSecret) {
+      const secret = await getSecret(context, namespace ?? "", name);
+      if (secret.yaml !== undefined) return { data: { yaml: secret.yaml } };
+      const fallback = await getManifest(context, kind, namespace, name);
+      if (fallback.error !== undefined || fallback.yaml === undefined) return { error: fallback.error };
+      // Fails closed: on any shape it does not understand the redactor
+      // returns an error and no YAML at all.
+      const redacted = redactSecretManifest(fallback.yaml);
+      return redacted.yaml === undefined
+        ? { error: redacted.error }
+        : { data: { yaml: redacted.yaml, refusal: secret.error ?? "" } };
+    }
     let crd: DynamicGvk | undefined;
     if (custom) {
       const resolved = await resolveCrdGvk(context, kind, group);
@@ -545,14 +568,7 @@ export function useDetailPaneState({
       crd = resolved.crd;
     }
     const result = await getManifest(context, kind, namespace, name, undefined, crd);
-    if (result.error !== undefined || result.yaml === undefined || !isSecret) {
-      return { data: result.yaml, error: result.error };
-    }
-    // Fails closed: on any shape it does not understand the redactor returns
-    // an error and no YAML at all, which surfaces as the pane's error rather
-    // than as an unredacted manifest.
-    const redacted = redactSecretManifest(result.yaml);
-    return redacted.error !== undefined ? { error: redacted.error } : { data: redacted.yaml };
+    return result.yaml === undefined ? { error: result.error } : { data: { yaml: result.yaml } };
   });
   const eventsState = useLoad<{ events: EventSummary[]; truncated?: boolean }>(
     openedPanes.has(PANE_EVENTS),
@@ -573,15 +589,21 @@ export function useDetailPaneState({
   return {
     active,
     selectTab,
-    yamlPane: (
-      <YamlPane state={yamlState} kind={kind} namespace={namespace} name={name} redacted={isSecret} />
-    ),
+    yamlPane: <YamlPane state={yamlState} kind={kind} namespace={namespace} name={name} />,
     eventsPane: <EventsPane state={eventsState} kind={kind} namespace={namespace} name={name} />,
   };
 }
 
+/** The manifest the YAML pane shows. */
+interface ManifestShown {
+  yaml: string;
+  /** Set when this is a Secret's REDACTED manifest: why `k8s.getSecret`
+   *  refused, raw. */
+  refusal?: string;
+}
+
 /**
- * The manifest, and the notice that says a Secret's values are not in it.
+ * The manifest, and the notice that says what of a Secret's is not in it.
  *
  * Shared by both screens because it is CONTENT: an editor, a loading line and
  * an error line, drawn the same however wide the surface is. Neither screen
@@ -592,14 +614,11 @@ function YamlPane({
   kind,
   namespace,
   name,
-  redacted,
 }: {
-  state: LoadState<string>;
+  state: LoadState<ManifestShown>;
   kind: string;
   namespace: string | null;
   name: string;
-  /** This kind's manifest went through `redactSecretManifest` — say so. */
-  redacted: boolean;
 }) {
   if (state.status === "loading") {
     return <LoadingState label={`Loading ${describeTarget(kind, namespace, name)}'s manifest`} />;
@@ -640,13 +659,18 @@ function YamlPane({
           disagree. Tone "info" is a `status` region rather than an `alert`, so
           it never competes with this pane's own error state for a screen
           reader's attention. */}
-      {redacted && (
-        <Alert tone="info" title="Values redacted">
-          This Secret's values are not shown here. Reveal them one key at a time in the Overview pane.
-        </Alert>
+      {/* This pane's OWN read refused, so its own refusal and its own retry:
+          the Overview makes a separate read, which may have gone through, and
+          retrying there would not reload this manifest. */}
+      {state.data.refusal !== undefined && (
+        <FailureAlert
+          title="This Secret's values could not be read, so they are redacted here"
+          error={state.data.refusal}
+          onRetry={state.reload}
+        />
       )}
       <div className="min-h-0 flex-1">
-        <CodeEditor value={state.data} readOnly language="yaml" fill copy ariaLabel={`${name} manifest`} />
+        <CodeEditor value={state.data.yaml} readOnly language="yaml" fill copy ariaLabel={`${name} manifest`} />
       </div>
     </div>
   );

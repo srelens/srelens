@@ -11,7 +11,7 @@ import type { K8sObject, PodMetric, PodSummary } from "@srelens/core";
 // cluster call escaping the mock boundary. `importOriginal` keeps every
 // formatter (`decodeBase64`, `dockerRegistries`, `formatBytes`, ...) intact.
 const { getSecret, podsForSelector, podMetrics } = vi.hoisted(() => ({
-  getSecret: vi.fn(async (): Promise<{ data?: Record<string, string>; error?: string }> => ({ data: undefined })),
+  getSecret: vi.fn(async (): Promise<{ data?: Record<string, string>; annotations?: Record<string, string>; yaml?: string; error?: string }> => ({ data: undefined })),
   podsForSelector: vi.fn(async (): Promise<{ pods?: PodSummary[]; error?: string }> => ({ pods: [] })),
   podMetrics: vi.fn(async (): Promise<{ metrics?: PodMetric[]; error?: string }> => ({ metrics: [] })),
 }));
@@ -25,7 +25,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
 
 import { GenericBody } from "./GenericBody";
 import { detailFacts } from "./detailData";
-import { SecretDetailsBody } from "./SecretBody";
+import { SecretAnnotationsSection, SecretDetailsBody } from "./SecretBody";
 
 // Obviously-fake fixture text — never anything that reads as a real
 // credential, per the task's secrecy ruling.
@@ -49,6 +49,16 @@ function documentContains(value: string): boolean {
   return document.body.innerHTML.includes(value);
 }
 
+/** The one key's Reveal button, once the read has landed and it is live. */
+async function revealable(): Promise<HTMLButtonElement> {
+  let button: HTMLButtonElement | undefined;
+  await waitFor(() => {
+    button = screen.getByRole("button", { name: "Reveal" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+  });
+  return button!;
+}
+
 describe("SecretDetailsBody", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -57,21 +67,21 @@ describe("SecretDetailsBody", () => {
     podMetrics.mockResolvedValue({ metrics: [] });
   });
 
-  describe("the secrecy ruling", () => {
-    it("keeps a fetched value out of the document until it is revealed, then shows it, then hides it again", async () => {
+  describe("revealing the values (#1085)", () => {
+    it("keeps a read value masked until Reveal, then shows it decoded, and hides it again on Hide", async () => {
       getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
       render(<SecretDetailsBody object={secret({ token: "" })} context="ctx" />);
 
       await waitFor(() => expect(getSecret).toHaveBeenCalledWith("ctx", "default", "s-1"));
-      // The fetched value is in memory now, but must not be in the document —
-      // not as text, not as a title/aria-label/data-* attribute, and not in
-      // the accessibility tree behind a visually-hidden style.
+      const reveal = await revealable();
+      // Read, but masked: OUT OF THE DOCUMENT, not merely out of sight — not
+      // as text, not as a title/aria-label/data-* attribute.
       expect(documentContains(FIXTURE_VALUE)).toBe(false);
       expect(documentContains(FIXTURE_B64)).toBe(false);
-      expect(screen.queryByText(FIXTURE_VALUE)).toBeNull();
+      expect(screen.getByText("••••••••")).toBeDefined();
 
-      await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
-      await waitFor(() => expect(documentContains(FIXTURE_VALUE)).toBe(true));
+      await userEvent.click(reveal);
+      expect(screen.getByText(FIXTURE_VALUE)).toBeDefined();
 
       await userEvent.click(screen.getByRole("button", { name: "Hide" }));
       expect(documentContains(FIXTURE_VALUE)).toBe(false);
@@ -80,17 +90,25 @@ describe("SecretDetailsBody", () => {
     it("never exposes the value through the toggle button's own accessible name", async () => {
       getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
       render(<SecretDetailsBody object={secret({ token: "" })} context="ctx" />);
-      await waitFor(() => expect(getSecret).toHaveBeenCalled());
-      const toggle = screen.getByRole("button", { name: "Reveal" });
+      await userEvent.click(await revealable());
+      const toggle = screen.getByRole("button", { name: "Hide" });
       expect(toggle.getAttribute("title")).toBeNull();
       expect(toggle.getAttribute("aria-label")).toBeNull();
     });
 
-    it("shows the masked placeholder, not an empty value, before reveal", async () => {
+    it("offers to copy a value only while it is revealed", async () => {
       getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
       render(<SecretDetailsBody object={secret({ token: "" })} context="ctx" />);
-      await waitFor(() => expect(getSecret).toHaveBeenCalled());
-      expect(screen.getByText("••••••••")).toBeDefined();
+      const reveal = await revealable();
+      expect(screen.queryByRole("button", { name: "Copy token" })).toBeNull();
+
+      await userEvent.click(reveal);
+      const copy = screen.getByRole("button", { name: "Copy token" });
+      // Named for the key, never for what it copies.
+      expect(copy.outerHTML).not.toContain(FIXTURE_VALUE);
+
+      await userEvent.click(screen.getByRole("button", { name: "Hide" }));
+      expect(screen.queryByRole("button", { name: "Copy token" })).toBeNull();
     });
 
     it("falls back to the redacted (blank) keys while the fetch is still in flight", () => {
@@ -195,7 +213,7 @@ lUc3RsBva1V3RlPz+Jo=
       expect(screen.getByText("Missing")).toBeDefined();
     });
 
-    it("still shows the Data section with tls.crt and tls.key masked", async () => {
+    it("still shows the Data section, with tls.crt and tls.key masked behind Reveal like any other key", async () => {
       render(
         <SecretDetailsBody
           object={secret({ "tls.crt": btoa(CERT), "tls.key": btoa(KEY) }, { type: "kubernetes.io/tls" })}
@@ -205,9 +223,13 @@ lUc3RsBva1V3RlPz+Jo=
       await waitFor(() => expect(getSecret).toHaveBeenCalled());
       expect(screen.getByText("tls.crt")).toBeDefined();
       expect(screen.getByText("tls.key")).toBeDefined();
-      expect(screen.getAllByText("••••••••")).toHaveLength(2);
-      expect(documentContains(CERT)).toBe(false);
-      expect(documentContains(KEY)).toBe(false);
+      await waitFor(() => {
+        const toggles = screen.getAllByRole("button", { name: "Reveal" }) as HTMLButtonElement[];
+        expect(toggles).toHaveLength(2);
+        for (const t of toggles) expect(t.disabled).toBe(false);
+      });
+      expect(screen.queryByRole("button", { name: "Hide" })).toBeNull();
+      expect(documentContains("FAKE-NOT-A-REAL-KEY")).toBe(false);
     });
 
     describe("certificate facts (parsed via core's certificateRows)", () => {
@@ -250,7 +272,7 @@ lUc3RsBva1V3RlPz+Jo=
         expect(table).toBeDefined();
       });
 
-      it("falls back to an Invalid status and no serial/issuer/SANs when the certificate fails to parse, without exposing the private key", async () => {
+      it("falls back to an Invalid status and no serial/issuer/SANs when the certificate fails to parse", async () => {
         render(
           <SecretDetailsBody
             object={secret({ "tls.crt": btoa(CERT), "tls.key": btoa(KEY) }, { type: "kubernetes.io/tls" })}
@@ -263,8 +285,6 @@ lUc3RsBva1V3RlPz+Jo=
         await waitFor(() => expect(screen.getAllByText("Invalid")).toHaveLength(2));
         // The "Subject" KV row and the table's Subject column both show it.
         expect(screen.getAllByText("Unable to parse certificate")).toHaveLength(2);
-        expect(documentContains(KEY)).toBe(false);
-        expect(documentContains("FAKE-NOT-A-REAL-KEY")).toBe(false);
       });
     });
   });
@@ -274,7 +294,7 @@ lUc3RsBva1V3RlPz+Jo=
       auths: { "registry.example.test": { username: "robot", password: "fixture-only-not-real" } },
     });
 
-    it("summarises registries without exposing the password", async () => {
+    it("summarises registries without putting the password in the summary", async () => {
       render(
         <SecretDetailsBody
           object={secret(
@@ -289,7 +309,9 @@ lUc3RsBva1V3RlPz+Jo=
       expect(screen.getByText("registry.example.test")).toBeDefined();
       expect(screen.getByText("robot")).toBeDefined();
       expect(screen.getByText("Stored")).toBeDefined();
-      expect(documentContains("fixture-only-not-real")).toBe(false);
+      // The table states a CATEGORY of credential. The password itself is in
+      // the Data section below, with the rest of the config, and only there.
+      expect(screen.getByRole("table").innerHTML).not.toContain("fixture-only-not-real");
     });
 
     it("shows an empty state when no valid registry credentials are found", async () => {
@@ -442,13 +464,14 @@ describe("when the values could not be read (getSecret refused, getObject's blan
     await waitFor(() => expect(screen.getByText("This Secret's values could not be read")).toBeDefined());
   });
 
-  it("reads the values again on Retry, and offers Reveal once they land", async () => {
+  it("reads the values again on Retry, and shows them once they land", async () => {
     render(<SecretDetailsBody object={blanked(["token"])} context="ctx" />);
     const retry = await screen.findByRole("button", { name: "Retry" });
 
     getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
     await userEvent.click(retry);
-    await waitFor(() => expect((screen.getByRole("button", { name: "Reveal" }) as HTMLButtonElement).disabled).toBe(false));
+    await userEvent.click(await revealable());
+    expect(screen.getByText(FIXTURE_VALUE)).toBeDefined();
     expect(getSecret).toHaveBeenCalledTimes(2);
     expect(screen.queryByText("This Secret's values could not be read")).toBeNull();
   });
@@ -466,13 +489,58 @@ describe("when the values could not be read (getSecret refused, getObject's blan
   });
 });
 
-describe("a revealed value", () => {
+describe("a Secret's annotations (#1085)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("makes one k8s.getSecret read for the body and the annotations drawn beside it", async () => {
+    getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 }, annotations: { note: "annotation-fixture" } });
+    render(
+      <>
+        <SecretDetailsBody object={secret({ token: "" })} context="ctx" />
+        <SecretAnnotationsSection context="ctx" namespace="default" name="s-1" blanked={{ note: "" }} />
+      </>,
+    );
+    await revealable();
+    await waitFor(() => expect(document.body.textContent).toContain("annotation-fixture"));
+    expect(getSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers the annotations too when the body's Retry succeeds, on one more read", async () => {
+    getSecret.mockResolvedValue({ error: "consent denied for k8s.getSecret" });
+    render(
+      <>
+        <SecretDetailsBody object={secret({ token: "" })} context="ctx" />
+        <SecretAnnotationsSection context="ctx" namespace="default" name="s-1" blanked={{ note: "" }} />
+      </>,
+    );
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(screen.queryByText("annotation-fixture")).toBeNull();
+
+    getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 }, annotations: { note: "annotation-fixture" } });
+    await userEvent.click(retry);
+    await revealable();
+    await waitFor(() => expect(document.body.textContent).toContain("annotation-fixture"));
+    expect(getSecret).toHaveBeenCalledTimes(2);
+  });
+
+  it("draws nothing for a Secret with no annotations", () => {
+    getSecret.mockResolvedValue({ data: {}, annotations: {} });
+    const { container } = render(
+      <SecretAnnotationsSection context="ctx" namespace="default" name="s-1" blanked={{}} />,
+    );
+    expect(container.innerHTML).toBe("");
+  });
+});
+
+describe("a shown value", () => {
   it("sits in the content's own ink, at the size of a value (#1001)", async () => {
     getSecret.mockResolvedValue({ data: { token: FIXTURE_B64 } });
     render(<SecretDetailsBody object={secret({ token: "" })} context="ctx" />);
-    await waitFor(() => expect((screen.getByRole("button", { name: "Reveal" }) as HTMLButtonElement).disabled).toBe(false));
-    await userEvent.click(screen.getByRole("button", { name: "Reveal" }));
-    const value = document.querySelector("pre")!;
+    await userEvent.click(await revealable());
+    const value = screen.getByText(FIXTURE_VALUE);
+    expect(value.tagName).toBe("PRE");
     expect(value.className).toContain("text-ink");
     expect(value.className).toContain("text-[0.75rem]");
     expect(value.className).not.toContain("text-muted");

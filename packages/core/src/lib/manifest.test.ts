@@ -9,6 +9,7 @@ import {
   parseResourceVersion,
   listEvents,
   listResource,
+  getSecret,
   redactSecretManifest,
 } from "./manifest";
 
@@ -400,5 +401,28 @@ describe("redactSecretManifest", () => {
       expect(out.yaml).toBeUndefined();
       expect(out.error).not.toContain(FIXTURE_VALUE);
     });
+  });
+});
+
+describe("getSecret", () => {
+  it("returns the values, the annotations and the manifest k8s.getSecret answered with", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      data: { token: FIXTURE_VALUE },
+      annotations: { note: "annotation-fixture" },
+      yaml: "apiVersion: v1\nkind: Secret\n",
+    });
+    const out = await getSecret("kind-dev", "default", "s-1", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.getSecret", { context: "kind-dev", namespace: "default", name: "s-1" });
+    expect(out).toEqual({
+      data: { token: FIXTURE_VALUE },
+      annotations: { note: "annotation-fixture" },
+      yaml: "apiVersion: v1\nkind: Secret\n",
+    });
+  });
+
+  it("normalises errors", async () => {
+    const out = await getSecret("c", "ns", "x", () => Promise.reject(new Error("forbidden")));
+    expect(out.error).toContain("forbidden");
+    expect(out.data).toBeUndefined();
   });
 });

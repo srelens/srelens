@@ -154,7 +154,7 @@ beforeEach(() => {
   core.diffManifest.mockReset().mockResolvedValue({ documents: [] });
   core.validateManifest.mockReset().mockResolvedValue({ valid: true, errors: [] });
   core.deleteResource.mockReset().mockResolvedValue({ ok: true });
-  core.getSecret.mockReset().mockResolvedValue({ data: { password: "s3cret" } });
+  core.getSecret.mockReset().mockResolvedValue({ data: { password: "czNjcmV0" }, annotations: {}, yaml: SECRET });
   core.listCrds.mockReset().mockResolvedValue({ crds: [] });
   core.openApiSchema.mockReset().mockResolvedValue(SCHEMA);
   ask.mockReset();
@@ -307,24 +307,24 @@ describe("EditResource", () => {
     expect(core.getManifest).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps a Secret's values out of the editor until they are revealed through the gated read", async () => {
-    // `k8s.getManifest` returns a Secret in the clear; the detail pane
-    // redacts it and the editor has to, or one tab over undoes the gate.
-    core.getManifest.mockResolvedValue({ yaml: SECRET });
+  it("opens a Secret with its values, editable, read through k8s.getSecret (#1085)", async () => {
+    // What the host sends on the ungated read: every value blanked. The
+    // editor must not show that, least of all with Apply live beside it.
+    core.getManifest.mockResolvedValue({ yaml: 'kind: Secret\ndata:\n  password: ""\n' });
     render(<EditResource route="/edit/prod-eu/Secret/checkout/db" />);
-    await waitFor(() => expect(latestEditor()?.value).toBeDefined());
-    const shown = latestEditor().value as string;
-    expect(shown).not.toContain("czNjcmV0");
-    expect(shown).toContain("REDACTED");
-    expect(latestEditor().readOnly).toBe(true);
-    expect(screen.getByTestId("secret-redacted")).toBeDefined();
-    expect(core.getSecret).not.toHaveBeenCalled();
-
-    await userEvent.click(screen.getByRole("button", { name: "Reveal values" }));
-    await waitFor(() => expect(core.getSecret).toHaveBeenCalledWith("prod-eu", "checkout", "db"));
-    await waitFor(() => expect(latestEditor().value).toBe(SECRET));
-    expect(latestEditor().readOnly).toBe(false);
+    await waitFor(() => expect(latestEditor()?.value).toBe(SECRET));
+    expect(core.getSecret).toHaveBeenCalledWith("prod-eu", "checkout", "db");
+    expect(latestEditor().readOnly).not.toBe(true);
+    expect(screen.queryByRole("button", { name: "Reveal values" })).toBeNull();
     expect(screen.queryByTestId("secret-redacted")).toBeNull();
+  });
+
+  it("says a Secret could not be read, rather than opening a blanked manifest to edit", async () => {
+    core.getManifest.mockResolvedValue({ yaml: 'kind: Secret\ndata:\n  password: ""\n' });
+    core.getSecret.mockResolvedValue({ error: "secrets \"db\" is forbidden" });
+    render(<EditResource route="/edit/prod-eu/Secret/checkout/db" />);
+    await waitFor(() => expect(document.body.textContent).toContain("forbidden"));
+    expect(latestEditor()?.value ?? "").not.toContain("password");
   });
 
   it("resolves a custom kind's group before reading its manifest", async () => {

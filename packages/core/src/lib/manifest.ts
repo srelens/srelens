@@ -272,25 +272,31 @@ export async function getObject(
   }
 }
 
+/** What `k8s.getSecret` answers with: the whole Secret, nothing blanked. */
+export interface SecretRead {
+  /** Base64 values by key, as stored in `Secret.data`. */
+  data: Record<string, string>;
+  /** Annotation values as the cluster has them. */
+  annotations: Record<string, string>;
+  /** The manifest as YAML, in the server's key order. */
+  yaml: string;
+}
+
 /**
- * Read a Secret's values via the dedicated, consent-gateable `k8s.getSecret`.
- * `k8s.getObject` redacts Secret data, so this is the only structured path to
- * the (base64-encoded) values — fetched lazily, only when the user reveals a
- * key.
+ * Read a Secret whole via the dedicated, consent-gateable `k8s.getSecret`: its
+ * values, its annotations and its manifest. `k8s.getObject`, `k8s.getManifest`
+ * and `k8s.diffManifest` blank a Secret for every caller, MCP clients included,
+ * so this audited read is what the app draws every Secret screen from (#1085).
  */
 export async function getSecret(
   context: string,
   namespace: string,
   name: string,
   invoke: Invoker = invokeCapability,
-): Promise<{ data?: Record<string, string>; error?: string }> {
+): Promise<Partial<SecretRead> & { error?: string }> {
   try {
-    const out = await invoke<{ data: Record<string, string> }>("k8s.getSecret", {
-      context,
-      namespace,
-      name,
-    });
-    return { data: out.data };
+    const out = await invoke<SecretRead>("k8s.getSecret", { context, namespace, name });
+    return { data: out.data, annotations: out.annotations, yaml: out.yaml };
   } catch (e) {
     return { error: String(e) };
   }
