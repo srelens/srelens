@@ -281,12 +281,12 @@ type: Opaque
         assert_eq!(out.data["apple"], "YQ==");
         assert_eq!(out.annotations["note"], "annotation-fixture");
 
-        assert!(out.yaml.contains("password: aHVudGVyMg=="), "{}", out.yaml);
-        assert!(out.yaml.contains("note: annotation-fixture"), "{}", out.yaml);
-        assert!(!out.yaml.contains("managedFields"), "{}", out.yaml);
+        assert!(out.yaml.contains("password: aHVudGVyMg=="), "the manifest lost a value or kept managedFields");
+        assert!(out.yaml.contains("note: annotation-fixture"), "the manifest lost a value or kept managedFields");
+        assert!(!out.yaml.contains("managedFields"), "the manifest lost a value or kept managedFields");
         // The server's order, with `apiVersion` and `kind` on top as kubectl
         // prints them: not the alphabetical order a JSON round trip gives.
-        let at = |needle: &str| out.yaml.find(needle).unwrap_or_else(|| panic!("{needle}: {}", out.yaml));
+        let at = |needle: &str| out.yaml.find(needle).unwrap_or_else(|| panic!("the manifest has no {needle}"));
         assert!(at("apiVersion:") < at("kind:"));
         assert!(at("kind:") < at("metadata:"));
         assert!(at("metadata:") < at("data:"));
