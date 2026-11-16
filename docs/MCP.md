@@ -349,10 +349,12 @@ has both combinations, on purpose:
   `--mcp-allow-destructive` — reading a Secret is not a mutation, so it
   would be wrong to lump it in with tools that drain nodes or delete
   resources.
-- `k8s.diffSecret` is the same dry-run diff as `k8s.diffManifest`, for
-  Secrets only and with their values left in on both sides. It reveals what
+- `k8s.diffSecret` is the same dry-run diff as `k8s.diffManifest`, for one
+  Secret with its values left in on both sides. It reveals what
   `k8s.getSecret` does, so it is a **sensitive read** too, behind the same
-  flag and confirm. The desktop's Edit screen calls it only while its diff
+  flag and confirm. It takes the Secret's `namespace` and `name` as
+  arguments, so the confirm and the audit record name it, and refuses YAML
+  that is not exactly that one Secret. The desktop's Edit screen calls it only while its diff
   panel is open on a Secret.
 
 If you only remember one thing from this section: don't infer whether a

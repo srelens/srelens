@@ -1792,7 +1792,7 @@ async fn run_suite() {
     let out = h
         .ok(
             "k8s.diffSecret",
-            json!({ "context": ctx, "yaml": secret_draft }),
+            json!({ "context": ctx, "namespace": NS, "name": SECRET, "yaml": secret_draft }),
         )
         .await;
     let doc = &out["documents"][0];

@@ -553,7 +553,8 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
     let active = true;
     setDiffing(true);
     const t = setTimeout(() => {
-      void (revealDiff ? diffSecret : diffManifest)(pinned, yaml).then((out) => {
+      const compare = revealDiff ? diffSecret(pinned, namespace ?? "", name, yaml) : diffManifest(pinned, yaml);
+      void compare.then((out) => {
         if (!active) return;
         setDiff(out.error ? null : (out.documents ?? []));
         setDiffError(out.error ? describeError(out.error).detail : "");
@@ -564,7 +565,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
       active = false;
       clearTimeout(t);
     };
-  }, [pinned, yaml, dirty, revealDiff]);
+  }, [pinned, yaml, dirty, revealDiff, namespace, name]);
   const stale = useMemo(
     () =>
       diff?.some(

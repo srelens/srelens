@@ -86,7 +86,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
-| `k8s.diffSecret` | medium | diff a Secret manifest against the cluster via server dry-run apply, values included (sensitive) |
+| `k8s.diffSecret` | medium | diff one Secret's draft against the cluster via server dry-run apply, values included (sensitive) |
 | `k8s.getSecret` | medium | read a Secret's values, annotations and manifest (sensitive; data is base64-encoded) |
 | `k8s.nodeJournalLogs` | medium | retrieve journalctl logs for a service on a node via SSH |
 | `k8s.nodeRuntimeDiagnostics` | medium | run non-invasive host diagnostics (containers, dmesg, disk, memory, process) on a node via SSH |

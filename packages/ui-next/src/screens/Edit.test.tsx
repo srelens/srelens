@@ -341,7 +341,7 @@ describe("EditResource", () => {
     await userEvent.click(screen.getByRole("button", { name: "Diff" }));
     const panel = await screen.findByRole("complementary", { name: "Diff" });
     await waitFor(() => expect(panel.textContent).toContain("bmV3LXMzY3JldA=="), { timeout: 3000 });
-    expect(core.diffSecret).toHaveBeenCalledWith("prod-eu", expect.stringContaining("bmV3LXMzY3JldA=="));
+    expect(core.diffSecret).toHaveBeenCalledWith("prod-eu", "checkout", "db", expect.stringContaining("bmV3LXMzY3JldA=="));
   });
 
   it("says a Secret could not be read, rather than opening a blanked manifest to edit", async () => {

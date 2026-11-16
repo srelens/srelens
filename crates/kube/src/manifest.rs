@@ -1438,6 +1438,18 @@ pub struct DiffIn {
     pub namespace: Option<String>,
 }
 
+/// `k8s.diffSecret`'s input: the one Secret the confirm names, and its draft.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiffSecretIn {
+    pub context: String,
+    /// The Secret's namespace. Named in the confirm and the audit record.
+    pub namespace: String,
+    /// The Secret's name. Named in the confirm and the audit record.
+    pub name: String,
+    /// The draft: exactly one document, the Secret named above.
+    pub yaml: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffDoc {
@@ -1649,12 +1661,50 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
 /// `k8s.getSecret`: audited, and over MCP behind
 /// `--mcp-allow-sensitive-reads` and a confirm.
 pub fn diff_secret_capability(cache: Arc<ClientCache>) -> Capability {
-    Capability::typed::<DiffIn, DiffOut, _, _>(
+    Capability::typed::<DiffSecretIn, DiffOut, _, _>(
         "k8s.diffSecret",
-        "diff a Secret manifest against the cluster via server dry-run apply, values included (sensitive)",
+        "diff one Secret's draft against the cluster via server dry-run apply, values included (sensitive)",
         Annotations::SENSITIVE_READ,
-        move |input: DiffIn| diff_documents(cache.clone(), input, true),
+        move |input: DiffSecretIn| {
+            let cache = cache.clone();
+            async move {
+                one_named_secret(&input)?;
+                let input = DiffIn {
+                    context: input.context,
+                    yaml: input.yaml,
+                    namespace: Some(input.namespace),
+                };
+                diff_documents(cache, input, true).await
+            }
+        },
     )
+}
+
+/// Hold a `k8s.diffSecret` call to the Secret its confirm names: the prompt is
+/// built from `namespace`/`name`, so the YAML must be exactly one document,
+/// and that document that Secret. A second document would be revealed under a
+/// prompt that never named it.
+fn one_named_secret(input: &DiffSecretIn) -> Result<(), CapabilityError> {
+    let wanted = format!("{}/{}", input.namespace, input.name);
+    let docs = split_documents(&input.yaml)?;
+    if docs.len() > 1 {
+        return Err(CapabilityError::Handler(format!(
+            "k8s.diffSecret compares one Secret per call ({wanted}); the YAML has {} documents",
+            docs.len()
+        )));
+    }
+    // An empty or half-typed document reveals nothing; diff_documents skips it.
+    let Some(r) = docs.first().and_then(resource_ref) else {
+        return Ok(());
+    };
+    let namespace = r.namespace.as_deref().unwrap_or(&input.namespace);
+    if r.name != input.name || namespace != input.namespace {
+        return Err(CapabilityError::Handler(format!(
+            "k8s.diffSecret was asked for {wanted}, but the YAML is {namespace}/{}",
+            r.name
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2234,7 +2284,7 @@ metadata:
         "apiVersion: v1\nkind: Secret\nmetadata:\n  name: db\n  namespace: team\ndata:\n  token: bmV3LWZpeHR1cmUtdmFsdWU=\n";
 
     async fn diff_with(capability: Capability, yaml: &str) -> Result<serde_json::Value, CapabilityError> {
-        (capability.handler)(serde_json::json!({ "context": "fake", "yaml": yaml })).await
+        (capability.handler)(serde_json::json!({ "context": "fake", "namespace": "team", "name": "db", "yaml": yaml })).await
     }
 
     async fn cache_for_secret_diff() -> Arc<ClientCache> {
@@ -2278,6 +2328,43 @@ metadata:
         let text = out.to_string();
         assert!(!text.contains(OLD_TOKEN), "the live value left the ungated diff");
         assert!(!text.contains(NEW_TOKEN), "the draft's value left the ungated diff");
+    }
+
+    /// The confirm names one Secret, from the arguments, so the call is held to
+    /// it: one document, that Secret. A second Secret in the same YAML would be
+    /// revealed under a prompt that never named it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn diff_secret_refuses_more_than_one_document() {
+        let two = format!("{SECRET_DRAFT}---
+{}", SECRET_DRAFT.replace("name: db", "name: other"));
+        let err = diff_with(diff_secret_capability(cache_for_secret_diff().await), &two)
+            .await
+            .expect_err("two documents under one confirm");
+        assert!(err.to_string().contains("one"), "says why: {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn diff_secret_refuses_a_document_that_names_another_secret() {
+        for draft in [
+            SECRET_DRAFT.replace("name: db", "name: other"),
+            SECRET_DRAFT.replace("namespace: team", "namespace: elsewhere"),
+        ] {
+            let err = diff_with(diff_secret_capability(cache_for_secret_diff().await), &draft)
+                .await
+                .expect_err("the document must be the Secret the confirm names");
+            assert!(err.to_string().contains("team/db"), "says which Secret it was asked for: {err}");
+        }
+    }
+
+    #[test]
+    fn diff_secrets_confirm_names_the_secret() {
+        let cap = diff_secret_capability(ClientCache::new(PathBuf::from("/x")));
+        let fields = srelens_capability::confirm_fields(
+            &serde_json::json!({ "context": "prod", "namespace": "team", "name": "db", "yaml": SECRET_DRAFT }),
+        );
+        let text = srelens_capability::render_confirm(cap.annotations.confirm.unwrap(), &fields).unwrap();
+        assert!(text.contains("team/db"), "{text}");
+        assert!(text.contains("prod"), "{text}");
     }
 
     /// Its confirm says it reveals secret material, so it takes Secrets only.

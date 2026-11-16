@@ -210,18 +210,18 @@ describe("diffManifest", () => {
 });
 
 describe("diffSecret", () => {
-  it("calls the gated k8s.diffSecret and returns its documents", async () => {
+  it("calls the gated k8s.diffSecret for the one Secret it names, and returns its documents", async () => {
     const invoke = vi.fn().mockResolvedValue({
       documents: [{ kind: "Secret", name: "db", exists: true, changed: true, rows: [], currentResourceVersion: "3" }],
     });
-    const out = await diffSecret("ctx", "kind: Secret", "team-a", invoke);
-    expect(invoke).toHaveBeenCalledWith("k8s.diffSecret", { context: "ctx", yaml: "kind: Secret", namespace: "team-a" });
+    const out = await diffSecret("ctx", "team-a", "db", "kind: Secret", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.diffSecret", { context: "ctx", namespace: "team-a", name: "db", yaml: "kind: Secret" });
     expect(out.documents?.[0].changed).toBe(true);
   });
 
   it("returns a refusal as an error, not as no changes", async () => {
     const invoke = vi.fn().mockRejectedValue(new Error("consent denied for k8s.diffSecret"));
-    const out = await diffSecret("ctx", "kind: Secret", undefined, invoke);
+    const out = await diffSecret("ctx", "team-a", "db", "kind: Secret", invoke);
     expect(out.documents).toBeUndefined();
     expect(out.error).toContain("consent denied");
   });
