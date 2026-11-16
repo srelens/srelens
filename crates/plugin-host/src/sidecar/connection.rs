@@ -500,7 +500,15 @@ impl Connection {
                     self.finish(stream, StreamEvent::Failed(message.to_owned()));
                     Ok(())
                 }
-                method::TUNNEL_DATA | method::TUNNEL_CREDIT | method::TUNNEL_CLOSE => {
+                // Below 0.3 these are not the protocol's yet: ignored as any
+                // other unknown method is.
+                method::TUNNEL_DATA | method::TUNNEL_CREDIT | method::TUNNEL_CLOSE
+                    if self
+                        .state()
+                        .api_version
+                        .as_ref()
+                        .is_some_and(|version| version >= &semver::Version::new(0, 3, 0)) =>
+                {
                     self.tunnel_frame(&method, params)
                 }
                 // Nothing else is sent to the host: a method from a newer SDK.
@@ -2012,6 +2020,102 @@ mod tests {
             };
             assert!(why.contains("tunnel id"), "{why}");
         }
+    }
+
+    /// A pod that will not read until its own reply has been read, as a
+    /// thread-per-connection server or a Kafka broker muting a connection
+    /// does, while the sidecar sends it a full window: both directions must
+    /// move at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_pod_that_writes_before_it_reads_does_not_deadlock() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        let pod = tokio::spawn(async move {
+            let mut pod = upstream.pod;
+            pod.write_all(&vec![5; WINDOW]).await.unwrap();
+            let mut got = vec![0; WINDOW];
+            pod.read_exact(&mut got).await.unwrap();
+            got
+        });
+        for _ in 0..WINDOW / MAX_TUNNEL_CHUNK_BYTES {
+            let chunk = data(1, &[9; MAX_TUNNEL_CHUNK_BYTES]);
+            assert_eq!(frame(&connection, "tunnel/data", chunk), Ok(()));
+        }
+        let (mut from_pod, mut credited) = (0, 0);
+        while from_pod < WINDOW || credited < WINDOW {
+            let next = tunnel_frame(&mut lines).await;
+            match next["method"].as_str() {
+                Some("tunnel/data") => from_pod += decoded(&next).len(),
+                Some("tunnel/credit") => {
+                    credited += next["params"]["bytes"].as_u64().unwrap() as usize
+                }
+                _ => panic!("{next}"),
+            }
+        }
+        assert_eq!(pod.await.unwrap(), vec![9; WINDOW]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tunnel_frames_on_a_0_2_session_are_ignored() {
+        let (connection, mut lines) = Connection::new(limits());
+        connection.set_api_version(semver::Version::new(0, 2, 0));
+        for (method, params) in [
+            ("tunnel/close", json!({})),
+            ("tunnel/data", json!({"tunnel": 0, "data": "!"})),
+            ("tunnel/credit", json!({"tunnel": "1"})),
+            ("tunnel/data", data(1, b"x")),
+        ] {
+            assert_eq!(frame(&connection, method, params), Ok(()), "{method}");
+        }
+        no_tunnel_frame(&mut lines).await;
+        assert!(!connection.is_ended());
+    }
+
+    /// A sidecar's close is TCP's close after write: what srelens accepted
+    /// reaches the pod, then the pod's connection is dropped.
+    #[tokio::test(start_paused = true)]
+    async fn data_then_close_in_one_read_reaches_the_pod() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        let mut upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        let stdout = format!(
+            "{}\n{}\n",
+            protocol::notification("tunnel/data", &data(1, b"hello")),
+            protocol::notification("tunnel/close", &json!({"tunnel": 1})),
+        );
+        let end = connection.read(stdout.as_bytes(), broker.clone()).await;
+        assert!(matches!(end, ReadEnd::Eof), "{end:?}");
+        let mut got = Vec::new();
+        upstream.pod.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, b"hello");
+        no_tunnel_frame(&mut lines).await;
+        assert_eq!(open_tunnels(&connection), 0, "the flush frees the place");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ending_the_session_stops_a_flushing_tunnel() {
+        let (connection, mut lines) = tunnel_session();
+        // The pod reads nothing, so the flush cannot finish.
+        let (broker, mut upstreams) = pods(1024);
+        let mut upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        let chunk = data(1, &[1; MAX_TUNNEL_CHUNK_BYTES]);
+        assert_eq!(frame(&connection, "tunnel/data", chunk), Ok(()));
+        assert_eq!(
+            frame(&connection, "tunnel/close", json!({"tunnel": 1})),
+            Ok(())
+        );
+        // Frames after the close are dropped, not violations.
+        assert_eq!(frame(&connection, "tunnel/data", data(1, b"late")), Ok(()));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            open_tunnels(&connection),
+            1,
+            "a flushing tunnel keeps its place"
+        );
+        connection.end("The extension was stopped");
+        reads_eof(&mut upstream.pod).await;
+        assert_eq!(open_tunnels(&connection), 0);
     }
 
     #[tokio::test(start_paused = true)]

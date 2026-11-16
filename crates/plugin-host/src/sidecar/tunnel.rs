@@ -1,9 +1,11 @@
 //! Pod tunnels (#1091): TCP connections to pods, carried as `tunnel/*`
 //! frames on the sidecar's pipe.
 //!
-//! Each open tunnel has one pump task. It reads the pod only while srelens
-//! has credit to send, and queues each chunk on the tunnel lane, the lowest of
-//! the writer's three, waiting when it is full. The reader loop never waits:
+//! Each open tunnel has one pump task, moving both directions at once so a
+//! pod that writes before it reads cannot deadlock it. It reads the pod only
+//! while srelens has credit to send, and queues each chunk on the tunnel lane,
+//! the lowest of the writer's three, waiting when it is full. The reader loop
+//! never waits:
 //! it adds the sidecar's bytes to the tunnel's buffer, which the sidecar's
 //! window bounds, and closes the tunnel if it overruns. So neither the pod nor
 //! the sidecar can make srelens hold more than one window per direction per
@@ -57,7 +59,12 @@ pub(super) struct OpenTunnel {
     held: usize,
     /// Bytes srelens may still send the sidecar.
     credit: usize,
-    wake: Arc<Notify>,
+    /// Wakes the pod-to-sidecar half: more credit.
+    more_credit: Arc<Notify>,
+    /// Wakes the sidecar-to-pod half: more bytes, or the sidecar's close.
+    more_inbound: Arc<Notify>,
+    /// The sidecar closed it: what was accepted is written, then it ends.
+    draining: bool,
     /// Tells the pump why srelens is closing the tunnel. Taken once it is
     /// closing: from then on the sidecar's frames for it are dropped.
     close: Option<oneshot::Sender<String>>,
@@ -80,7 +87,7 @@ pub(super) fn open(
     tunnel: Tunnel,
     slot: OwnedSemaphorePermit,
 ) -> OpenTunnel {
-    let wake = Arc::new(Notify::new());
+    let (more_credit, more_inbound) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
     let (close, closed) = oneshot::channel();
     let pump = tokio::spawn(pump(
         connection.clone(),
@@ -88,13 +95,15 @@ pub(super) fn open(
         id,
         tunnel,
         closed,
-        wake.clone(),
+        (more_credit.clone(), more_inbound.clone()),
     ));
     OpenTunnel {
         inbound: Vec::new(),
         held: 0,
         credit: WINDOW,
-        wake,
+        more_credit,
+        more_inbound,
+        draining: false,
         close: Some(close),
         pump: pump.abort_handle(),
         _slot: slot,
@@ -126,7 +135,7 @@ impl OpenTunnel {
         if !bytes.is_empty() {
             self.held += bytes.len();
             self.inbound.extend_from_slice(&bytes);
-            self.wake.notify_one();
+            self.more_inbound.notify_one();
         }
         None
     }
@@ -141,7 +150,7 @@ impl OpenTunnel {
             return Some(format!("granted credit past the window of {WINDOW} bytes"));
         }
         self.credit += credit;
-        self.wake.notify_one();
+        self.more_credit.notify_one();
         None
     }
 }
@@ -162,16 +171,18 @@ impl Connection {
         let Some(open) = state
             .tunnels
             .get_mut(&id)
-            .filter(|open| open.close.is_some())
+            .filter(|open| open.close.is_some() && !open.draining)
         else {
             return Ok(());
         };
         let broken = match name {
             method::TUNNEL_DATA => open.received(params),
             method::TUNNEL_CREDIT => open.credited(params),
-            // The sidecar closed it: removing it drops the pod's connection.
+            // The sidecar closed it, as TCP closes after a write: the bytes
+            // already accepted reach the pod, then its connection drops.
             _ => {
-                state.tunnels.remove(&id);
+                open.draining = true;
+                open.more_inbound.notify_one();
                 return Ok(());
             }
         };
@@ -196,106 +207,134 @@ async fn pump(
     id: u64,
     tunnel: Tunnel,
     mut closed: oneshot::Receiver<String>,
-    wake: Arc<Notify>,
+    (more_credit, more_inbound): (Arc<Notify>, Arc<Notify>),
 ) {
-    let Tunnel {
-        mut io, mut ended, ..
-    } = tunnel;
-    let (message, ours) = tokio::select! {
+    let Tunnel { io, mut ended, .. } = tunnel;
+    let (mut from_pod, mut to_pod) = tokio::io::split(io);
+    // Both halves run at once in this task; aborting it drops both.
+    let message = tokio::select! {
         biased;
         why = &mut closed => match why {
-            Ok(why) => (Some(why), false),
+            Ok(why) => Some(why),
             // Removed from the table; this task is aborted.
             Err(_) => return,
         },
-        why = &mut ended => (Some(why), true),
-        why = flow(&connection, &lane, id, &mut io, &wake) => (why, true),
+        why = &mut ended => Some(why),
+        why = pod_to_sidecar(&connection, &lane, id, &mut from_pod, &more_credit) => why,
+        why = sidecar_to_pod(&connection, &lane, id, &mut to_pod, &more_inbound) => why,
     };
-    if ours {
-        match connection.state().tunnels.get_mut(&id) {
-            Some(open) => open.close = None,
-            None => return,
+    let draining = match connection.state().tunnels.get_mut(&id) {
+        Some(open) => {
+            open.close = None;
+            open.draining
         }
-    }
-    drop(io);
-    // Fails only once the writer is gone, when the session is ending.
-    if let Ok(place) = lane.reserve().await {
-        place.send(frame(
-            method::TUNNEL_CLOSE,
-            &TunnelCloseParams {
-                tunnel: id,
-                message,
-            },
-        ));
+        None => return,
+    };
+    drop((from_pod, to_pod));
+    // The sidecar closed it itself, so it is not told.
+    if !draining {
+        // Fails only once the writer is gone, when the session is ending.
+        if let Ok(place) = lane.reserve().await {
+            place.send(frame(
+                method::TUNNEL_CLOSE,
+                &TunnelCloseParams {
+                    tunnel: id,
+                    message,
+                },
+            ));
+        }
     }
     connection.state().tunnels.remove(&id);
 }
 
-/// Move bytes both ways until the pod's side ends: `None` at its EOF, or why
-/// it failed.
-// ponytail: half-duplex per tunnel (a pending write to the pod or wait for a
-// lane place holds the other direction), split the io into one task per
-// direction if a protocol needs both at once.
-async fn flow(
+/// The pod's bytes to the sidecar, while there is credit, until the pod's
+/// EOF (`None`) or a failure (why).
+async fn pod_to_sidecar(
     connection: &Connection,
     lane: &mpsc::Sender<String>,
     id: u64,
-    io: &mut Box<dyn TunnelIo>,
-    wake: &Notify,
+    from_pod: &mut (impl AsyncRead + Unpin),
+    more_credit: &Notify,
 ) -> Option<String> {
     let mut buf = vec![0; MAX_TUNNEL_CHUNK_BYTES];
     loop {
-        let (inbound, room) = {
+        let room = {
             let mut state = connection.state();
             let open = state.tunnels.get_mut(&id)?;
-            (
-                std::mem::take(&mut open.inbound),
-                open.credit.min(MAX_TUNNEL_CHUNK_BYTES),
-            )
+            // A draining tunnel no longer reads its pod.
+            if open.draining {
+                0
+            } else {
+                open.credit.min(MAX_TUNNEL_CHUNK_BYTES)
+            }
         };
-        if !inbound.is_empty() {
-            let written = async {
-                io.write_all(&inbound).await?;
-                io.flush().await
-            };
-            if let Err(e) = written.await {
-                return Some(format!("srelens could not write to the pod: {e}"));
-            }
-            let place = lane.reserve().await.ok()?;
-            // Returned before the credit is queued, so the sidecar can never
-            // be told of room srelens has not made.
-            if let Some(open) = connection.state().tunnels.get_mut(&id) {
-                open.held -= inbound.len();
-            }
-            place.send(frame(
-                method::TUNNEL_CREDIT,
-                &TunnelCreditParams {
-                    tunnel: id,
-                    bytes: inbound.len() as u32,
-                },
-            ));
+        if room == 0 {
+            more_credit.notified().await;
             continue;
         }
-        tokio::select! {
-            _ = wake.notified() => {}
-            read = io.read(&mut buf[..room]), if room > 0 => {
-                let n = match read {
-                    Ok(0) => return None,
-                    Ok(n) => n,
-                    Err(e) => return Some(format!("The connection to the pod failed: {e}")),
-                };
-                let place = lane.reserve().await.ok()?;
-                if let Some(open) = connection.state().tunnels.get_mut(&id) {
-                    open.credit -= n;
-                }
-                place.send(frame(
-                    method::TUNNEL_DATA,
-                    &TunnelDataParams {
-                        tunnel: id,
-                        data: BASE64.encode(&buf[..n]),
-                    },
-                ));
-            }
+        let n = match from_pod.read(&mut buf[..room]).await {
+            Ok(0) => return None,
+            Ok(n) => n,
+            Err(e) => return Some(format!("The connection to the pod failed: {e}")),
+        };
+        let place = lane.reserve().await.ok()?;
+        if let Some(open) = connection.state().tunnels.get_mut(&id) {
+            open.credit -= n;
         }
+        place.send(frame(
+            method::TUNNEL_DATA,
+            &TunnelDataParams {
+                tunnel: id,
+                data: BASE64.encode(&buf[..n]),
+            },
+        ));
+    }
+}
+
+/// The sidecar's bytes to the pod, each write credited back, until the
+/// sidecar's close has been flushed (`None`) or a write fails (why).
+async fn sidecar_to_pod(
+    connection: &Connection,
+    lane: &mpsc::Sender<String>,
+    id: u64,
+    to_pod: &mut (impl AsyncWrite + Unpin),
+    more_inbound: &Notify,
+) -> Option<String> {
+    loop {
+        let (inbound, draining) = {
+            let mut state = connection.state();
+            let open = state.tunnels.get_mut(&id)?;
+            (std::mem::take(&mut open.inbound), open.draining)
+        };
+        if inbound.is_empty() {
+            if draining {
+                return None;
+            }
+            more_inbound.notified().await;
+            continue;
+        }
+        let written = async {
+            to_pod.write_all(&inbound).await?;
+            to_pod.flush().await
+        };
+        if let Err(e) = written.await {
+            return Some(format!("srelens could not write to the pod: {e}"));
+        }
+        if draining {
+            continue;
+        }
+        let place = lane.reserve().await.ok()?;
+        // Returned before the credit is queued, so the sidecar can never be
+        // told of room srelens has not made.
+        if let Some(open) = connection.state().tunnels.get_mut(&id) {
+            open.held -= inbound.len();
+        }
+        place.send(frame(
+            method::TUNNEL_CREDIT,
+            &TunnelCreditParams {
+                tunnel: id,
+                bytes: inbound.len() as u32,
+            },
+        ));
     }
 }
