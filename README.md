@@ -43,6 +43,7 @@
 <p align="center">
   <a href="https://github.com/srelens/srelens/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/srelens/srelens?display_name=release&label=release&color=22c55e"></a>
   <a href="https://github.com/srelens/srelens/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/srelens/srelens/total?label=downloads&color=3b82f6"></a>
+  <a href="https://github.com/srelens/homebrew-tap"><img alt="Homebrew cask version" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsrelens%2Fhomebrew-tap%2Fmain%2Fbadges%2Fsrelens.json"></a>
   <a href="https://aur.archlinux.org/packages/srelens-bin"><img alt="AUR version" src="https://img.shields.io/aur/version/srelens-bin?label=aur&logo=archlinux&logoColor=white&color=1793d1"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/srelens/srelens?color=675e80"></a>
   <a href="https://github.com/srelens/srelens/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/srelens/srelens/actions/workflows/ci.yml/badge.svg?branch=dev"></a>
@@ -222,6 +223,12 @@ verifying downloads and uninstalling on each platform.
 | macOS | `.dmg` for Apple Silicon and Intel | Developer ID signed and notarized |
 | Linux | `.AppImage`, `.deb`, `.rpm`, and [`srelens-bin`](https://aur.archlinux.org/packages/srelens-bin) on the AUR | The AppImage supports the in-app updater |
 | Windows | `.exe`, `.msi` | Windows may show a SmartScreen prompt while code signing remains on the roadmap |
+
+macOS (Homebrew):
+
+```bash
+brew install --cask srelens/tap/srelens
+```
 
 ### Terminal UI
 

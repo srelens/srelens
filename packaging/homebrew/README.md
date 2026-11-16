@@ -1,10 +1,14 @@
 # Homebrew tap
 
-`brew install srelens/tap/srectl` installs the terminal UI from the
-archive the release already publishes.
+The tap exposes both ways into srelens on macOS:
 
-This directory holds the formula and the script that renders it. The published
-copy lives in a separate repository, because that is how Homebrew finds it:
+```bash
+brew install --cask srelens/tap/srelens  # desktop app
+brew install srelens/tap/srectl          # terminal UI
+```
+
+This directory holds the formula, cask, and scripts that render them. The
+published copies live in a separate repository, because that is how Homebrew finds them:
 `srelens/tap` resolves to `github.com/srelens/homebrew-tap`, and a tap must be
 a repository of its own.
 
@@ -12,6 +16,9 @@ a repository of its own.
 | --- | --- |
 | `srectl.rb` | The formula, as a template. Version `0.0.0` and zeroed checksums. |
 | `render.mjs` | Fills those in from a published release's `SHA256SUMS`. |
+| `srelens.rb` | The desktop cask template, with one URL mapping for both macOS architectures. |
+| `render-cask.mjs` | Fills the cask from locally computed hashes of the two release DMGs and emits its badge endpoint. |
+| `render-cask.test.mjs` | Offline renderer regressions for versions, checksums, placeholders, and architecture mapping. |
 
 Linux installs take the **static musl** archives, not the glibc ones. The
 glibc builds are produced on ubuntu-22.04 and ubuntu-24.04-arm, so they
@@ -19,17 +26,22 @@ carry a glibc floor of 2.35 and 2.39; Homebrew on Linux supports far older
 distributions than that, and a dynamically linked binary would fail before
 `main` with a `GLIBC_2.3x` symbol error that tells the user nothing.
 
-A formula, not a cask: this is a command-line binary. The desktop `.dmg` wants
-`brew install --cask` and is tracked separately in #225.
+The terminal binary is a formula; the desktop `.dmg` is a cask. Both install
+the prebuilt release artifacts rather than rebuilding the workspace.
 
 ## How a release updates it
 
 `.github/workflows/homebrew-publish.yml` runs after a **stable** release is
-published, renders the formula for that version, and pushes it to the tap. It
-is also `workflow_dispatch`-able for any already-published version, which is
-the point of it being a separate workflow — welded to the release pipeline, a
-failed push could only be retried by cutting another release. That is how the
-AUR package once sat four versions behind.
+public, renders the formula, downloads and hashes the exact Apple Silicon and
+Intel DMGs, renders the cask, and pushes all of them to the tap in one commit.
+It also publishes `badges/srelens.json` in that commit; the README's Shields
+endpoint therefore reports the cask version rather than the unrelated version
+from Homebrew's central cask repository.
+
+The workflow is also `workflow_dispatch`-able for any already-published stable
+version, which is the point of it being separate — welded to the release
+pipeline, a failed push could only be retried by cutting another release. That
+is how the AUR package once sat four versions behind.
 
 Stable only. A tap carries one version per formula, and `0.8.1-152` is not
 what someone typing `brew install` is asking for.
@@ -65,6 +77,11 @@ personal tap before pointing it at the real one.
 ```bash
 node packaging/homebrew/render.mjs 1.2.3            # prints the formula
 node packaging/homebrew/render.mjs 1.2.3 --out Formula/srectl.rb
+
+node packaging/homebrew/render-cask.mjs 1.2.3 \
+  --sums /path/to/desktop-SHA256SUMS \
+  --out Casks/srelens.rb \
+  --badge-out badges/srelens.json
 ```
 
 It reads the checksums the release published rather than downloading the
@@ -77,6 +94,13 @@ pointing back here.
 
 `--sums <file>` reads the checksums from a local file instead, for an offline
 render or to try one before the release is public.
+
+The cask renderer is deliberately offline-only. Its checksum file must contain
+exactly one record for `srelens_<version>_aarch64.dmg` and one for
+`srelens_<version>_x64.dmg`; missing, duplicate, malformed, or unexpected
+records fail closed. The workflow creates that file only after downloading the
+two exact public release assets and hashing them itself. It never uses
+Homebrew's `:no_check` escape hatch.
 
 ## The formula and self-update
 
