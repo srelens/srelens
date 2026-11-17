@@ -395,3 +395,25 @@ fn an_app_that_connects_to_pods_has_no_read_only_operations() {
         .annotations;
     assert_eq!(operation, SIDECAR_OPERATION);
 }
+
+#[test]
+fn an_app_with_actions_that_connects_to_pods_is_at_least_high_impact() {
+    let (route, _) = recording();
+    let operation = |value: &Value| {
+        let (reg, _) = register(value, route.clone()).unwrap();
+        reg.get("plugin/org.example.gitops/diff").unwrap().annotations
+    };
+    let mut value = manifest();
+    value["srelensApiVersion"] = json!("^0.9");
+    let without = operation(&value);
+    value["permissions"] = json!(["k8s.listCustomResource", "k8s.annotate", "k8s.streamLogs", "k8s.connectPod"]);
+    value["capabilities"].as_array_mut().unwrap().push(json!(
+        {"name":"broker","title":"Broker","target":"k8s.connectPod","inputs":[],
+         "arguments":{"resource":"applications","selector":".spec.selector","port":9092}}));
+    let with = operation(&value);
+    assert!(!with.read_only);
+    assert_eq!(with.impact, Impact::High);
+    assert_eq!(with.requires_confirm, without.requires_confirm);
+    // Without the binding it is what its actions alone make it: gated, below High.
+    assert!(without.requires_confirm && without.impact < Impact::High);
+}

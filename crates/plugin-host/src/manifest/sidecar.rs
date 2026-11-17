@@ -83,14 +83,15 @@ pub const SIDECAR_OPERATION_CONFIRM: &str =
 ///
 /// With none, [`SIDECAR_OPERATION`], or [`SIDECAR_OPERATION_CONNECTING`] when
 /// `connects_to_pods`: the app has a `k8s.connectPod` binding. With any, the
-/// sidecar may ask the broker
-/// to run them, so the operation is not a read: it inherits the strongest of
+/// sidecar may ask the broker to run them, so the operation is not a read: it
+/// inherits the strongest of
 /// their rows through [`Annotations::for_binding`] — gated, at least their
 /// impact, destructive if one is — and the host's own
 /// [`SIDECAR_OPERATION_CONFIRM`] in place of any one primitive's sentence,
 /// which would describe a write the operation may never make. Each write it
 /// then asks for is confirmed again by the broker's consent, with the app
-/// named.
+/// named. An app that also connects to pods is never below
+/// [`SIDECAR_OPERATION_CONNECTING`].
 pub fn sidecar_operation_annotations(
     actions: impl IntoIterator<Item = Annotations>,
     connects_to_pods: bool,
@@ -99,7 +100,10 @@ pub fn sidecar_operation_annotations(
     if actions.peek().is_none() {
         return if connects_to_pods { SIDECAR_OPERATION_CONNECTING } else { SIDECAR_OPERATION };
     }
-    let reach = actions.fold(Annotations::WEAKEST, Annotations::at_least);
+    let mut reach = actions.fold(Annotations::WEAKEST, Annotations::at_least);
+    if connects_to_pods {
+        reach = reach.at_least(SIDECAR_OPERATION_CONNECTING);
+    }
     let mut row = Annotations::for_binding(reach, SIDECAR_OPERATION);
     row.confirm = Some(SIDECAR_OPERATION_CONFIRM);
     row
