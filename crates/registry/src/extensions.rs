@@ -48,6 +48,8 @@ pub mod tools;
 pub mod tunnels;
 #[cfg(test)]
 mod tunnels_tests;
+#[cfg(test)]
+mod tunnels_live_tests;
 mod operations;
 mod availability;
 pub(crate) mod jobs;
