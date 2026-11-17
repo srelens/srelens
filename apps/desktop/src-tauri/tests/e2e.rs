@@ -262,6 +262,12 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
+    (
+        "k8s.runKubeBench",
+        "pulls the aquasec/kube-bench image from a registry and runs a hostPID Job to completion, \
+         which is too slow and network-bound for this suite; the Job spec, report parsing and Job \
+         state are unit tested in srelens-kube, and the run was checked by hand on a kind cluster",
+    ),
     ("k8s.runJob", "broker-only declaration stub; scoped Job authorization, results and cleanup are exercised in registry lifecycle tests"),
     (
         "k8s.nodeJournalLogs",
@@ -1450,6 +1456,15 @@ async fn run_suite() {
 
     let gpu_inv = h.ok("k8s.gpuInventory", json!({ "context": ctx })).await;
     assert!(gpu_inv["total_gpu_nodes"].is_number() || gpu_inv["nodes"].is_array());
+    let cost = h
+        .ok(
+            "k8s.costOverview",
+            json!({ "context": ctx, "cpuCoreHour": 0.05 }),
+        )
+        .await;
+    assert!(cost["nodes"].as_array().is_some_and(|n| !n.is_empty()), "the cluster has nodes: {cost}");
+    assert_eq!(cost["rates"]["cpuCoreHour"], 0.05);
+    assert!(cost["rates"]["memGibHour"].as_f64().is_some_and(|m| m > 0.0), "the other price defaults on its own");
     let nd = h
         .ok(
             "k8s.createNodeDebugPod",

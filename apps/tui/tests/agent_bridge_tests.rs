@@ -121,6 +121,7 @@ fn cli_turn(
         conversation_id: "conv-1".into(),
         resume: None,
         chat_root: chat_root.to_path_buf(),
+        read_only: None,
     }
 }
 

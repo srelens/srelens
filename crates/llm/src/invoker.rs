@@ -16,7 +16,7 @@ use crate::error::LlmError;
 use crate::provider::{ToolCallResult, ToolInvoker};
 use crate::types::ToolDef;
 
-/// Core 43 Kubernetes SRE tools essential for workload diagnosis, manifest inspection,
+/// Core 44 Kubernetes SRE tools essential for workload diagnosis, manifest inspection,
 /// event timeline triage, node health, networking, safe remediation, and dynamic playbook retrieval.
 pub const CORE_SRE_TOOLS: &[&str] = &[
     // Workloads & Pods
@@ -65,6 +65,8 @@ pub const CORE_SRE_TOOLS: &[&str] = &[
     "k8s.scale",
     "k8s.deletePod",
     "k8s.cordonNode",
+    // Security persona: CIS benchmark Job (consent-gated like other mutations)
+    "k8s.runKubeBench",
     // Monitoring & Connectivity
     "k8s.prometheusQuery",
     "ping",
@@ -175,6 +177,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_security_personas_benchmark_tool_is_advertised_to_native_turns() {
+        // The Security persona tells the model to call k8s.runKubeBench; a native
+        // turn only receives schemas for tools on this list.
+        let filtered = FilteredToolInvoker::new(StubInvoker { tools: vec![] }, CORE_SRE_TOOLS);
+        assert!(filtered.allowed.contains("k8s.runKubeBench"));
+        assert!(filtered.allowed.contains("k8s_runKubeBench"));
+    }
+
     #[tokio::test]
     async fn test_filtered_invoker_delegates_call_tool() {
         let stub = StubInvoker { tools: vec![] };
@@ -200,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_core_sre_tools_count_and_inclusions() {
-        assert_eq!(CORE_SRE_TOOLS.len(), 43);
+        assert_eq!(CORE_SRE_TOOLS.len(), 44);
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listResource"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listCustomResource"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listEndpoints"));

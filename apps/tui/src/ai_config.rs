@@ -152,6 +152,9 @@ pub struct AiSettings {
     pub caveman_level: Option<String>,
     #[serde(default)]
     pub theme: Option<String>,
+    /// The Assistant's persona (see `ai_personas`); `None` is the plain assistant.
+    #[serde(default)]
+    pub persona: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -192,6 +195,7 @@ impl Default for AiSettings {
             timeout_seconds: 120,
             caveman_level: None,
             theme: None,
+            persona: None,
         }
     }
 }

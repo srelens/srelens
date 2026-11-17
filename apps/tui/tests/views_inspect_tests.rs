@@ -2859,6 +2859,8 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
         argo_timeout_secs: None,
+        cost_cpu_core_hour: None,
+        cost_mem_gib_hour: None,
         update_available: None,
     };
 
