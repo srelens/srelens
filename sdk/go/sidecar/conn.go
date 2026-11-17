@@ -212,13 +212,15 @@ type tunnelConn struct {
 	h      *Host
 	id     uint64
 	remote net.Addr
-	rd, wd deadline      // the read and write deadlines; fired for good when the conn ends, wd too
-	dmu    sync.Mutex    // held while the deadlines are set, so the paired ones never differ
-	cd     deadline      // bounds the credit Read sends: the read deadline, and fired for good when the conn ends
-	rlock  chan struct{} // held for the whole of a Read
-	wlock  chan struct{} // held for the whole of a Write
-	rsig   chan struct{} // woken by data, a close, or the session's end
-	wsig   chan struct{} // woken by credit, a close, or the session's end
+	rd, wd deadline   // the read and write deadlines; fired for good when the conn ends, wd too
+	dmu    sync.Mutex // held while the deadlines are set, so the paired ones never differ
+
+	betweenDeadlines func()        // a test's hook, between a read deadline and its credit twin; nil
+	cd               deadline      // bounds the credit Read sends: the read deadline, and fired for good when the conn ends
+	rlock            chan struct{} // held for the whole of a Read
+	wlock            chan struct{} // held for the whole of a Write
+	rsig             chan struct{} // woken by data, a close, or the session's end
+	wsig             chan struct{} // woken by credit, a close, or the session's end
 
 	mu      sync.Mutex
 	in      bytes.Buffer
@@ -522,6 +524,9 @@ func (c *tunnelConn) SetDeadline(t time.Time) error {
 	c.dmu.Lock()
 	defer c.dmu.Unlock()
 	c.rd.set(t)
+	if c.betweenDeadlines != nil {
+		c.betweenDeadlines()
+	}
 	c.cd.set(t)
 	c.wd.set(t)
 	return nil
@@ -533,6 +538,9 @@ func (c *tunnelConn) SetReadDeadline(t time.Time) error {
 	c.dmu.Lock()
 	defer c.dmu.Unlock()
 	c.rd.set(t)
+	if c.betweenDeadlines != nil {
+		c.betweenDeadlines()
+	}
 	c.cd.set(t)
 	return nil
 }
