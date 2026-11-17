@@ -24,7 +24,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 
-const APP: &str = "org.example.certmanager";
+pub(super) const APP: &str = "org.example.certmanager";
 
 /// A cert-manager app: it reads Deployments and Argo Rollouts, and reaches the
 /// pods they select; one more logs binding reaches any pod in `cert-manager`.
@@ -86,7 +86,7 @@ enum LogStep {
     Fail(&'static str),
 }
 
-fn pod(name: &str, namespace: &str, labels: &[(&str, &str)]) -> PodFacts {
+pub(super) fn pod(name: &str, namespace: &str, labels: &[(&str, &str)]) -> PodFacts {
     PodFacts {
         name: name.into(),
         namespace: namespace.into(),
@@ -106,10 +106,10 @@ fn pod(name: &str, namespace: &str, labels: &[(&str, &str)]) -> PodFacts {
 }
 
 #[derive(Default)]
-struct Cluster {
-    objects: Mutex<BTreeMap<(String, String, String), Value>>,
-    pods: Mutex<Vec<PodFacts>>,
-    services: Mutex<Vec<ServiceFacts>>,
+pub(super) struct Cluster {
+    pub(super) objects: Mutex<BTreeMap<(String, String, String), Value>>,
+    pub(super) pods: Mutex<Vec<PodFacts>>,
+    pub(super) services: Mutex<Vec<ServiceFacts>>,
     logs: Mutex<std::collections::VecDeque<Vec<LogStep>>>,
     log_asks: Mutex<Vec<LogsAsk>>,
     exec_output: Mutex<Vec<(Output, &'static str)>>,
@@ -117,16 +117,22 @@ struct Cluster {
     exec_asks: Mutex<Vec<ExecAsk>>,
     /// Upstream connections open now, and ever opened.
     open: Arc<AtomicUsize>,
-    connected: Mutex<Vec<(String, u16)>>,
+    pub(super) connected: Mutex<Vec<(String, u16)>>,
     /// Exec never ends by itself when set.
     exec_hangs: std::sync::atomic::AtomicBool,
     /// Every port-forward connection is refused with this, when set.
-    refuse_connect: Mutex<Option<&'static str>>,
+    pub(super) refuse_connect: Mutex<Option<&'static str>>,
     /// Object reads so far, and which of them (counted from 1) fail, and how.
     object_reads: AtomicUsize,
     failed_reads: Mutex<BTreeMap<usize, ReadError>>,
     /// Lets an `EndWhenLetGo` session end.
     let_go: std::sync::atomic::AtomicBool,
+    /// Pod reads so far, and how the next ones go: `Some` fails with it,
+    /// `None` answers; once it is empty every read answers.
+    pub(super) pod_reads: AtomicUsize,
+    pub(super) pod_answers: Mutex<std::collections::VecDeque<Option<ReadError>>>,
+    /// Every pod read from now on is held open, never answered, when set.
+    pub(super) hold_pod_reads: std::sync::atomic::AtomicBool,
 }
 
 /// Counts itself out of `open` when the connection it echoes on ends.
@@ -236,6 +242,13 @@ impl PodCluster for Cluster {
         namespace: &str,
         name: &str,
     ) -> Result<Option<PodFacts>, ReadError> {
+        self.pod_reads.fetch_add(1, Ordering::SeqCst);
+        if self.hold_pod_reads.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if let Some(Some(failure)) = self.pod_answers.lock().unwrap().pop_front() {
+            return Err(failure);
+        }
         Ok(self
             .pods
             .lock()
@@ -336,14 +349,14 @@ const FAST: PodTiming = PodTiming {
 };
 
 #[derive(Default)]
-struct Trail(Mutex<Vec<AuditRecord>>);
+pub(super) struct Trail(Mutex<Vec<AuditRecord>>);
 impl AuditSink for Trail {
     fn record(&self, rec: AuditRecord) {
         self.0.lock().unwrap().push(rec);
     }
 }
 impl Trail {
-    fn seen(&self) -> Vec<AuditRecord> {
+    pub(super) fn seen(&self) -> Vec<AuditRecord> {
         self.0.lock().unwrap().clone()
     }
 }
@@ -359,7 +372,7 @@ struct Host {
     revision: u64,
 }
 
-fn install(path: &Path) -> u64 {
+pub(super) fn install(path: &Path) -> u64 {
     configure(
         path,
         json!({"action": "unsignedApps", "allowUnsignedApps": true}),
@@ -1748,4 +1761,137 @@ async fn a_forward_says_when_its_connections_fail() {
         .frames("extstream:fail")
         .iter()
         .all(|f| f["type"] != "close" && f["type"] != "error"));
+}
+
+fn kafka() -> Value {
+    json!({
+        "id":"org.example.kafka", "name":"Kafka", "version":"0.1.0", "srelensApiVersion":"^0.9",
+        "kind":"executable",
+        "permissions":["k8s.listCustomResource", "k8s.connectPod"],
+        "capabilities":[
+            {"name":"podsets","title":"Pod sets","target":"k8s.listCustomResource",
+                "inputs":["context","namespace"],
+                "arguments":{"group":"core.strimzi.io","version":"v1beta2","plural":"strimzipodsets",
+                    "kind":"StrimziPodSet","namespaced":true}},
+            {"name":"broker","title":"Kafka broker","target":"k8s.connectPod","inputs":[],
+                "arguments":{"resource":"podsets","selector":".spec.selector","port":9092}}],
+        "sidecar":{"binaries":{"linux-amd64":"bin/linux-amd64/kafka"},"operations":[{"name":"scan","title":"Scan","inputs":[]}]},
+        "contributions":{"pages":[],"detailTabs":[],"detailLinks":[]}
+    })
+}
+
+#[test]
+fn connect_pod_needs_an_executable_app() {
+    let mut value = kafka();
+    value["kind"] = json!("declarative");
+    value.as_object_mut().unwrap().remove("sidecar");
+    let manifest = parsed(&value);
+    let found = super::validate_app(&manifest, &manifest.permission_names(), fake_core())
+        .expect_err("a declarative app may not connect to pods");
+    let error = found.0
+        .iter()
+        .find(|e| e.path == "capabilities[1].target")
+        .unwrap_or_else(|| panic!("{found:?}"));
+    assert_eq!(error.code, srelens_plugin_host::ValidationCode::UnsupportedTarget);
+    assert!(error.message.contains("Pod connections require an executable app"), "{error:?}");
+}
+
+#[test]
+fn the_access_review_says_what_a_pod_connection_reaches() {
+    let items = super::access_items(&parsed(&kafka()), &["k8s.listCustomResource".into(), "k8s.connectPod".into()]);
+    // Scoped by a reader's objects: the namespace grant does not limit it, and the
+    // review says so (#1091).
+    assert!(
+        items.iter().any(|item| item.starts_with(
+            "Lets this app's program connect to port 9092 of pods selected by each StrimziPodSet"
+        ) && item.ends_with(
+            "at .spec.selector, in any namespace where you can read StrimziPodSet objects, with k8s.connectPod"
+        )),
+        "{items:#?}"
+    );
+    // Scoped by namespaces: the granted list is the limit, and nothing more is said.
+    let mut value = kafka();
+    value["permissions"][1] = json!({"capability": "k8s.connectPod", "namespaces": ["kafka"]});
+    value["capabilities"][1]["arguments"] = json!({"port": 9092});
+    let items = super::access_items(&parsed(&value), &["k8s.listCustomResource".into(), "k8s.connectPod".into()]);
+    assert!(
+        items.iter().any(|item| item
+            == "Lets this app's program connect to port 9092 of pods in a granted namespace, with k8s.connectPod"),
+        "{items:#?}"
+    );
+}
+
+#[test]
+fn connect_pod_is_declared_broker_only() {
+    let manifest = parsed(&kafka());
+    super::validate_app(&manifest, &manifest.permission_names(), fake_core())
+        .expect("an executable app may bind k8s.connectPod");
+    let declared = super::pods::capabilities()
+        .into_iter()
+        .find(|c| c.id == srelens_plugin_host::POD_CONNECT)
+        .expect("k8s.connectPod is declared");
+    assert_eq!(declared.annotations, super::pods::CONNECT_ANNOTATIONS);
+    let cache = srelens_kube::client_cache::ClientCache::new_many(vec![]);
+    let broker = crate::broker_only(cache.clone(), crate::BrokeredNetwork::Off);
+    assert!(broker
+        .iter()
+        .any(|c| c.id == srelens_plugin_host::POD_CONNECT));
+    let catalog = crate::build_registry_with_paths(cache, vec![]);
+    assert!(catalog.get(srelens_plugin_host::POD_CONNECT).is_none());
+}
+
+/// A pod tunnel is the app's program's to open through the broker: a view is
+/// neither offered the pods of one nor allowed to open one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_cannot_open_or_list_a_connect_binding() {
+    let host = host();
+    configure(
+        &host.path,
+        json!({"action": "unsignedApps", "allowUnsignedApps": true}),
+    )
+    .unwrap();
+    let mut value = kafka();
+    let binaries: serde_json::Map<String, Value> = srelens_plugin_host::SIDECAR_PLATFORMS
+        .iter()
+        .map(|platform| (platform.to_string(), json!(format!("bin/{platform}/kafka"))))
+        .collect();
+    value["sidecar"]["binaries"] = Value::Object(binaries);
+    let archive = super::executable_tests::package_with_binaries(&value);
+    let state = configure(
+        &host.path,
+        json!({"action": "installPackage", "grants": ["k8s.listCustomResource", "k8s.connectPod"],
+            "package": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, archive)}),
+    )
+    .unwrap_or_else(|e| panic!("install: {e}"));
+    let revision = state
+        .plugins
+        .iter()
+        .find(|p| p.manifest.id == "org.example.kafka")
+        .unwrap()
+        .revision;
+    const REFUSAL: &str = "is a k8s.connectPod binding, which only the app's program may open";
+    let listed = host
+        .registry
+        .invoke(
+            "extensions.pods",
+            json!({"id": "org.example.kafka", "revision": revision, "capability": "broker",
+                "context": "cluster/a", "namespace": "team", "name": "web"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(listed.contains(REFUSAL), "{listed}");
+    let opened = host
+        .streams
+        .open_audited(
+            host.sink.clone(),
+            host.trail.clone(),
+            json!({"id": "org.example.kafka", "revision": revision, "view": "v",
+                "channel": "extstream:c", "context": "cluster/a", "namespace": "team",
+                "source": {"kind": "portForward", "capability": "broker", "name": "web", "pod": "web-1"}}),
+        )
+        .await
+        .map(|out| out.stream)
+        .unwrap_err();
+    assert!(opened.contains(REFUSAL), "{opened}");
 }

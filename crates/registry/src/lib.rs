@@ -28,6 +28,7 @@ pub use extensions::fuzzing;
 pub use extensions::sidecars::SidecarHost;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
 pub use extensions::tools::AppTools;
+pub use extensions::tunnels::PodTunnels;
 pub use extensions::{
     AppPolicy, Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog, SharedPolicy,
     TrustRoot, MAX_POLICY_BYTES,
@@ -764,7 +765,8 @@ enum BrokeredNetwork {
 /// The capabilities only the extension broker calls. Kept out of the registry the
 /// catalog and MCP are built from, so neither offers them: the CRD check an app read
 /// makes first, `network.http` (#568), which called directly would fetch any URL, and
-/// the pod capabilities (#567), which run only as app streams.
+/// the pod capabilities (#567), which run only as app streams or, for `k8s.connectPod`
+/// (#1091), as a tunnel an executable app's program opens through `host/connect`.
 fn broker_only(cache: Arc<ClientCache>, network: BrokeredNetwork) -> Vec<Capability> {
     let mut capabilities = vec![extensions::crd::check_capability(cache)];
     capabilities.push(extensions::jobs::capability());
@@ -921,36 +923,48 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{}: {e}", source["id"]));
         }
-        // An executable app, from a package carrying a binary for every platform.
-        let package = tempfile::tempdir().unwrap();
-        let binaries: serde_json::Map<String, serde_json::Value> =
-            srelens_plugin_host::SIDECAR_PLATFORMS
-                .iter()
-                .map(|platform| {
-                    let path = format!("bin/{platform}/scanner");
-                    let file = package.path().join(&path);
-                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-                    std::fs::write(file, b"#!/bin/false\n").unwrap();
-                    (platform.to_string(), json!(path))
-                })
-                .collect();
-        let scanner = json!({
-            "id": "org.example.scanner", "name": "Scanner", "version": "1.0.0",
-            "srelensApiVersion": "^0.6", "kind": "executable", "permissions": [], "capabilities": [],
-            "sidecar": {"binaries": binaries, "operations": [
-                {"name": "scan", "title": "Scan an image",
-                 "inputs": [{"name": "image", "type": "string", "required": true}]}]},
-            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
-        });
-        std::fs::write(package.path().join("extension.json"), scanner.to_string()).unwrap();
-        std::fs::write(
-            package.path().join("digests.json"),
-            extension_package::digest_list(package.path()).unwrap(),
-        )
-        .unwrap();
-        let archive = extension_package::pack(package.path()).unwrap();
+        // Executable apps, each from a package carrying a binary for every platform:
+        // a scanner, and a Kafka console whose program connects to pods (#1091).
+        let executable = |id: &str, api: &str, permissions: serde_json::Value, capabilities: serde_json::Value| {
+            let package = tempfile::tempdir().unwrap();
+            let binaries: serde_json::Map<String, serde_json::Value> =
+                srelens_plugin_host::SIDECAR_PLATFORMS
+                    .iter()
+                    .map(|platform| {
+                        let path = format!("bin/{platform}/scanner");
+                        let file = package.path().join(&path);
+                        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                        std::fs::write(file, b"#!/bin/false\n").unwrap();
+                        (platform.to_string(), json!(path))
+                    })
+                    .collect();
+            let manifest = json!({
+                "id": id, "name": "Scanner", "version": "1.0.0",
+                "srelensApiVersion": api, "kind": "executable", "permissions": permissions,
+                "capabilities": capabilities,
+                "sidecar": {"binaries": binaries, "operations": [
+                    {"name": "scan", "title": "Scan an image",
+                     "inputs": [{"name": "image", "type": "string", "required": true}]}]},
+                "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+            });
+            std::fs::write(package.path().join("extension.json"), manifest.to_string()).unwrap();
+            std::fs::write(
+                package.path().join("digests.json"),
+                extension_package::digest_list(package.path()).unwrap(),
+            )
+            .unwrap();
+            base64::engine::general_purpose::STANDARD
+                .encode(extension_package::pack(package.path()).unwrap())
+        };
         configure(json!({"action": "installPackage", "grants": [],
-            "package": base64::engine::general_purpose::STANDARD.encode(archive)}))
+            "package": executable("org.example.scanner", "^0.6", json!([]), json!([]))}))
+        .await
+        .unwrap();
+        configure(json!({"action": "installPackage", "grants": ["k8s.connectPod"],
+            "package": executable("org.example.kafka", "^0.9",
+                json!([{"capability": "k8s.connectPod", "namespaces": ["team"]}]),
+                json!([{"name": "broker", "title": "Any pod in team", "target": "k8s.connectPod",
+                    "inputs": [], "arguments": {"port": 9092}}]))}))
         .await
         .unwrap();
 
@@ -984,9 +998,11 @@ mod tests {
                 operations.push(named(item));
             }
         }
-        assert_eq!(listed["plugins"].as_array().unwrap().len(), 4);
+        assert_eq!(listed["plugins"].as_array().unwrap().len(), 5);
         assert!(operations.len() > 40, "{operations:?}");
-        assert_eq!(sessions, ["plugin/org.example.releases/logs"]);
+        assert!(operations.contains(&"plugin/org.example.kafka/scan".to_owned()));
+        sessions.sort();
+        assert_eq!(sessions, ["plugin/org.example.kafka/broker", "plugin/org.example.releases/logs"]);
         assert_eq!(
             srelens_mcp::completeness::assert_every_app_operation_has_a_tool(&operations, &server),
             Ok(())

@@ -20,8 +20,8 @@ use srelens_capability::{CapabilityError, Registry};
 use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
     AppIdentity, Broker, CapabilityBroker, CgroupRoot, Consent, Enforcement, LaunchError, Launched,
-    Launcher, Limits, NoBroker, OsSandbox, Policy, SandboxConfig, SidecarCommand, SidecarConfig,
-    SidecarStatus, Supervisor,
+    Launcher, Limits, NoBroker, OsSandbox, PodConnector, Policy, SandboxConfig, SidecarCommand,
+    SidecarConfig, SidecarStatus, Supervisor,
 };
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -124,6 +124,9 @@ pub struct SidecarHost {
     /// asked: a headless process, whose sidecars' writes are then all refused.
     pub consent: Arc<dyn Consent>,
     pub audit: Arc<dyn AuditSink>,
+    /// What a sidecar's `host/connect` reaches a pod through (#1091): the host's real
+    /// `PodTunnels`, or `NoPodConnector` where there is no cluster to dial.
+    pub pods: Arc<dyn PodConnector>,
 }
 
 /// The sidecar of one app, at the revision it was started for.
@@ -225,12 +228,10 @@ impl AppSidecars {
             binary,
         });
         let broker: Arc<dyn Broker> = match self.host.lock().unwrap().clone() {
-            Some(host) => Arc::new(CapabilityBroker::new(
-                host.registry,
-                identity(app),
-                host.audit,
-                host.consent,
-            )),
+            Some(host) => Arc::new(
+                CapabilityBroker::new(host.registry, identity(app), host.audit, host.consent)
+                    .with_pods(host.pods),
+            ),
             // No host has said what answers a sidecar: every call it makes is refused.
             None => Arc::new(NoBroker),
         };

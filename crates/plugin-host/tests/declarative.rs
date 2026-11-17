@@ -570,10 +570,10 @@ fn api_ranges_negotiate_against_every_supported_version() {
 #[test]
 fn a_manifest_for_a_newer_api_is_told_the_version_it_needs_not_an_unknown_field() {
     let mut newer = manifest();
-    newer["srelensApiVersion"] = json!("^0.9");
+    newer["srelensApiVersion"] = json!("^0.10");
     newer["contributions"]["notYetAContribution"] = json!([]);
     let error = Manifest::parse(&newer.to_string()).unwrap_err().to_string();
-    assert!(error.contains("requires API ^0.9"), "{error}");
+    assert!(error.contains("requires API ^0.10"), "{error}");
     assert!(
         error.contains(&srelens_plugin_host::SUPPORTED_API_VERSIONS.join(", ")),
         "{error}"

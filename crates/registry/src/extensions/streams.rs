@@ -23,6 +23,7 @@ mod providers;
 mod operations;
 pub(super) use pods::MAX_LINE_BYTES;
 pub use pods::{ExecConfirmed, PodTiming};
+pub(crate) use pods::{read_pod, Authority, ExtensionStreamsParts, Record};
 #[cfg(test)]
 pub(super) use pods::MAX_LINES_PER_FRAME;
 
@@ -593,6 +594,12 @@ impl ExtensionStreams {
     #[cfg(test)]
     pub(super) fn set_provider_timing(&self, timing: super::providers::ProviderTiming) {
         *self.provider_timing.lock().unwrap() = timing;
+    }
+
+    /// Changes when the inventory is written, after the lifecycle's own endings:
+    /// what a sidecar's pod tunnel (#1091) rechecks its authority on.
+    pub(crate) fn inventory_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inventory.subscribe()
     }
 
     /// The cluster the pod sources reach.

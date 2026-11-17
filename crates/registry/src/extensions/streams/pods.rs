@@ -84,30 +84,60 @@ pub struct ExecConfirmed {
     pub command: Vec<String>,
 }
 
-/// One pod source's authority, rechecked whenever the inventory changes.
-struct Authority {
+/// One pod source's authority, rechecked whenever the inventory changes. A
+/// sidecar's pod tunnel (#1091) is held to the same one.
+pub(crate) struct Authority {
     streams: Arc<ExtensionStreamsParts>,
-    id: String,
+    pub(crate) id: String,
     revision: u64,
     capability: String,
     context: String,
     /// The one pod target the binding must have; `None` for any of them.
+    /// Only a sidecar's tunnel asks for `k8s.connectPod`.
     target: Option<&'static str>,
 }
 
 /// What a pod source needs of its stream manager, shared with the source task.
-pub(super) struct ExtensionStreamsParts {
-    pub path: super::Store,
+pub(crate) struct ExtensionStreamsParts {
+    pub(super) path: super::Store,
     pub core: Arc<srelens_capability::Registry>,
     pub cache: Arc<srelens_kube::client_cache::ClientCache>,
 }
 
 impl Authority {
-    /// The app may still reach this binding: installed, enabled, this
-    /// revision, this cluster, the manifest valid against its grants, and the
-    /// binding one of `target`'s. Answers the pinned context, the manifest and
-    /// the binding.
-    async fn check(&self) -> Result<(String, Manifest, Binding), String> {
+    /// The authority of a sidecar's tunnel through the `k8s.connectPod`
+    /// binding `capability`, for the app the supervisor started.
+    pub(crate) fn tunnel(
+        streams: Arc<ExtensionStreamsParts>,
+        id: &str,
+        revision: u64,
+        capability: &str,
+        context: &str,
+    ) -> Self {
+        Self {
+            streams,
+            id: id.to_owned(),
+            revision,
+            capability: capability.to_owned(),
+            context: context.to_owned(),
+            target: Some(srelens_plugin_host::POD_CONNECT),
+        }
+    }
+
+    /// The app may still reach this binding: [`Authority::app`], then
+    /// [`Authority::binding`]. Answers the pinned context, the manifest and the
+    /// binding. A view's (any `target` but `k8s.connectPod`) is refused a
+    /// `k8s.connectPod` binding, which only the app's program may open.
+    pub(crate) async fn check(&self) -> Result<(String, Manifest, Binding), String> {
+        let (context, manifest) = self.app().await?;
+        let binding = self.binding(&manifest)?;
+        Ok((context, manifest, binding))
+    }
+
+    /// The app may still be used here: installed, enabled, this revision, this
+    /// cluster, and the manifest valid against its grants. Answers the pinned
+    /// context and the manifest.
+    pub(crate) async fn app(&self) -> Result<(String, Manifest), String> {
         if self.context.trim().is_empty() {
             return Err("An explicit cluster context is required".into());
         }
@@ -121,7 +151,11 @@ impl Authority {
         )
         .await
         .map_err(|e| e.to_string())?;
-        let manifest = state.plugins[index].manifest.clone();
+        Ok((context, state.plugins[index].manifest.clone()))
+    }
+
+    /// The binding `manifest` declares by this name, one of `target`'s.
+    pub(crate) fn binding(&self, manifest: &Manifest) -> Result<Binding, String> {
         let binding = manifest
             .capabilities
             .iter()
@@ -133,6 +167,14 @@ impl Authority {
                     self.id, self.capability
                 )
             })?;
+        if binding.target == srelens_plugin_host::POD_CONNECT
+            && self.target != Some(srelens_plugin_host::POD_CONNECT)
+        {
+            return Err(format!(
+                "\"{}\" is a k8s.connectPod binding, which only the app's program may open",
+                binding.name
+            ));
+        }
         match self.target {
             Some(target) if binding.target != target => {
                 return Err(format!(
@@ -148,26 +190,34 @@ impl Authority {
             }
             _ => {}
         }
-        Ok((context, manifest, binding))
+        Ok(binding)
     }
 }
 
-/// One audit record for a pod session (#555): who, through which app, on
-/// which cluster and pod, and whether it started.
-struct Record<'a> {
-    audit: &'a dyn AuditSink,
-    tool: &'static str,
-    app: &'a str,
-    revision: u64,
-    context: &'a str,
-    namespace: &'a str,
+/// One audit record for a pod session (#555), or a sidecar's pod tunnel
+/// (#1091): who, through which app, on which cluster and pod, and whether it
+/// started.
+pub(crate) struct Record<'a> {
+    pub(crate) audit: &'a dyn AuditSink,
+    pub(crate) source: Source,
+    pub(crate) tool: &'static str,
+    pub(crate) app: &'a str,
+    pub(crate) revision: u64,
+    pub(crate) context: &'a str,
+    pub(crate) namespace: &'a str,
 }
 
 impl Record<'_> {
-    fn write(&self, pod: Option<&str>, args: Value, decision: &'static str, refused: Option<&str>) {
+    pub(crate) fn write(
+        &self,
+        pod: Option<&str>,
+        args: Value,
+        decision: &'static str,
+        refused: Option<&str>,
+    ) {
         self.audit.record(AuditRecord {
             result_bytes: None,
-            source: Source::Ui,
+            source: self.source,
             tool: self.tool.to_owned(),
             args,
             app: Some(AppRef {
@@ -239,7 +289,7 @@ pub(super) fn line_frame(source: &str, line: Line) -> Value {
 
 impl ExtensionStreams {
     /// The parts a pod source keeps, so the task outlives no manager.
-    fn parts(&self) -> Arc<ExtensionStreamsParts> {
+    pub(crate) fn parts(&self) -> Arc<ExtensionStreamsParts> {
         Arc::new(ExtensionStreamsParts {
             path: self.path.clone(),
             core: self.core.clone(),
@@ -401,6 +451,7 @@ impl ExtensionStreams {
         let (context, manifest, binding) = authority.check().await?;
         let record = Record {
             audit: audit.as_ref(),
+            source: Source::Ui,
             tool: POD_EXEC,
             app: &input.id,
             revision: input.revision,
@@ -527,6 +578,7 @@ impl ExtensionStreams {
         let (context, manifest, binding) = authority.check().await?;
         let record = Record {
             audit: audit.as_ref(),
+            source: Source::Ui,
             tool: POD_FORWARD,
             app: &input.id,
             revision: input.revision,
@@ -868,6 +920,38 @@ impl LogFollow {
     }
 }
 
+/// The monitor's check of a forwarded pod, every [`PodTiming::monitor`]: `Err`
+/// with why when it left `scope`, `Ok(false)` when it is gone or not running,
+/// else `Ok(true)` — a read that got no answer is not the pod going away: a
+/// person is watching a view's forward.
+pub(crate) async fn pod_still_there(
+    cluster: &dyn PodCluster,
+    context: &str,
+    scope: &Scope,
+    app: &str,
+    pod: &str,
+) -> Result<bool, String> {
+    Ok(read_pod(cluster, context, scope, app, pod).await?.unwrap_or(true))
+}
+
+/// [`pod_still_there`], with a failed read said rather than taken as the pod
+/// still there: `Ok(Err(why))` when the read failed. An unattended pod tunnel
+/// (#1091) counts those.
+pub(crate) async fn read_pod(
+    cluster: &dyn PodCluster,
+    context: &str,
+    scope: &Scope,
+    app: &str,
+    pod: &str,
+) -> Result<Result<bool, String>, String> {
+    match cluster.pod(context, &scope.namespace, pod).await {
+        Ok(Some(facts)) if !scope.admits(&facts) => Err(scope.refusal(app, pod)),
+        Ok(Some(facts)) => Ok(Ok(facts.running())),
+        Ok(None) => Ok(Ok(false)),
+        Err(error) => Ok(Err(ScopeError::from(error).into())),
+    }
+}
+
 /// A pod that has run to its end and will not run again.
 fn finished(pod: &PodFacts) -> bool {
     matches!(pod.phase.as_deref(), Some("Succeeded" | "Failed"))
@@ -1042,14 +1126,8 @@ impl Forward {
                             return Ok(());
                         }
                     }
-                    match self.cluster.pod(&self.context, &self.scope.namespace, &self.pod.name).await {
-                        Ok(Some(pod)) if !self.scope.admits(&pod) => {
-                            return Err(self.scope.refusal(&self.app, &self.pod.name));
-                        }
-                        Ok(Some(pod)) if pod.running() => {}
-                        // A transient failure to ask is not the pod going away.
-                        Err(_) => {}
-                        Ok(_) => self.retarget(&tx).await?,
+                    if !pod_still_there(self.cluster.as_ref(), &self.context, &self.scope, &self.app, &self.pod.name).await? {
+                        self.retarget(&tx).await?;
                     }
                 }
                 changed = self.inventory.changed() => {

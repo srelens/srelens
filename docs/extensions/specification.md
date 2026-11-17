@@ -313,6 +313,10 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ## API changelog
 
+### 0.9.0
+
+Executable apps may bind `k8s.connectPod`: the app's own program opens a TCP connection to a pod in scope, through the host, over sidecar protocol 0.3.0. The target is a form of `capabilities[].target`, so a `^0.8` manifest that binds it is told it requires API 0.9. It takes a pod binding's arguments (`port`, `resource`, `service`) and scope, and the pod permission's `namespaces`; a declarative app that binds it is refused. It is broker-only: not a tool, and a view can neither open it nor list its pods. It is not read-only and is `high` impact, so an app that binds it has operation tools that are not read-only, are `high` impact and are confirmation-gated, so an agent's call to one is confirmed per call; the app's own pages run them without a prompt. The schema for this line is `schemas/extension-manifest.v0.9.json`; older line schemas remain frozen. See [Pod connections](manifest.md#pod-connections).
+
 ### 0.8.0
 
 Executable operations may declare native `view` metadata (`autoRun`, `stream`, `hidden`). The host provides pinned operation routes, tables, namespace selection, retry, pagination and owned cancellable streams. A stream cannot start automatically. The kind-bound `k8s.listWorkloadImages` reader returns regular/init-container images for Deployments, StatefulSets or DaemonSets. The schema for this line is `schemas/extension-manifest.v0.8.json`; older line schemas remain frozen. The executable-only `k8s.runJob` binding also requires API `^0.8`; it fixes a digest-pinned scanner image, command, scalar argument slots and bounded namespace read rules. Sidecar protocol 0.2.0 adds binding availability, scoped Job execution and paged reads; the host refuses these additions under protocol 0.1.0. Runtime Job values cannot start with `-`, so callers cannot substitute command-line options.
@@ -371,7 +375,9 @@ preview until API 1.0, and so are executable apps
   needs a verified publisher or the unsigned-app setting even without writes, and runs
   its sidecar only in the OS sandbox, starting on its first operation call. Its sidecar
   reaches the host only through the broker (#573): an operation of an app that declares
-  no action is read-only and not gated, and one of an app that declares actions is gated
+  no action is read-only and not gated unless the app binds `k8s.connectPod` (then an
+  agent's call is confirmed, and the app's own pages run it unprompted), and one of an
+  app that declares actions is gated
   as the strongest of them, each write it asks for confirmed again, naming the app. See
   [What the host holds a sidecar to](manifest.md#what-the-host-holds-a-sidecar-to).
 - The host supports API 0.3, 0.4, 0.5 and 0.6, and `extensions.catalog` reports all

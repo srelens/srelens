@@ -362,3 +362,71 @@ async fn declared_image_cursor_is_exposed_and_accepts_bounded_pages_only() {
         .await
         .is_err());
 }
+
+#[test]
+fn an_app_that_connects_to_pods_has_no_read_only_operations() {
+    let (route, _) = recording();
+    let mut value = manifest();
+    value.as_object_mut().unwrap().remove("actions");
+    value["srelensApiVersion"] = json!("^0.9");
+    value["permissions"] = json!(["k8s.listCustomResource", "k8s.connectPod"]);
+    value["capabilities"] = json!([
+        {"name":"applications","title":"List applications","target":"k8s.listCustomResource",
+         "arguments":{"group":"argoproj.io","version":"v1alpha1","plural":"applications",
+             "kind":"Application","namespaced":true},
+         "inputs":["context","namespace"]},
+        {"name":"broker","title":"Broker","target":"k8s.connectPod","inputs":[],
+         "arguments":{"resource":"applications","selector":".spec.selector","port":9092}}]);
+    value["contributions"]["pages"] = json!([]);
+    let (reg, _) = register(&value, route.clone()).unwrap();
+    let operation = reg
+        .get("plugin/org.example.gitops/diff")
+        .unwrap()
+        .annotations;
+    // An agent's call stops at a confirmation, in the host's words: the program
+    // runs, and may send data to the pods it can connect to.
+    assert!(!operation.read_only && operation.requires_confirm && operation.sensitive);
+    assert_eq!(operation.impact, Impact::High);
+    assert_eq!(
+        operation.confirm,
+        Some("Let this app's program run its operation? It may send data to the pods it can connect to.")
+    );
+    // Without the binding, the same app is still a read.
+    value["permissions"] = json!(["k8s.listCustomResource"]);
+    value["capabilities"].as_array_mut().unwrap().pop();
+    let (reg, _) = register(&value, route).unwrap();
+    let operation = reg
+        .get("plugin/org.example.gitops/diff")
+        .unwrap()
+        .annotations;
+    assert_eq!(operation, SIDECAR_OPERATION);
+}
+
+#[test]
+fn an_app_with_actions_that_connects_to_pods_is_at_least_high_impact() {
+    let (route, _) = recording();
+    let operation = |value: &Value| {
+        let (reg, _) = register(value, route.clone()).unwrap();
+        reg.get("plugin/org.example.gitops/diff").unwrap().annotations
+    };
+    let mut value = manifest();
+    value["srelensApiVersion"] = json!("^0.9");
+    let without = operation(&value);
+    value["permissions"] = json!(["k8s.listCustomResource", "k8s.annotate", "k8s.streamLogs", "k8s.connectPod"]);
+    value["capabilities"].as_array_mut().unwrap().push(json!(
+        {"name":"broker","title":"Broker","target":"k8s.connectPod","inputs":[],
+         "arguments":{"resource":"applications","selector":".spec.selector","port":9092}}));
+    let with = operation(&value);
+    assert!(!with.read_only);
+    assert_eq!(with.impact, Impact::High);
+    assert!(with.requires_confirm && with.sensitive);
+    assert_eq!(with.destructive, without.destructive);
+    // Both reasons, in one sentence: the pods, and the actions each asked again.
+    assert_eq!(
+        with.confirm,
+        Some("Let this app's program run its operation? It may send data to the pods it can connect to, and ask to run the app's declared actions, each confirmed on its own.")
+    );
+    assert_eq!(without.confirm, Some(SIDECAR_OPERATION_CONFIRM));
+    // Without the binding it is what its actions alone make it: gated, below High.
+    assert!(without.requires_confirm && without.impact < Impact::High);
+}

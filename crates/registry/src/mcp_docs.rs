@@ -490,6 +490,12 @@ pub fn render_app_tools(reg: &srelens_capability::Registry) -> String {
         classify(&reads).label(),
         reads.impact.as_str()
     ));
+    let connects = srelens_plugin_host::SIDECAR_OPERATION_CONNECTING;
+    out.push_str(&format!(
+        "| sidecar operation, of an app that declares no action and binds `k8s.connectPod` | its app's readers, through the broker, and tunnels to the pods it is scoped to | {} | {} |\n",
+        classify(&connects).label(),
+        connects.impact.as_str()
+    ));
     // The weakest primitive gives the floor; the row is at least that, and at least
     // the level of whichever action the app declares.
     let writes = srelens_plugin_host::sidecar_operation_annotations(
@@ -497,6 +503,7 @@ pub fn render_app_tools(reg: &srelens_capability::Registry) -> String {
             .iter()
             .filter_map(|primitive| reg.get(primitive).map(|c| c.annotations))
             .min_by_key(|annotations| annotations.impact),
+        false,
     );
     out.push_str(&format!(
         "| sidecar operation, of an app that declares actions | its app's readers and declared actions, through the broker | {} | at least {}, and at least its highest action's |\n\n",
@@ -507,7 +514,14 @@ pub fn render_app_tools(reg: &srelens_capability::Registry) -> String {
         "An executable app's sidecar reaches the host only through the broker \
          ([#573](https://github.com/srelens/srelens/issues/573)): what its app's readers read, \
          and its app's declared actions. So an operation of an app that declares none is not \
-         gated: it can change nothing outside its sandbox. One of an app that declares actions \
+         gated, and it changes nothing outside its sandbox unless the app binds \
+         `k8s.connectPod`: a sidecar that connects to a pod can send it anything, so the app's \
+         operations are not read-only, are high impact, and an agent's call to one is \
+         confirmed per call; where nobody can be asked, headless, it is refused unless the \
+         process was started with `--mcp-allow-destructive` and the call says `_confirm`. The app's own pages run them without a prompt, on \
+         the grant given at install, and what the sidecar sends is never confirmed byte by \
+         byte. One of an app that declares actions, and binds it too, is never below high. \
+         One of an app that declares actions \
          is gated as the strongest of them, and each write the sidecar then asks for is put to \
          a person again, naming the app; where nobody can be asked, headless, it is refused. \
          Either way an operation's arguments are the app's own vocabulary, so the audit log \
@@ -1256,5 +1270,24 @@ mod tests {
         let md = "```\n    ```\n## Ghost\n```\n\n    ~~~\n## Real\n";
         let got: Vec<String> = heading_anchors(md).into_iter().collect();
         assert_eq!(got, ["real"]);
+    }
+
+    /// An app that binds `k8s.connectPod` runs operations that are not reads: its
+    /// sidecar can send anything to a pod, so an agent's call is confirmed. The
+    /// generated page says so, rather than saying every app that declares no action
+    /// is read-only and can change nothing, or that such a call goes unconfirmed.
+    #[test]
+    fn app_tools_say_a_pod_connecting_operation_is_confirmed() {
+        let md = render_app_tools(&crate::build_registry());
+        let row = md
+            .lines()
+            .find(|line| line.starts_with("| sidecar operation, of an app that declares no action and binds `k8s.connectPod`"))
+            .unwrap_or_else(|| panic!("no row for an app that binds k8s.connectPod:\n{md}"));
+        assert!(row.ends_with("| needs confirmation | high |"), "{row}");
+        assert!(
+            !md.contains("can change nothing outside its sandbox") && !md.contains("not gated |"),
+            "an app that connects to pods can change what listens there:\n{md}"
+        );
+        assert!(md.contains("confirmed per call"), "{md}");
     }
 }

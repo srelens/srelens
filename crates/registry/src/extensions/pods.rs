@@ -20,7 +20,9 @@ use srelens_capability::{Annotations, Capability, CapabilityError, Impact, Regis
 use srelens_kube::app_pods::{Output, PodFacts, ReadError, ServiceFacts, Upstream};
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::logs::Line;
-use srelens_plugin_host::{Binding, Manifest, PodScope, POD_EXEC, POD_FORWARD, POD_LOGS};
+use srelens_plugin_host::{
+    Binding, Manifest, PodScope, POD_CONNECT, POD_EXEC, POD_FORWARD, POD_LOGS,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
@@ -760,6 +762,19 @@ pub const FORWARD_ANNOTATIONS: Annotations = Annotations {
     ..Annotations::READ_ONLY
 };
 
+/// `k8s.connectPod`'s: it changes nothing in the cluster by itself, but gives an
+/// app's own program a raw TCP connection to a pod's port, so it is high impact.
+/// Broker-only and never a tool; the app's operations, which run that program,
+/// are the gated tools (`SIDECAR_OPERATION_CONNECTING`).
+pub const CONNECT_ANNOTATIONS: Annotations = Annotations {
+    read_only: false,
+    destructive: false,
+    requires_confirm: false,
+    sensitive: false,
+    impact: Impact::High,
+    confirm: None,
+};
+
 fn declaration<In: JsonSchema + for<'de> Deserialize<'de> + Send + 'static>(
     id: &'static str,
     summary: &'static str,
@@ -772,7 +787,7 @@ fn declaration<In: JsonSchema + for<'de> Deserialize<'de> + Send + 'static>(
     })
 }
 
-/// The three pod capabilities, as the broker declares them: what a binding is
+/// The four pod capabilities, as the broker declares them: what a binding is
 /// checked against, and the host's metadata for it. Their handlers refuse —
 /// only an app stream opened through `extension_stream_open` runs one — and
 /// they are never in the catalog or MCP.
@@ -792,6 +807,11 @@ pub(crate) fn capabilities() -> Vec<Capability> {
             POD_FORWARD,
             "Forward a local port the host picks to a pod an app's binding may reach; for as long as the view is open",
             FORWARD_ANNOTATIONS,
+        ),
+        declaration::<ForwardBinding>(
+            POD_CONNECT,
+            "Open a TCP connection to a pod an app's binding may reach, for the app's program; opened through the extension broker",
+            CONNECT_ANNOTATIONS,
         ),
     ]
 }
@@ -1072,6 +1092,23 @@ mod tests {
                 "{target}: {line}"
             );
         }
+        // Not read-only and not sensitive, so it is stated as its impact alone, and
+        // says what the app's program may do.
+        assert_eq!(CONNECT_ANNOTATIONS.impact, Impact::High);
+        let line = REVIEW
+            .lines()
+            .find(|line| line.trim_start().starts_with("[POD_CONNECT]:"))
+            .expect("no POD_FACTS line for POD_CONNECT");
+        assert!(line.contains("\"High impact\""), "{line}");
+        assert!(
+            REVIEW.contains("lets this app's program connect to port"),
+            "ExtensionBindings.tsx must say what a connect binding lets the program do"
+        );
+        // And, for a binding scoped by a reader, the reach the access items state.
+        assert!(
+            REVIEW.contains("in any namespace where you can read "),
+            "ExtensionBindings.tsx must say a reader-scoped connect binding reaches pods in any namespace where you can read <kind> objects"
+        );
         let declared: Vec<_> = capabilities()
             .into_iter()
             .map(|c| (c.id, c.annotations))

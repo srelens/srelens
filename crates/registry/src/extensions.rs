@@ -45,6 +45,11 @@ mod signing;
 mod store;
 pub mod streams;
 pub mod tools;
+pub mod tunnels;
+#[cfg(test)]
+mod tunnels_tests;
+#[cfg(test)]
+mod tunnels_live_tests;
 mod operations;
 mod availability;
 pub(crate) mod jobs;
@@ -913,7 +918,13 @@ fn validate_app(
         // Logs, exec and port-forwards (#567): their scope and what they run are the
         // manifest's own rules; here, only whether this host provides them.
         if srelens_plugin_host::is_pod_target(&binding.target) {
-            if core.get(&binding.target).is_none() {
+            if binding.target == srelens_plugin_host::POD_CONNECT && manifest.kind != srelens_plugin_host::ManifestKind::Executable {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("{at}.target"),
+                    "Pod connections require an executable app",
+                );
+            } else if core.get(&binding.target).is_none() {
                 problems.push(
                     Code::UnsupportedTarget,
                     format!("{at}.target"),
@@ -2246,10 +2257,13 @@ fn pod_access(
     binding: &srelens_plugin_host::Binding,
     reads: &dyn Fn(&srelens_plugin_host::Binding) -> String,
 ) -> Option<String> {
-    use srelens_plugin_host::{PodScope, POD_EXEC, POD_FORWARD, POD_LOGS};
+    use srelens_plugin_host::{PodScope, POD_CONNECT, POD_EXEC, POD_FORWARD, POD_LOGS};
     if !srelens_plugin_host::is_pod_target(&binding.target) {
         return None;
     }
+    // A connect binding scoped by a reader is not limited by the namespace grant:
+    // the program names the namespace, as a forward's view does (#1091).
+    let mut reach = String::new();
     let pods = match manifest.pod_scope(binding).ok()? {
         PodScope::Namespaces(_) => "pods in a granted namespace".to_owned(),
         PodScope::Selected { reader, selector } => {
@@ -2268,6 +2282,9 @@ fn pod_access(
             } else {
                 format!(" at {selector}")
             };
+            if binding.target == POD_CONNECT {
+                reach = format!(", in any namespace where you can read {kind} objects");
+            }
             format!(
                 "pods selected by each {kind} {} {} reads{at}",
                 reader.target,
@@ -2278,21 +2295,20 @@ fn pod_access(
     let container = srelens_plugin_host::pod_container(binding)
         .map(|container| format!("container {container} of "))
         .unwrap_or_default();
+    let port = srelens_plugin_host::forward_port(binding).unwrap_or_default();
+    let via = if srelens_plugin_host::forward_via_service(binding) {
+        " through a Service to"
+    } else {
+        " of"
+    };
     Some(match binding.target.as_str() {
         POD_LOGS => format!("Stream logs of {container}{pods}, with {POD_LOGS}"),
         POD_EXEC => format!(
             "Run {} in {container}{pods}, with {POD_EXEC}",
             canonical(binding.arguments.get("command").unwrap_or(&Value::Null))
         ),
-        _ => {
-            let port = srelens_plugin_host::forward_port(binding).unwrap_or_default();
-            let via = if srelens_plugin_host::forward_via_service(binding) {
-                " through a Service to"
-            } else {
-                " of"
-            };
-            format!("Forward port {port}{via} {pods} to a local port, with {POD_FORWARD}")
-        }
+        POD_CONNECT => format!("Lets this app's program connect to port {port}{via} {pods}{reach}, with {POD_CONNECT}"),
+        _ => format!("Forward port {port}{via} {pods} to a local port, with {POD_FORWARD}"),
     })
 }
 

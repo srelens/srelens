@@ -26,7 +26,7 @@ pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
 /// is specified in docs/extensions/specification.md.
-pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0", "0.6.0", "0.7.0", "0.8.0"];
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0", "0.6.0", "0.7.0", "0.8.0", "0.9.0"];
 
 /// The `format` values JSON Schema draft-07 defines.
 const STANDARD_FORMATS: &[&str] = &[
@@ -229,6 +229,8 @@ fn builtin_target(manifest: &Value, to: &str) -> bool {
 /// supported API version. A manifest may use one only when every version its range
 /// admits has it. A rename is a removal plus an addition.
 pub const API_FIELDS: &[ApiField] = &[
+    ApiField { path: "capabilities[].target", introduced: "0.9.0", removed: None,
+        form: Some(ApiForm { name: "a pod connection", matches: |_manifest, value| value == "k8s.connectPod" }) },
     ApiField { path: "sidecar.operations[].view", introduced: "0.8.0", removed: None, form: None },
     ApiField { path: "capabilities[].target", introduced: "0.8.0", removed: None,
         form: Some(ApiForm { name: "workload image or scoped Job", matches: |_manifest, value| matches!(value, "k8s.listWorkloadImages" | "k8s.runJob") }) },

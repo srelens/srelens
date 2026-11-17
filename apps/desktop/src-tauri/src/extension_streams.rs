@@ -17,10 +17,17 @@ use crate::sink::{ChannelSink, TauriSink};
 /// The registry's app streams, or `None` on a host built without apps.
 pub struct AppExtensionStreams(pub Option<Arc<ExtensionStreams>>);
 
-fn native_sidecar_host<R: Runtime>(app: &AppHandle<R>) -> srelens_registry::SidecarHost {
+fn native_sidecar_host<R: Runtime>(
+    app: &AppHandle<R>,
+    streams: &ExtensionStreams,
+) -> srelens_registry::SidecarHost {
     srelens_registry::SidecarHost {
         registry: Arc::new(app.state::<crate::bridge::AppRegistry>().0.clone()),
         audit: app.state::<AppAudit>().0.clone(),
+        pods: Arc::new(srelens_registry::PodTunnels::new(
+            streams,
+            app.state::<AppAudit>().0.clone(),
+        )),
         consent: Arc::new(crate::mcp_confirm::PromptUser::new(
             app.clone(),
             app.state::<Arc<crate::mcp_confirm::Pending>>()
@@ -34,7 +41,7 @@ fn native_sidecar_host<R: Runtime>(app: &AppHandle<R>) -> srelens_registry::Side
 /// Native app views need their broker even when the MCP service is off.
 pub fn serve_native_broker<R: Runtime>(app: &AppHandle<R>) {
     if let Some(streams) = &app.state::<AppExtensionStreams>().0 {
-        streams.app_tools().serve_sidecars(native_sidecar_host(app));
+        streams.app_tools().serve_sidecars(native_sidecar_host(app, streams));
     }
 }
 
@@ -121,7 +128,13 @@ mod tests {
         app.manage(crate::bridge::AppRegistry(registry));
         app.manage(AppAudit(Arc::new(srelens_capability::audit::NoopAudit)));
         app.manage(Arc::new(crate::mcp_confirm::Pending::default()));
-        let host = native_sidecar_host(app.handle());
+        let dir = tempfile::tempdir().unwrap();
+        let (_, streams) = srelens_registry::build_registry_and_app_streams(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        let host = native_sidecar_host(app.handle(), &streams.unwrap());
         let result = host.registry.invoke("extensions.read", json!({"id":"org.example.native","revision":7,"context":"cluster-a","capability":"images"})).await.unwrap();
         assert_eq!(result["context"], "cluster-a");
     }

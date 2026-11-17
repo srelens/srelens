@@ -1174,6 +1174,9 @@ It names **where its pods come from**, and the host holds every session to that.
 A pod binding declares no `inputs`: the host supplies the cluster, the object, and the
 pod and container the person picks. Unknown arguments are refused.
 
+A fourth target, `k8s.connectPod` (API 0.9), is the app's program's, not a view's. It
+takes the same arguments as `k8s.portForward`; see [Pod connections](#pod-connections).
+
 ### Scope
 
 Exactly one of:
@@ -1189,13 +1192,15 @@ Exactly one of:
   in scope. An object with no selector there, or one that selects every pod, is no scope.
 - **no `resource`**: the namespaces the binding's permission grants,
   `{"capability": "k8s.streamLogs", "namespaces": ["cert-manager"]}` — 1–16 namespace
-  names, each once. Any pod in one of them is in scope. Only the three pod capabilities
+  names, each once. Any pod in one of them is in scope. Only the four pod capabilities
   are granted namespaces, and a namespace is a name, never a setting.
 
 The host matches every pod itself, on every open: it reads the pod the view names and
 checks its namespace and labels against the scope, rather than trusting what the
 cluster answered to a query. A Node, an Event reader, or another pod binding is no
 scope, and neither is a cluster-scoped custom resource.
+
+A binding with no `resource` must have its permission grant namespaces, or it has no scope.
 
 ### Commands
 
@@ -1236,6 +1241,94 @@ and says which. The forward ends when the view that opened it closes, the app is
 disabled, updated or removed, or its pod leaves the scope; a forward to a pod ends when
 the pod stops running, and one through a Service follows the Service to another pod in
 scope.
+
+### Pod connections
+
+**API 0.9, executable apps only** ([#1091](https://github.com/srelens/srelens/issues/1091)).
+A `k8s.connectPod` binding lets the app's own program, its sidecar, open a TCP connection
+to a pod it is scoped to. The sidecar has no network, so the host opens the connection to
+the pod with the user's credentials and relays its bytes over the sidecar's pipe, which
+needs sidecar protocol 0.3.0 ([Pod tunnels](sidecar-protocol.md#pod-tunnels-in-protocol-030)).
+A declarative app that binds it is refused: "Pod connections require an executable app".
+
+```json
+"permissions": ["k8s.listDeployments", "k8s.connectPod"],
+"capabilities": [
+  { "name": "deployments", "title": "Deployments", "target": "k8s.listDeployments",
+    "inputs": ["context", "namespace"], "arguments": {} },
+  { "name": "connect", "title": "Deployment pods, port 80", "target": "k8s.connectPod",
+    "inputs": [], "arguments": { "resource": "deployments", "port": 80 } }
+]
+```
+
+The arguments and the scope are those of `k8s.portForward`: `port` is the remote port,
+and `"service": true` makes it a Service's port on a binding that names a Service
+instead of a pod. The scope is the label selector of an object the reader returns, or
+the namespaces the permission grants. [A complete app](../../sdk/examples/pod-connect/go)
+dials one Deployment's pods.
+
+The sidecar names the pod, or the Service, with `Host.Dial` in the Go SDK or a
+`host/connect` call. It also names the binding, the namespace, and, for a binding scoped
+by a reader, the object (`name`). Two things differ from a forward:
+
+- **For a binding scoped by a reader object, the permission's `namespaces` do not limit the
+  namespace.** The sidecar names the namespace in each call, and it can reach the pods of
+  any object of the reader's kind that the reader can read, in whatever namespace it
+  names, as `k8s.portForward` can. The install review says so: "… of pods selected by
+  each Deployment Deployments lists, in any namespace where you can read Deployment
+  objects." For a binding scoped by namespaces, the list is the limit, and the review
+  names the granted namespaces.
+- **Only the program opens one.** The binding is never a tool, and a view can neither
+  open it nor list its pods: `extensions.streams` and `extensions.pods` refuse it with
+  "… is a k8s.connectPod binding, which only the app's program may open". What a
+  sidecar sends through a tunnel is not confirmed byte by byte. The app's operations,
+  which run the program, are: an agent's call to one is confirmed per call (see
+  [what the host holds a sidecar to](#what-the-host-holds-a-sidecar-to)), while the
+  app's own pages run them without a prompt, on the grant given at install.
+
+The binding runs under the row `CONNECT_ANNOTATIONS`: not read-only, not destructive,
+no confirmation, not sensitive, and **high** impact. The install review says "High
+impact" and, for the binding above, "lets this app's program connect to port 80 of pods
+selected by each Deployment Deployments lists, in any namespace where you can read
+Deployment objects." (with "through a Service to" in place of "of" for a Service
+binding, and "any pod in a namespace above" for one scoped by namespaces). It
+changes what the app's operations are, too: see
+[what the host holds a sidecar to](#what-the-host-holds-a-sidecar-to).
+
+On each `host/connect` the host checks, in order:
+
+1. the app: installed, enabled, at this revision, on this cluster, with a manifest valid
+   against its grants, and executable;
+2. the binding: declared, a `k8s.connectPod` one, and asked the way its scope reads (an
+   object named for a reader scope, none for a namespace grant; a pod, or a Service when
+   the binding says `service`);
+3. the scope, read now with the user's credentials: the object and its selector, or the
+   granted namespaces;
+4. the pod, which must exist, be in scope and be running. A Service resolves to one ready
+   pod it selects that the scope admits, and the tunnel stays on that pod: it does not
+   move. A pod that does not exist and one outside the scope are refused with the same
+   message;
+5. the cluster's own port-forward, which RBAC (`pods/portforward`) still decides.
+
+The errors are the protocol's: `-32602` for a call of the wrong shape or one that names
+the binding the wrong way (a pod where it says `service`, an object where it names
+none), `-32003` for a refusal by the grants, the
+scope or the cluster, `-32603` for the 16-tunnel and 60-calls-a-minute limits, and
+`-32601` where the process offers no pod connections.
+
+Every `host/connect` that reaches the host's check is in the audit trail, opened or
+refused ([sidecar-protocol.md](sidecar-protocol.md#audit)). No tunnel byte is recorded.
+
+The tunnel ends, with a message naming the pod, within about two seconds of the pod
+leaving the scope, stopping or being deleted, or of the app being disabled or losing the
+grant, and on any inventory change that revokes it: each tick rechecks the app against
+the saved inventory, so a change made in another srelens process counts too. The scope
+object's selector is read once, when the tunnel opens, and not again while it is open.
+A tunnel is unattended, so a pod it cannot read is not taken to be still there: three
+failed reads in a row end it with the read's error: about six seconds when the cluster
+answers with an error, longer when it does not answer, since a read counts only once it
+finishes or times out. The app's access is rechecked every tick meanwhile. A read that
+answers starts the count again, so one or two failures (a blip) change nothing.
 
 The frames each source sends are in [streams.md](streams.md#logs).
 
@@ -1365,9 +1458,16 @@ its sidecar and says what is missing; it never starts a sidecar unconfined.
 
 Each operation is an MCP tool, `plugin/<id>/<name>`, alongside the app's readers and
 actions. For an app that declares no action it is read-only and not gated, since the
-sidecar can change nothing outside its sandbox. For one that declares actions it is
-gated as the strongest of them, because the sidecar may ask the broker to run them;
-each such write is then confirmed again, naming the app. Either way it is sensitive,
+sidecar can change nothing outside its sandbox, unless the app binds
+[`k8s.connectPod`](#pod-connections): then it is not read-only, is high impact, and is
+gated, so an agent's call stops at "Let this app's program run its operation? It may
+send data to the pods it can connect to." (headless, it is refused unless the process
+allows destructive tools and the call says `_confirm`). The app's own pages run it
+through `extensions.callOperation` without a prompt. For one that declares actions it
+is gated as the strongest of them, because the sidecar may ask the broker to run them,
+and never below high when the app binds `k8s.connectPod`; each such write is then
+confirmed again, naming the app, and its pages do not run its operations. Nothing a
+sidecar sends through a tunnel is confirmed byte by byte. Either way it is sensitive,
 so the audit log redacts its arguments whole ([MCP.md](../MCP.md#installed-apps-tools)).
 
 ## Rules the desktop app adds
@@ -1376,7 +1476,7 @@ The desktop app accepts a narrower surface than the developer broker:
 
 - Targets are `k8s.listCustomResource`, `k8s.listEvents`, the built-in workload and
   node summary readers, `network.http`, or a pod capability (`k8s.streamLogs`,
-  `k8s.exec`, `k8s.portForward`). A provider sends its query through a `network.http`
+  `k8s.exec`, `k8s.portForward`, and for executable apps `k8s.connectPod`). A provider sends its query through a `network.http`
   binding, so an app with providers is refused wherever `network.http` is (on the web,
   without the operator's network ceiling).
   A reader target must be read-only with no

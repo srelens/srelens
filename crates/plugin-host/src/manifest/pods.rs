@@ -25,8 +25,10 @@ pub const POD_LOGS: &str = "k8s.streamLogs";
 pub const POD_EXEC: &str = "k8s.exec";
 /// Forward a local port the host picks to a pod's port, for as long as the view is open.
 pub const POD_FORWARD: &str = "k8s.portForward";
+/// Let the app's sidecar open a TCP connection to a pod's port, through the broker (API 0.9, #1091).
+pub const POD_CONNECT: &str = "k8s.connectPod";
 /// The capabilities a pod binding targets, and the only ones granted namespaces.
-pub const POD_TARGETS: &[&str] = &[POD_LOGS, POD_EXEC, POD_FORWARD];
+pub const POD_TARGETS: &[&str] = &[POD_LOGS, POD_EXEC, POD_FORWARD, POD_CONNECT];
 /// Most namespaces one pod permission may grant.
 pub const MAX_POD_NAMESPACES: usize = 16;
 /// Most arguments one exec command may have, program included.
@@ -234,7 +236,7 @@ pub(super) fn pod_problems(manifest: &Manifest, problems: &mut ValidationErrors)
         }
         match binding.target.as_str() {
             POD_EXEC => command_problems(&at, binding.arguments.get("command"), problems),
-            POD_FORWARD => {
+            POD_FORWARD | POD_CONNECT => {
                 if forward_port(binding).is_none() {
                     problems.push(
                         Code::InvalidBinding,

@@ -590,7 +590,8 @@ impl PluginHost {
                 inputs,
             });
         }
-        let operation_row = sidecar_operation_annotations(writes);
+        let connects = manifest.capabilities.iter().any(|b| b.target == POD_CONNECT);
+        let operation_row = sidecar_operation_annotations(writes, connects);
         for operation in manifest.sidecar.iter().flat_map(|sidecar| &sidecar.operations)
             .filter(|operation| !operation.view.as_ref().is_some_and(|view| view.stream))
         {

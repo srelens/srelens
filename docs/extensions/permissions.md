@@ -96,7 +96,9 @@ nothing can call it except through an installed app's binding. See
 ## What an app may reach in pods
 
 Logs, exec and port-forwards (API 0.5, [#567](https://github.com/srelens/srelens/issues/567)),
-each a separate permission: `k8s.streamLogs`, `k8s.exec` and `k8s.portForward`.
+each a separate permission: `k8s.streamLogs`, `k8s.exec` and `k8s.portForward`. A
+fourth, `k8s.connectPod` (API 0.9), is for an executable app's own program: see
+"Only the app's program, for `k8s.connectPod`" below.
 
 - **Only pods in scope.** A pod binding names a reader whose objects select pods, and
   reaches only the pods one object's own label selector selects, in its namespace; or
@@ -114,16 +116,32 @@ each a separate permission: `k8s.streamLogs`, `k8s.exec` and `k8s.portForward`.
   chooses and reaches the binding's one port on a pod in scope, directly or through a
   Service that selects one. It ends with the view that opened it, and with it the port
   and every connection through it.
+- **Only the app's program, for `k8s.connectPod`.** Its sidecar may open a TCP
+  connection to the binding's one port on a pod in scope, directly or through a Service
+  that selects one, and the host relays the bytes over the sidecar's pipe. A view can
+  neither open it nor list its pods. It is **high** impact, and what the sidecar sends
+  is not confirmed byte by byte; the app's operations are gated instead, so an agent's
+  call to one is confirmed per call, while the app's own pages run them on the grant
+  given at install. For a binding scoped by a reader's objects, the permission's `namespaces`
+  do not limit the namespace the sidecar names: it reaches the pods of any object of
+  the reader's kind that the reader can read, in any namespace, as a port-forward does.
+  Only for a binding scoped by namespaces is the list the limit. An unsigned executable
+  app needs **Allow unsigned apps to modify clusters and run code**, as every one does.
 - **On the record.** Every exec and port-forward session, started or refused, is in the
-  local audit trail with the app, the cluster, the pod and what ran.
+  local audit trail with the app, the cluster, the pod and what ran. So is every
+  `host/connect` that reaches the host's checks, but not the bytes of the tunnel.
 - **In the review.** The install review lists the namespaces each pod permission
   grants, and for each binding whose pods it reaches and what it does there: the
-  command argument by argument, the port. The update review's access items name each
+  command argument by argument, the port. For `k8s.connectPod` it says "High impact",
+  that the app's program may connect to that port, whose pods (and through a Service,
+  if so), and, for a binding scoped by a reader's objects, that it reaches them "in any
+  namespace where you can read Deployment objects" (for a Deployment reader). The
+  update review's access items name each
   granted namespace, each command and scope, so another command, another namespace or a
   scope moved to another kind is changed access under the same grants.
 
-See [manifest.md](manifest.md#logs-exec-and-port-forwards) and
-[streams.md](streams.md#pod-sources).
+See [manifest.md](manifest.md#logs-exec-and-port-forwards), [Pod
+connections](manifest.md#pod-connections) and [streams.md](streams.md#pod-sources).
 
 ## What an app may write
 
