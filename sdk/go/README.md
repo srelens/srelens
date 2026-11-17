@@ -82,6 +82,7 @@ The module is `github.com/srelens/srelens/sdk/go`, with Go 1.25 or later. It use
   - Close it. An open conn holds one of the sidecar's 16 tunnels until it is closed or the session ends.
   - When srelens closes the tunnel, the bytes already received are read first, then `Read` returns an error carrying srelens's message, or `io.EOF` when there was none.
   - If `ctx` ends before `Dial` returns, the call is cancelled and the tunnel closed.
+  - `ctx` only bounds the dial, so a network client may call `Dial` with any context: keep the `Host` from the operation and pass its own. The `Host` belongs to the session, and `Dial` on it fails with `ErrSessionEnded` once that is over.
   - A srelens that offers no pod connections refuses `Dial` with `-32601`. [The protocol](../../docs/extensions/sidecar-protocol.md#pod-tunnels-in-protocol-030) has the limits and the wire.
 - **Streams.**
   - The ack goes out before any frame. The stream ends in exactly one `stream/close`, or `stream/error` when the handler returns an error, and nothing follows it.

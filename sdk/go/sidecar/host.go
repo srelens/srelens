@@ -37,6 +37,7 @@ type Host struct {
 	mu      sync.Mutex
 	waiting map[string]*pending // by id key; nil once disconnected
 	absent  bool                // no session: every call fails with ErrNoSession
+	version string              // the sidecar API version negotiated; set once, before any handler runs
 
 	order   chan struct{} // held from taking a tunnel id until its host/connect is queued
 	tmu     sync.Mutex

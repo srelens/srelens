@@ -10,8 +10,13 @@ import (
 	"github.com/srelens/srelens/sdk/go/protocol"
 )
 
-func dialContext(parent context.Context, h *Host) context.Context {
-	return context.WithValue(parent, sessionKey{}, &shared{apiVersion: "0.3.0", host: h})
+// dialHost is a Host whose session negotiated 0.3.0. Its tests dial with plain
+// contexts, as a network client does.
+func dialHost(t *testing.T) (*Host, *outbox) {
+	t.Helper()
+	h, out := testHost(t)
+	h.version = "0.3.0"
+	return h, out
 }
 
 func queued(t *testing.T, out *outbox) protocol.Message {
@@ -30,7 +35,7 @@ func queued(t *testing.T, out *outbox) protocol.Message {
 }
 
 func TestDialCancelledLeavesNoConn(t *testing.T) {
-	h, out := testHost(t)
+	h, out := dialHost(t)
 	ns := "team"
 	cc, err := NewCallContext("kind-dev", &ns)
 	if err != nil {
@@ -40,7 +45,7 @@ func TestDialCancelledLeavesNoConn(t *testing.T) {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		_, err := h.Dial(dialContext(ctx, h), cc, PodTarget{Capability: "kafka", Pod: "kafka-0"})
+		_, err := h.Dial(ctx, cc, PodTarget{Capability: "kafka", Pod: "kafka-0"})
 		result <- err
 	}()
 	req := queued(t, out).Request
@@ -83,12 +88,12 @@ func TestDialCancelledLeavesNoConn(t *testing.T) {
 // refuses an id that is not greater than every earlier one, never sees them
 // out of order.
 func TestConcurrentDialsQueueTheirIDsInOrder(t *testing.T) {
-	h, out := testHost(t)
+	h, out := dialHost(t)
 	ns := "team"
 	cc, _ := NewCallContext("kind-dev", &ns)
 	parent, cancel := context.WithCancel(context.Background())
 	defer cancel() // the dials wait for answers that never come
-	ctx := dialContext(parent, h)
+	ctx := parent
 	for range 4 {
 		go h.Dial(ctx, cc, PodTarget{Capability: "kafka", Pod: "kafka-0"})
 	}

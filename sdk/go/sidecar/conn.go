@@ -33,15 +33,18 @@ type PodTarget struct {
 }
 
 // Dial opens a TCP connection to the pod target names, through srelens (API
-// 0.3). The conn is a net.Conn: calls of the same method are serialised, each
-// Write whole, and Close and deadlines may come from any
+// 0.3). ctx only bounds the dial itself, so a network client may call Dial
+// with any context: keep the Host from the operation and pass its own. The
+// Host belongs to the session, and Dial on it fails with ErrSessionEnded once
+// that is over. The conn is a net.Conn: calls of the same method are
+// serialised, each Write whole, and Close and deadlines may come from any
 // goroutine; its addresses are placeholders. Close it: an open conn holds one
 // of the sidecar's tunnels at srelens until it is closed or the session ends.
 func (h *Host) Dial(ctx context.Context, cc CallContext, target PodTarget) (net.Conn, error) {
 	if h.absent {
 		return nil, ErrNoSession
 	}
-	if !atLeast(ctx, "0.3.0") {
+	if !h.atLeast("0.3.0") {
 		return nil, fmt.Errorf("%w: pod tunnels require sidecar API 0.3.0", ErrInvalidCall)
 	}
 	if (target.Pod == "") == (target.Service == "") {

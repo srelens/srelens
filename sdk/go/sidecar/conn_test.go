@@ -24,6 +24,7 @@ const window = 262144
 type rig struct {
 	*fakeHost
 	conns chan net.Conn
+	hosts chan *sidecar.Host
 }
 
 func newRig(t *testing.T, version string) *rig {
@@ -38,7 +39,13 @@ func newRig(t *testing.T, version string) *rig {
 		conns <- c
 		return json.RawMessage("{}"), nil
 	})
-	r := &rig{fakeHost: start(t, s), conns: conns}
+	hosts := make(chan *sidecar.Host, 1)
+	// "grab" is a client keeping the Host: its operation ends, the Host stays.
+	sidecar.Operation(s, "grab", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+		hosts <- sidecar.HostFrom(ctx)
+		return json.RawMessage("{}"), nil
+	})
+	r := &rig{fakeHost: start(t, s), conns: conns, hosts: hosts}
 	r.answer(r.request("initialize", initializeParams([]string{version}, r.DataDir, defaultLimits())))
 	r.answer(r.request("activate", map[string]any{}))
 	return r
@@ -537,5 +544,73 @@ func TestAQueuedWriteStopsAtItsDeadline(t *testing.T) {
 	r.frame("tunnel/close")
 	if err := r.finish(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// grab runs the "grab" operation: the Host, after its operation has returned.
+func (r *rig) grab() *sidecar.Host {
+	r.t.Helper()
+	r.answer(r.request("grab", map[string]any{}))
+	return <-r.hosts
+}
+
+// A network dialer is called with whatever context its client holds, not the
+// operation's.
+func TestDialWorksWithAContextOfItsOwn(t *testing.T) {
+	r := newRig(t, "0.3.0")
+	host := r.grab()
+	timeout, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	for _, ctx := range []context.Context{context.Background(), timeout} {
+		dialed := make(chan net.Conn, 1)
+		go func() {
+			c, err := host.Dial(ctx, prod(t), kafkaPod)
+			if err != nil {
+				t.Error(err)
+			}
+			dialed <- c
+		}()
+		call := r.call()
+		if call["method"] != "host/connect" {
+			t.Fatalf("%v", call)
+		}
+		r.reply(call["id"], map[string]any{"pod": "kafka-0"}, nil)
+		c := <-dialed
+		if c == nil {
+			t.Fatal("no conn")
+		}
+		r.data(int(call["params"].(map[string]any)["tunnel"].(float64)), []byte("hi"))
+		if n, err := io.ReadFull(c, make([]byte, 2)); n != 2 || err != nil {
+			t.Fatalf("%d, %v", n, err)
+		}
+		r.frame("tunnel/credit")
+	}
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDialStillNeedsAPI03WithAnyContext(t *testing.T) {
+	r := newRig(t, "0.2.0")
+	host := r.grab()
+	if _, err := host.Dial(context.Background(), prod(t), kafkaPod); !errors.Is(err, sidecar.ErrInvalidCall) || !strings.Contains(err.Error(), "0.3.0") {
+		t.Fatalf("%v", err)
+	}
+	if err := r.finish(); err != nil { // nothing was written
+		t.Fatal(err)
+	}
+}
+
+// A Host belongs to the session, not to the operation that handed it out: a
+// client's background reconnect works while the session is up, and fails with
+// ErrSessionEnded once it is over.
+func TestDialOnAKeptHostWorksUntilTheSessionEnds(t *testing.T) {
+	r := newRig(t, "0.3.0")
+	host := r.grab()
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Dial(context.Background(), prod(t), kafkaPod); !errors.Is(err, sidecar.ErrSessionEnded) {
+		t.Fatalf("%v", err)
 	}
 }

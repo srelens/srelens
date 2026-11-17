@@ -345,6 +345,7 @@ func (se *session) initialize(id protocol.RequestID, raw json.RawMessage) {
 	if se.sc.sizeRuntime {
 		sizeRuntime(params.Limits, processKnobs)
 	}
+	se.shared.host.version = chosen
 	se.base = context.WithValue(context.Background(), sessionKey{}, se.shared)
 	result, _ := json.Marshal(protocol.InitializeResult{
 		APIVersion: chosen,
