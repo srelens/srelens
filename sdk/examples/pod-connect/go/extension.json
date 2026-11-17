@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.9.json",
+  "id": "io.srelens.example.pod-connect",
+  "name": "Pod connect",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.9",
+  "kind": "executable",
+  "permissions": ["k8s.listDeployments", "k8s.connectPod"],
+  "capabilities": [
+    {
+      "name": "deployments",
+      "title": "Deployments",
+      "target": "k8s.listDeployments",
+      "inputs": ["context", "namespace"],
+      "arguments": {}
+    },
+    {
+      "name": "connect",
+      "title": "Deployment pods, port 80",
+      "target": "k8s.connectPod",
+      "inputs": [],
+      "arguments": { "resource": "deployments", "port": 80 }
+    }
+  ],
+  "sidecar": {
+    "binaries": {
+      "darwin-arm64": "bin/darwin-arm64/pod-connect",
+      "darwin-amd64": "bin/darwin-amd64/pod-connect",
+      "linux-amd64": "bin/linux-amd64/pod-connect",
+      "linux-arm64": "bin/linux-arm64/pod-connect",
+      "windows-amd64": "bin/windows-amd64/pod-connect.exe"
+    },
+    "operations": [
+      {
+        "name": "fetch",
+        "title": "Fetch / from a pod",
+        "inputs": [
+          { "name": "cluster", "title": "Cluster", "type": "string", "required": true },
+          { "name": "namespace", "title": "Namespace", "type": "string", "required": true },
+          { "name": "object", "title": "Deployment", "type": "string", "required": true },
+          { "name": "pod", "title": "Pod", "type": "string", "required": true }
+        ]
+      }
+    ]
+  },
+  "contributions": { "pages": [], "detailTabs": [], "detailLinks": [] }
+}

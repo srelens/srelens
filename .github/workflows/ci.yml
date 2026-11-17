@@ -293,6 +293,7 @@ jobs:
           cache-dependency-path: |
             sdk/go/go.sum
             sdk/examples/hello-world/go/go.sum
+            sdk/examples/pod-connect/go/go.sum
       - name: The generated protocol file is current
         working-directory: sdk/go
         run: |
@@ -300,7 +301,7 @@ jobs:
           git diff --exit-code
       - name: Format and vet
         run: |
-          for module in sdk/go sdk/examples/hello-world/go; do
+          for module in sdk/go sdk/examples/hello-world/go sdk/examples/pod-connect/go; do
             unformatted=$(cd "$module" && gofmt -l .)
             if [ -n "$unformatted" ]; then
               echo "::error::gofmt would change, in $module: $unformatted"
@@ -312,6 +313,7 @@ jobs:
         run: |
           (cd sdk/go && go test -race -cover ./...)
           (cd sdk/examples/hello-world/go && go test -race ./...)
+          (cd sdk/examples/pod-connect/go && go test -race ./...)
 
   # The sidecar sandbox conformance suite (#572): the #571 spike's seven
   # checks, and two for what it left open (the host's environment, Unix
