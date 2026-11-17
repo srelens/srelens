@@ -614,3 +614,43 @@ func TestDialOnAKeptHostWorksUntilTheSessionEnds(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// The API version is the session's, not the caller's context's: a Host kept
+// past its operation, with a context of its own, still gets past the gate.
+func TestReadPageBindingAvailabilityAndRunJobWorkWithAContextOfItsOwn(t *testing.T) {
+	r := newRig(t, "0.2.0")
+	host := r.grab()
+	ns := "team"
+	cc, err := sidecar.NewCallContext("kind-dev", &ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for method, do := range map[string]func() error{
+		"host/read": func() error {
+			_, err := host.ReadPage(context.Background(), cc, "images", "")
+			return err
+		},
+		"host/bindingAvailability": func() error {
+			_, err := host.BindingAvailability(context.Background(), cc, []string{"sbom-reports"})
+			return err
+		},
+		"host/runJob": func() error {
+			_, err := host.RunJob(context.Background(), cc, "scan", map[string]string{})
+			return err
+		},
+	} {
+		done := make(chan error, 1)
+		go func() { done <- do() }()
+		call := r.call()
+		if call["method"] != method {
+			t.Fatalf("%s: %v", method, call)
+		}
+		r.reply(call["id"], map[string]any{}, nil)
+		if err := <-done; err != nil {
+			t.Fatalf("%s: %v", method, err)
+		}
+	}
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+}

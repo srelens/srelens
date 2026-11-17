@@ -55,10 +55,7 @@ func APIVersion(ctx context.Context) string {
 }
 
 // atLeast reports whether the version srelens and the sidecar agreed on is
-// min or newer; false for a context the SDK did not make.
-func atLeast(ctx context.Context, min string) bool { return versionAtLeast(APIVersion(ctx), min) }
-
-// atLeast is the same for the session this Host belongs to, whatever context
+// min or newer, for the session this Host belongs to, whatever context
 // a caller holds.
 func (h *Host) atLeast(min string) bool { return versionAtLeast(h.version, min) }
 

@@ -137,7 +137,7 @@ func (h *Host) ReadPage(ctx context.Context, cc CallContext, capability, cursor 
 	if h.absent {
 		return nil, ErrNoSession
 	}
-	if !atLeast(ctx, "0.2.0") {
+	if !h.atLeast("0.2.0") {
 		return nil, fmt.Errorf("%w: paged reads require sidecar API 0.2.0 or newer", ErrInvalidCall)
 	}
 	if err := check(cc, field{"capability", capability, protocol.IsIdentifier, identifierRule}); err != nil {
@@ -160,7 +160,7 @@ func (h *Host) BindingAvailability(ctx context.Context, cc CallContext, bindings
 	if h.absent {
 		return nil, ErrNoSession
 	}
-	if !atLeast(ctx, "0.2.0") {
+	if !h.atLeast("0.2.0") {
 		return nil, fmt.Errorf("%w: binding discovery requires sidecar API 0.2.0", ErrInvalidCall)
 	}
 	if err := check(cc); err != nil {
@@ -178,7 +178,7 @@ func (h *Host) RunJob(ctx context.Context, cc CallContext, capability string, in
 	if h.absent {
 		return nil, ErrNoSession
 	}
-	if !atLeast(ctx, "0.2.0") {
+	if !h.atLeast("0.2.0") {
 		return nil, fmt.Errorf("%w: Jobs require sidecar API 0.2.0 or newer", ErrInvalidCall)
 	}
 	if err := check(cc, field{"capability", capability, protocol.IsIdentifier, identifierRule}); err != nil {
