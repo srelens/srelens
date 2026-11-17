@@ -134,8 +134,9 @@ fourth, `k8s.connectPod` (API 0.9), is for an executable app's own program: see
   grants, and for each binding whose pods it reaches and what it does there: the
   command argument by argument, the port. For `k8s.connectPod` it says "High impact",
   that the app's program may connect to that port, whose pods (and through a Service,
-  if so), and, for a binding scoped by a reader's objects, "in any namespace where you
-  can read <kind> objects". The update review's access items name each
+  if so), and, for a binding scoped by a reader's objects, that it reaches them "in any
+  namespace where you can read Deployment objects" (for a Deployment reader). The
+  update review's access items name each
   granted namespace, each command and scope, so another command, another namespace or a
   scope moved to another kind is changed access under the same grants.
 
