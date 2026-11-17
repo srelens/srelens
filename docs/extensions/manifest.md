@@ -1321,8 +1321,12 @@ refused ([sidecar-protocol.md](sidecar-protocol.md#audit)). No tunnel byte is re
 
 The tunnel ends, with a message naming the pod, within about two seconds of the pod
 leaving the scope, stopping or being deleted, or of the app being disabled or losing the
-grant, and on any inventory change that revokes it. A transient failure to read the pod
-does not end it.
+grant, and on any inventory change that revokes it: each tick rechecks the app against
+the saved inventory, so a change made in another srelens process counts too. The scope
+object's selector is read once, when the tunnel opens, and not again while it is open.
+A failure to read the pod, including an error such as forbidden, is taken as transient
+and does not end it, so such a tunnel stays open until the pod, the app or the session
+ends.
 
 The frames each source sends are in [streams.md](streams.md#logs).
 

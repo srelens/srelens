@@ -618,3 +618,29 @@ async fn a_service_tunnel_does_not_move() {
         "no reconnect"
     );
 }
+
+/// Another process — the app's settings window, while this is a headless
+/// `--mcp-stdio` — disables the app: nothing announces it here, and the monitor
+/// still ends the tunnel within one tick, because each tick rechecks the app.
+#[tokio::test(start_paused = true)]
+async fn the_tunnel_ends_when_another_process_disables_the_app() {
+    let host = host();
+    let mut tunnel = host
+        .connect(ask("broker", Some("kafka"), Some("kafka-0"), None))
+        .await;
+    still_open(&mut tunnel, 2).await;
+    // Written to the store as another process writes it, with no announcement.
+    let mut state = super::read(&host.path).unwrap();
+    state
+        .plugins
+        .iter_mut()
+        .find(|p| p.manifest.id == KAFKA)
+        .unwrap()
+        .enabled = false;
+    super::write(&host.path, &state).unwrap();
+    let why = ends(&mut tunnel).await;
+    assert_eq!(
+        why,
+        "The connection to pod team/kafka-0 ended: Extension was disabled or updated"
+    );
+}

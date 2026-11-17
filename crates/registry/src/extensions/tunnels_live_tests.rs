@@ -98,6 +98,11 @@ async fn live_pod_connect() {
     let calls: Vec<Value> =
         serde_json::from_str(&var("SRELENS_LIVE_CALLS", "a JSON array of calls"))
             .expect("SRELENS_LIVE_CALLS is a JSON array");
+    // An empty list checks nothing, and would pass.
+    assert!(
+        !calls.is_empty(),
+        "SRELENS_LIVE_CALLS is empty: name at least one call, or the test proves nothing"
+    );
     let manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
     let id = manifest["id"].as_str().unwrap().to_owned();
 

@@ -10,8 +10,9 @@
 //! the user's own credentials. Every connect that reaches here is recorded,
 //! opened or refused; no byte of the tunnel ever is.
 //!
-//! While open, the pod is read again every [`PodTiming::monitor`] and every
-//! inventory write rechecks the app, as a view's port-forward does. The tunnel
+//! While open, the app is rechecked and the pod read again every
+//! [`PodTiming::monitor`], and every inventory write announced in this process
+//! rechecks the app too. The tunnel
 //! never moves, not even through a Service: when its pod leaves the scope or
 //! stops, it ends. The monitor is the tunnel's `ended` future itself, so it
 //! stops when the tunnel is dropped.
@@ -307,14 +308,20 @@ struct Monitor {
 }
 
 impl Monitor {
-    /// Resolves, naming the pod, when the tunnel must end; until then it reads
-    /// the pod each tick and rechecks the app on each inventory write.
+    /// Resolves, naming the pod, when the tunnel must end; until then it
+    /// rechecks the app and reads the pod each tick, and rechecks the app on
+    /// each inventory write announced in this process. The tick's recheck reads
+    /// the saved inventory, so a change another process made (a headless
+    /// `--mcp-stdio` beside the app's window) ends the tunnel too.
     async fn run(mut self) -> String {
         let mut tick =
             tokio::time::interval_at(Instant::now() + self.timing.monitor, self.timing.monitor);
         let why = loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    if let Err(why) = self.authority.check().await {
+                        break for_program(why);
+                    }
                     match pod_still_there(self.cluster.as_ref(), &self.context, &self.scope, &self.authority.id, &self.pod).await {
                         Ok(true) => {}
                         Ok(false) => break format!("Pod {} is no longer running", self.pod),

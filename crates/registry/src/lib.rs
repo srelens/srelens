@@ -765,7 +765,8 @@ enum BrokeredNetwork {
 /// The capabilities only the extension broker calls. Kept out of the registry the
 /// catalog and MCP are built from, so neither offers them: the CRD check an app read
 /// makes first, `network.http` (#568), which called directly would fetch any URL, and
-/// the pod capabilities (#567), which run only as app streams.
+/// the pod capabilities (#567), which run only as app streams or, for `k8s.connectPod`
+/// (#1091), as a tunnel an executable app's program opens through `host/connect`.
 fn broker_only(cache: Arc<ClientCache>, network: BrokeredNetwork) -> Vec<Capability> {
     let mut capabilities = vec![extensions::crd::check_capability(cache)];
     capabilities.push(extensions::jobs::capability());
