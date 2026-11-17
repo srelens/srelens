@@ -1274,8 +1274,10 @@ by a reader, the object (`name`). Two things differ from a forward:
 - **For a binding scoped by a reader object, the permission's `namespaces` do not limit the
   namespace.** The sidecar names the namespace in each call, and it can reach the pods of
   any object of the reader's kind that the reader can read, in whatever namespace it
-  names, as `k8s.portForward` can. The install review shows the permission, not that
-  reach. For a binding scoped by namespaces, the list is the limit.
+  names, as `k8s.portForward` can. The install review says so: "… of pods selected by
+  each Deployment Deployments lists, in any namespace where you can read Deployment
+  objects." For a binding scoped by namespaces, the list is the limit, and the review
+  names the granted namespaces.
 - **Only the program opens one.** The binding is never a tool, and a view can neither
   open it nor list its pods: `extensions.streams` and `extensions.pods` refuse it with
   "… is a k8s.connectPod binding, which only the app's program may open". What a
@@ -1286,7 +1288,10 @@ by a reader, the object (`name`). Two things differ from a forward:
 
 The binding runs under the row `CONNECT_ANNOTATIONS`: not read-only, not destructive,
 no confirmation, not sensitive, and **high** impact. The install review says "High
-impact" and "Lets this app's program connect to port 80 of pods it is scoped to." It
+impact" and, for the binding above, "lets this app's program connect to port 80 of pods
+selected by each Deployment Deployments lists, in any namespace where you can read
+Deployment objects." (with "through a Service to" in place of "of" for a Service
+binding, and "any pod in a namespace above" for one scoped by namespaces). It
 changes what the app's operations are, too: see
 [what the host holds a sidecar to](#what-the-host-holds-a-sidecar-to).
 

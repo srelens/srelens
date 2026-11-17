@@ -430,6 +430,10 @@ const WORKLOAD_KINDS: Record<string, string> = {
   "k8s.listDaemonSets": "DaemonSet",
 };
 
+/** The kind a pod scope's reader lists: the workload, or a custom resource's `kind`. */
+const readerKind = (reader: Binding): string =>
+  plainText(WORKLOAD_KINDS[reader.target] ?? (typeof reader.arguments.kind === "string" ? reader.arguments.kind : reader.target));
+
 /**
  * Whose pods a pod binding reaches (#567): each object of a reader's kind selects its
  * own, by its selector — where Kubernetes keeps it for a built-in workload, where the
@@ -440,11 +444,10 @@ function podScope(binding: Binding, bindings: Binding[]): ReactNode {
   if (resource === undefined) return <>any pod in a namespace above</>;
   const reader = bindings.find((candidate) => candidate.name === resource);
   if (!reader) return <>the pods of <code>{show(resource)}</code>, which this manifest does not declare</>;
-  const kind = WORKLOAD_KINDS[reader.target] ?? (typeof reader.arguments.kind === "string" ? reader.arguments.kind : reader.target);
   const at = binding.arguments.selector;
   return (
     <>
-      pods selected by each {plainText(kind)} {label(reader)} lists
+      pods selected by each {readerKind(reader)} {label(reader)} lists
       {at !== undefined && (
         <>
           , read at <code>{show(at)}</code>
@@ -488,6 +491,8 @@ function PodBindings({ target, bindings, all, manifest }: { target: string; bind
           const args = binding.arguments;
           const port = typeof args.port === "number" ? args.port : show(args.port);
           const command = items(args.command).map((argument) => commandArgument(String(argument)));
+          // A connect binding scoped by a reader reaches any namespace that reader can read (#1091).
+          const reader = args.resource === undefined ? undefined : all.find((candidate) => candidate.name === args.resource);
           return (
             <li key={`${index}:${binding.name}`} aria-label={`Binding ${plainText(binding.name)}`}>
               <strong>{label(binding)}</strong>:{" "}
@@ -505,7 +510,10 @@ function PodBindings({ target, bindings, all, manifest }: { target: string; bind
               )}
               {target === POD_CONNECT && (
                 <>
-                  Lets this app's program connect to port <code>{port}</code> of pods it is scoped to.
+                  lets this app's program connect to port <code>{port}</code>
+                  {args.service === true ? " through a Service to " : " of "}
+                  {podScope(binding, all)}
+                  {reader && <>, in any namespace where you can read {readerKind(reader)} objects</>}.
                 </>
               )}
               {target === POD_FORWARD && (

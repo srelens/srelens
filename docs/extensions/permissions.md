@@ -132,8 +132,10 @@ fourth, `k8s.connectPod` (API 0.9), is for an executable app's own program: see
   `host/connect` that reaches the host's checks, but not the bytes of the tunnel.
 - **In the review.** The install review lists the namespaces each pod permission
   grants, and for each binding whose pods it reaches and what it does there: the
-  command argument by argument, the port. For `k8s.connectPod` it says "High impact" and
-  that the app's program may connect to that port of pods it is scoped to. The update review's access items name each
+  command argument by argument, the port. For `k8s.connectPod` it says "High impact",
+  that the app's program may connect to that port, whose pods (and through a Service,
+  if so), and, for a binding scoped by a reader's objects, "in any namespace where you
+  can read <kind> objects". The update review's access items name each
   granted namespace, each command and scope, so another command, another namespace or a
   scope moved to another kind is changed access under the same grants.
 

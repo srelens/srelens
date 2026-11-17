@@ -1786,10 +1786,24 @@ fn connect_pod_needs_an_executable_app() {
 #[test]
 fn the_access_review_says_what_a_pod_connection_reaches() {
     let items = super::access_items(&parsed(&kafka()), &["k8s.listCustomResource".into(), "k8s.connectPod".into()]);
+    // Scoped by a reader's objects: the namespace grant does not limit it, and the
+    // review says so (#1091).
     assert!(
         items.iter().any(|item| item.starts_with(
             "Lets this app's program connect to port 9092 of pods selected by each StrimziPodSet"
-        ) && item.ends_with("with k8s.connectPod")),
+        ) && item.ends_with(
+            "at .spec.selector, in any namespace where you can read StrimziPodSet objects, with k8s.connectPod"
+        )),
+        "{items:#?}"
+    );
+    // Scoped by namespaces: the granted list is the limit, and nothing more is said.
+    let mut value = kafka();
+    value["permissions"][1] = json!({"capability": "k8s.connectPod", "namespaces": ["kafka"]});
+    value["capabilities"][1]["arguments"] = json!({"port": 9092});
+    let items = super::access_items(&parsed(&value), &["k8s.listCustomResource".into(), "k8s.connectPod".into()]);
+    assert!(
+        items.iter().any(|item| item
+            == "Lets this app's program connect to port 9092 of pods in a granted namespace, with k8s.connectPod"),
         "{items:#?}"
     );
 }

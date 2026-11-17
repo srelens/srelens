@@ -1099,8 +1099,13 @@ mod tests {
             .expect("no POD_FACTS line for POD_CONNECT");
         assert!(line.contains("\"High impact\""), "{line}");
         assert!(
-            REVIEW.contains("Lets this app's program connect to port"),
+            REVIEW.contains("lets this app's program connect to port"),
             "ExtensionBindings.tsx must say what a connect binding lets the program do"
+        );
+        // And, for a binding scoped by a reader, the reach the access items state.
+        assert!(
+            REVIEW.contains("in any namespace where you can read "),
+            "ExtensionBindings.tsx must say a reader-scoped connect binding reaches pods in any namespace where you can read <kind> objects"
         );
         let declared: Vec<_> = capabilities()
             .into_iter()

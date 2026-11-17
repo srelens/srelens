@@ -2261,6 +2261,9 @@ fn pod_access(
     if !srelens_plugin_host::is_pod_target(&binding.target) {
         return None;
     }
+    // A connect binding scoped by a reader is not limited by the namespace grant:
+    // the program names the namespace, as a forward's view does (#1091).
+    let mut reach = String::new();
     let pods = match manifest.pod_scope(binding).ok()? {
         PodScope::Namespaces(_) => "pods in a granted namespace".to_owned(),
         PodScope::Selected { reader, selector } => {
@@ -2279,6 +2282,9 @@ fn pod_access(
             } else {
                 format!(" at {selector}")
             };
+            if binding.target == POD_CONNECT {
+                reach = format!(", in any namespace where you can read {kind} objects");
+            }
             format!(
                 "pods selected by each {kind} {} {} reads{at}",
                 reader.target,
@@ -2301,7 +2307,7 @@ fn pod_access(
             "Run {} in {container}{pods}, with {POD_EXEC}",
             canonical(binding.arguments.get("command").unwrap_or(&Value::Null))
         ),
-        POD_CONNECT => format!("Lets this app's program connect to port {port}{via} {pods}, with {POD_CONNECT}"),
+        POD_CONNECT => format!("Lets this app's program connect to port {port}{via} {pods}{reach}, with {POD_CONNECT}"),
         _ => format!("Forward port {port}{via} {pods} to a local port, with {POD_FORWARD}"),
     })
 }

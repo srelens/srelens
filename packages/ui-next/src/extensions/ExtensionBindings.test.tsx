@@ -535,18 +535,31 @@ it("reviews each pod binding: whose pods, which command, which port", () => {
 });
 
 // #1091: a connect binding is the app's program's to open, so a view may not offer it
-// (POD_TARGETS) — but the install review still says what it lets the program do.
+// (POD_TARGETS) — but the install review still says what it lets the program do, whose
+// pods, and, for a binding scoped by a reader, that no namespace grant limits it.
 it("reviews a pod connection as a high-impact grant, and views cannot open one", () => {
   expect(POD_TARGETS).not.toContain("k8s.connectPod");
   const manifest = {
     id: "org.test.kafka", name: "Kafka", version: "0.1.0", srelensApiVersion: "^0.9", kind: "executable",
-    permissions: [{ capability: "k8s.connectPod", namespaces: ["kafka"] }],
-    capabilities: [{ name: "broker", title: "Broker", target: "k8s.connectPod", arguments: { port: 9092 }, inputs: [] }],
+    permissions: ["k8s.listStatefulSets", { capability: "k8s.connectPod", namespaces: ["kafka"] }],
+    capabilities: [
+      { name: "sets", title: "Kafka sets", target: "k8s.listStatefulSets", arguments: {}, inputs: ["context", "namespace"] },
+      { name: "broker", title: "Broker", target: "k8s.connectPod", arguments: { resource: "sets", port: 9092 }, inputs: [] },
+      { name: "bootstrap", title: "Bootstrap", target: "k8s.connectPod", arguments: { resource: "sets", port: 9092, service: true }, inputs: [] },
+      { name: "anyPod", title: "Any pod", target: "k8s.connectPod", arguments: { port: 9092 }, inputs: [] },
+    ],
   };
-  render(<ExtensionBindings manifest={manifest} permissions={["k8s.connectPod"]} />);
+  render(<ExtensionBindings manifest={manifest} permissions={["k8s.listStatefulSets", "k8s.connectPod"]} />);
   const connect = screen.getByRole("listitem", { name: "k8s.connectPod bindings" });
-  expect(within(connect).getByRole("listitem", { name: "Binding broker" }).textContent).toContain(
-    "Lets this app's program connect to port 9092 of pods it is scoped to.",
+  expect(within(connect).getByRole("list", { name: "Namespaces k8s.connectPod may reach" }).textContent).toBe("kafka");
+  expect(within(connect).getByRole("listitem", { name: "Binding broker" }).textContent).toBe(
+    "Broker: lets this app's program connect to port 9092 of pods selected by each StatefulSet Kafka sets lists, in any namespace where you can read StatefulSet objects.",
+  );
+  expect(within(connect).getByRole("listitem", { name: "Binding bootstrap" }).textContent).toBe(
+    "Bootstrap: lets this app's program connect to port 9092 through a Service to pods selected by each StatefulSet Kafka sets lists, in any namespace where you can read StatefulSet objects.",
+  );
+  expect(within(connect).getByRole("listitem", { name: "Binding anyPod" }).textContent).toBe(
+    "Any pod: lets this app's program connect to port 9092 of any pod in a namespace above.",
   );
   expect(within(connect).getByText("High impact")).toBeTruthy();
 });
