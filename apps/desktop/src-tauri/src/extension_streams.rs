@@ -24,7 +24,10 @@ fn native_sidecar_host<R: Runtime>(
     srelens_registry::SidecarHost {
         registry: Arc::new(app.state::<crate::bridge::AppRegistry>().0.clone()),
         audit: app.state::<AppAudit>().0.clone(),
-        pods: Arc::new(srelens_registry::PodTunnels::new(streams, app.state::<AppAudit>().0.clone())),
+        pods: Arc::new(srelens_registry::PodTunnels::new(
+            streams,
+            app.state::<AppAudit>().0.clone(),
+        )),
         consent: Arc::new(crate::mcp_confirm::PromptUser::new(
             app.clone(),
             app.state::<Arc<crate::mcp_confirm::Pending>>()

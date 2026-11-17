@@ -870,6 +870,7 @@ impl Launcher for Dialer {
             let _stderr = _stderr_writer;
             let mut lines = BufReader::new(host_stdin).lines();
             let send = |value: Value| format!("{value}\n");
+            let mut dialed_second = false;
             while let Ok(Some(line)) = lines.next_line().await {
                 me.heard.lock().unwrap().push_str(&format!("{line}\n"));
                 let message: Value = serde_json::from_str(&line).unwrap();
@@ -882,15 +883,21 @@ impl Launcher for Dialer {
                     }
                     (Some("shutdown"), Some(id)) => {
                         let _ = stdout
-                            .write_all(send(json!({"jsonrpc":"2.0","id":id,"result":{}})).as_bytes())
+                            .write_all(
+                                send(json!({"jsonrpc":"2.0","id":id,"result":{}})).as_bytes(),
+                            )
                             .await;
                         return;
                     }
                     (Some(_), Some(id)) => send(json!({"jsonrpc":"2.0","id":id,"result":{}})),
-                    // What the pod said, then the next pod to dial.
-                    (Some(method), None) => {
-                        me.frames.lock().unwrap().push(message.clone());
-                        if method == "tunnel/data" && me.answers.lock().unwrap().len() == 1 {
+                    // What the pod said; the next pod is dialled once both the echo and its
+                    // credit have come, so nothing depends on the order they are sent in.
+                    (Some(_), None) => {
+                        let mut frames = me.frames.lock().unwrap();
+                        frames.push(message.clone());
+                        let seen = |method: &str| frames.iter().any(|f| f["method"] == method);
+                        if !dialed_second && seen("tunnel/data") && seen("tunnel/credit") {
+                            dialed_second = true;
                             me.dial(1)
                         } else {
                             continue;
@@ -919,7 +926,12 @@ impl Launcher for Dialer {
         let exit = async move {
             let killed = task.await.is_err();
             Exit {
-                description: if killed { "was killed" } else { "exited with status 0" }.into(),
+                description: if killed {
+                    "was killed"
+                } else {
+                    "exited with status 0"
+                }
+                .into(),
                 code: (!killed).then_some(0),
                 signal: None,
                 memory_limit: false,
@@ -939,7 +951,8 @@ impl Launcher for Dialer {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_supervised_sidecar_dials_a_pod() {
     use super::tunnels_tests;
-    let host = tunnels_tests::host();
+    let credentials = Credentials::new();
+    let host = tunnels_tests::host_with(&credentials.token, &credentials.client_key);
     let dialer = Dialer {
         pods: vec!["kafka-0", "web-1"],
         heard: Arc::default(),
@@ -965,16 +978,26 @@ async fn a_supervised_sidecar_dials_a_pod() {
         .into_iter()
         .find(|app| app.manifest.id == host.app.id)
         .unwrap();
-    sidecars.request(&app, "scan", serde_json::Map::new()).await.unwrap();
+    sidecars
+        .request(&app, "scan", serde_json::Map::new())
+        .await
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(60), dialer.done.notified())
         .await
         .expect("the sidecar's dials did not finish");
 
     let answers = dialer.answers.lock().unwrap().clone();
-    assert_eq!(answers[0]["result"], json!({"pod": "kafka-0"}), "{answers:?}");
+    assert_eq!(
+        answers[0]["result"],
+        json!({"pod": "kafka-0"}),
+        "{answers:?}"
+    );
     // The echo of `ping` came back down the tunnel, and its credit.
     let frames = dialer.frames.lock().unwrap().clone();
-    let echoed = frames.iter().find(|f| f["method"] == "tunnel/data").expect("echo");
+    let echoed = frames
+        .iter()
+        .find(|f| f["method"] == "tunnel/data")
+        .expect("echo");
     assert_eq!(echoed["params"]["tunnel"], 1);
     assert_eq!(
         base64::Engine::decode(
@@ -984,13 +1007,29 @@ async fn a_supervised_sidecar_dials_a_pod() {
         .unwrap(),
         b"ping"
     );
-    assert!(frames.iter().any(|f| f["method"] == "tunnel/credit"), "{frames:?}");
-    // A pod outside the scope is refused through the same path.
-    assert_eq!(answers[1]["error"]["code"], code::CAPABILITY_FAILED, "{answers:?}");
-    let heard = dialer.heard.lock().unwrap().clone();
-    assert!(heard.contains("tunnel/data"), "the transcript is the whole channel");
     assert!(
-        !Credentials::new().found_in(&heard),
+        frames.iter().any(|f| f["method"] == "tunnel/credit"),
+        "{frames:?}"
+    );
+    // A pod outside the scope is refused through the same path.
+    assert_eq!(
+        answers[1]["error"]["code"],
+        code::CAPABILITY_FAILED,
+        "{answers:?}"
+    );
+    let heard = dialer.heard.lock().unwrap().clone();
+    assert!(
+        heard.contains("tunnel/data"),
+        "the transcript is the whole channel"
+    );
+    // The host really holds the credentials the scan looks for.
+    let kubeconfig = std::fs::read_to_string(host.path.with_file_name("clusters.yaml")).unwrap();
+    assert!(
+        kubeconfig.contains(&credentials.token) && kubeconfig.contains(&credentials.client_key),
+        "the check sees nothing"
+    );
+    assert!(
+        !credentials.found_in(&heard),
         "a credential was written to the sidecar"
     );
 }

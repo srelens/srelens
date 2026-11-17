@@ -73,9 +73,20 @@ pub(super) struct Host {
 /// `kafka-2` has not started. `web-1` is in `team` but not selected, and is the
 /// first pod Service `kafka-bootstrap` sends to.
 pub(super) fn host() -> Host {
+    host_with("", "")
+}
+
+/// The same, its kubeconfig's user holding `token` and `key` (when not empty), as a
+/// real one does and a sidecar must never see.
+pub(super) fn host_with(token: &str, key: &str) -> Host {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("extensions.json");
     let config = kubeconfig(dir.path(), "clusters.yaml", &["cluster/a", "cluster/b"]);
+    if !token.is_empty() {
+        let yaml = std::fs::read_to_string(&config).unwrap();
+        let user = format!("user:\n    token: {token}\n    client-key-data: {key}");
+        std::fs::write(&config, yaml.replace("user: {}", &user)).unwrap();
+    }
     let mut registry = Registry::new();
     let streams = super::register(
         &mut registry,

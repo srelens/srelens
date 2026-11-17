@@ -20,8 +20,8 @@ use srelens_capability::{CapabilityError, Registry};
 use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
     AppIdentity, Broker, CapabilityBroker, CgroupRoot, Consent, Enforcement, LaunchError, Launched,
-    Launcher, Limits, NoBroker, OsSandbox, PodConnector, Policy, SandboxConfig, SidecarCommand, SidecarConfig,
-    SidecarStatus, Supervisor,
+    Launcher, Limits, NoBroker, OsSandbox, PodConnector, Policy, SandboxConfig, SidecarCommand,
+    SidecarConfig, SidecarStatus, Supervisor,
 };
 use std::collections::HashMap;
 use std::ffi::OsString;
