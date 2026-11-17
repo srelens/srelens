@@ -677,6 +677,7 @@ fn relaying(
         registry: Arc::new(setup.registry.clone()),
         consent,
         audit,
+        pods: Arc::new(srelens_plugin_host::sidecar::NoPodConnector),
     });
     let mcp = server(&setup, Arc::new(FlagGated::new(true, true)));
     (setup, mcp, fake)

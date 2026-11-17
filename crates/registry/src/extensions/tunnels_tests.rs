@@ -57,22 +57,22 @@ fn manifest() -> Value {
     })
 }
 
-struct Host {
+pub(super) struct Host {
     _dir: tempfile::TempDir,
-    path: PathBuf,
+    pub(super) path: PathBuf,
     kubeconfig: PathBuf,
     _registry: Registry,
     _streams: Arc<ExtensionStreams>,
     cluster: Arc<Cluster>,
-    trail: Arc<Trail>,
+    pub(super) trail: Arc<Trail>,
     tunnels: PodTunnels,
-    app: AppIdentity,
+    pub(super) app: AppIdentity,
 }
 
 /// StatefulSet `team/kafka` selects `app=kafka`: `kafka-0` and `kafka-1` run,
 /// `kafka-2` has not started. `web-1` is in `team` but not selected, and is the
 /// first pod Service `kafka-bootstrap` sends to.
-fn host() -> Host {
+pub(super) fn host() -> Host {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("extensions.json");
     let config = kubeconfig(dir.path(), "clusters.yaml", &["cluster/a", "cluster/b"]);
@@ -165,6 +165,21 @@ fn ask(
 }
 
 impl Host {
+    /// A connector over the same cluster and trail, for a host to hand its
+    /// sidecars.
+    pub(super) fn pods(&self) -> Arc<dyn PodConnector> {
+        Arc::new(PodTunnels::with_cluster(
+            &self._streams,
+            self.trail.clone(),
+            self.cluster.clone(),
+            TIMING,
+        ))
+    }
+
+    pub(super) fn registry(&self) -> Arc<Registry> {
+        Arc::new(self._registry.clone())
+    }
+
     async fn connect(&self, ask: HostConnectParams) -> Tunnel {
         match self.tunnels.connect(&self.app, &ask).await {
             Ok(tunnel) => tunnel,

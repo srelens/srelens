@@ -269,7 +269,7 @@ fn run_mcp_http(
         );
         // Apps' secrets (#543) in the vault this process already opened, and
         // installed apps' tools (#574).
-        let (registry, app_tools) = srelens_desktop_lib::mcp_registry_for(
+        let (registry, streams) = srelens_desktop_lib::registry_and_app_streams_for(
             cache.clone(),
             srelens_registry::default_kubeconfig_paths(),
             srelens_desktop_lib::default_settings_path(),
@@ -282,13 +282,15 @@ fn run_mcp_http(
         );
         let registry = Arc::new(registry);
         let server = srelens_mcp::McpServer::new(registry.clone());
-        let server = match app_tools {
-            Some(tools) => {
+        let server = match streams {
+            Some(streams) => {
+                let tools = streams.app_tools();
                 // Headless: nobody to ask, so a sidecar's writes are all refused (#573).
                 tools.serve_sidecars(srelens_registry::SidecarHost {
                     registry,
                     consent: Arc::new(srelens_registry::NoConsent),
                     audit: audit.clone(),
+                    pods: Arc::new(srelens_registry::PodTunnels::new(&streams, audit.clone())),
                 });
                 server.with_app_tools(tools)
             }
@@ -395,7 +397,7 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
         // apps' tools (#574) follow the inventory the GUI writes too: a
         // change it makes is found within a poll and sent as
         // `tools/list_changed`.
-        let (registry, app_tools) = srelens_desktop_lib::mcp_registry_for(
+        let (registry, streams) = srelens_desktop_lib::registry_and_app_streams_for(
             cache.clone(),
             srelens_registry::default_kubeconfig_paths(),
             srelens_desktop_lib::default_settings_path(),
@@ -408,13 +410,15 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
         );
         let registry = Arc::new(registry);
         let server = srelens_mcp::McpServer::new(registry.clone());
-        let server = match app_tools {
-            Some(tools) => {
+        let server = match streams {
+            Some(streams) => {
+                let tools = streams.app_tools();
                 // Headless: nobody to ask, so a sidecar's writes are all refused (#573).
                 tools.serve_sidecars(srelens_registry::SidecarHost {
                     registry,
                     consent: Arc::new(srelens_registry::NoConsent),
                     audit: audit.clone(),
+                    pods: Arc::new(srelens_registry::PodTunnels::new(&streams, audit.clone())),
                 });
                 server.with_app_tools(tools)
             }

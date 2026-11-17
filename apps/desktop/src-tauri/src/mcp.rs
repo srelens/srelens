@@ -198,8 +198,8 @@ impl McpHttpManager {
         // here deletes the app's secrets too. Installed apps' tools (#574) are
         // the ones every registry over this inventory shares, so an app the
         // GUI installs reaches the agent with `tools/list_changed`.
-        let (registry, app_tools) = match app.try_state::<crate::ExtensionSecrets>() {
-            Some(secrets) => crate::mcp_registry_for(
+        let (registry, streams) = match app.try_state::<crate::ExtensionSecrets>() {
+            Some(secrets) => crate::registry_and_app_streams_for(
                 self.cache.clone(),
                 crate::capabilities::default_kubeconfig_paths(),
                 crate::capabilities::default_settings_path(),
@@ -214,8 +214,9 @@ impl McpHttpManager {
             std::time::Duration::from_secs(60),
         ));
         let server = srelens_mcp::McpServer::new(registry.clone());
-        let server = match app_tools {
-            Some(tools) => {
+        let server = match streams {
+            Some(streams) => {
+                let tools = streams.app_tools();
                 // An app's sidecar calls back through this registry, and a write it
                 // asks for is put to the person through the same prompt an agent's
                 // gated call is (#573, #552), naming the app.
@@ -223,6 +224,7 @@ impl McpHttpManager {
                     registry,
                     consent: prompt.clone(),
                     audit: audit.clone(),
+                    pods: Arc::new(srelens_registry::PodTunnels::new(&streams, audit.clone())),
                 });
                 server.with_app_tools(tools)
             }
