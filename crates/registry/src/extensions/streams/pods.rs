@@ -133,6 +133,12 @@ impl Authority {
                     self.id, self.capability
                 )
             })?;
+        if binding.target == srelens_plugin_host::POD_CONNECT {
+            return Err(format!(
+                "\"{}\" is a k8s.connectPod binding, which only the app's program may open",
+                binding.name
+            ));
+        }
         match self.target {
             Some(target) if binding.target != target => {
                 return Err(format!(

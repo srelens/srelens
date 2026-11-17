@@ -1793,3 +1793,78 @@ fn the_access_review_says_what_a_pod_connection_reaches() {
         "{items:#?}"
     );
 }
+
+#[test]
+fn connect_pod_is_declared_broker_only() {
+    let manifest = parsed(&kafka());
+    super::validate_app(&manifest, &manifest.permission_names(), fake_core())
+        .expect("an executable app may bind k8s.connectPod");
+    let declared = super::pods::capabilities()
+        .into_iter()
+        .find(|c| c.id == srelens_plugin_host::POD_CONNECT)
+        .expect("k8s.connectPod is declared");
+    assert_eq!(declared.annotations, super::pods::CONNECT_ANNOTATIONS);
+    let cache = srelens_kube::client_cache::ClientCache::new_many(vec![]);
+    let broker = crate::broker_only(cache.clone(), crate::BrokeredNetwork::Off);
+    assert!(broker
+        .iter()
+        .any(|c| c.id == srelens_plugin_host::POD_CONNECT));
+    let catalog = crate::build_registry_with_paths(cache, vec![]);
+    assert!(catalog.get(srelens_plugin_host::POD_CONNECT).is_none());
+}
+
+/// A pod tunnel is the app's program's to open through the broker: a view is
+/// neither offered the pods of one nor allowed to open one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_cannot_open_or_list_a_connect_binding() {
+    let host = host();
+    configure(
+        &host.path,
+        json!({"action": "unsignedApps", "allowUnsignedApps": true}),
+    )
+    .unwrap();
+    let mut value = kafka();
+    let binaries: serde_json::Map<String, Value> = srelens_plugin_host::SIDECAR_PLATFORMS
+        .iter()
+        .map(|platform| (platform.to_string(), json!(format!("bin/{platform}/kafka"))))
+        .collect();
+    value["sidecar"]["binaries"] = Value::Object(binaries);
+    let archive = super::executable_tests::package_with_binaries(&value);
+    let state = configure(
+        &host.path,
+        json!({"action": "installPackage", "grants": ["k8s.listCustomResource", "k8s.connectPod"],
+            "package": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, archive)}),
+    )
+    .unwrap_or_else(|e| panic!("install: {e}"));
+    let revision = state
+        .plugins
+        .iter()
+        .find(|p| p.manifest.id == "org.example.kafka")
+        .unwrap()
+        .revision;
+    const REFUSAL: &str = "is a k8s.connectPod binding, which only the app's program may open";
+    let listed = host
+        .registry
+        .invoke(
+            "extensions.pods",
+            json!({"id": "org.example.kafka", "revision": revision, "capability": "broker",
+                "context": "cluster/a", "namespace": "team", "name": "web"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(listed.contains(REFUSAL), "{listed}");
+    let opened = host
+        .streams
+        .open_audited(
+            host.sink.clone(),
+            host.trail.clone(),
+            json!({"id": "org.example.kafka", "revision": revision, "view": "v",
+                "channel": "extstream:c", "context": "cluster/a", "namespace": "team",
+                "source": {"kind": "portForward", "capability": "broker", "name": "web", "pod": "web-1"}}),
+        )
+        .await
+        .map(|out| out.stream)
+        .unwrap_err();
+    assert!(opened.contains(REFUSAL), "{opened}");
+}

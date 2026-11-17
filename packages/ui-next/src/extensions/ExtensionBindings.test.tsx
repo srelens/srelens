@@ -18,6 +18,7 @@ import {
   reviewCatalogExtension,
   validateExtension,
 } from "@srelens/core";
+import { POD_TARGETS } from "@srelens/core";
 import { ExtensionManager } from "./Extensions";
 import { ExtensionBindings } from "./ExtensionBindings";
 import { plainText } from "./displayText";
@@ -531,4 +532,21 @@ it("reviews each pod binding: whose pods, which command, which port", () => {
   expect(within(forward).getByRole("listitem", { name: "Binding webhook" }).textContent).toContain(
     "forwards port 443 through a Service to pods selected by each Deployment Controllers lists",
   );
+});
+
+// #1091: a connect binding is the app's program's to open, so a view may not offer it
+// (POD_TARGETS) — but the install review still says what it lets the program do.
+it("reviews a pod connection as a high-impact grant, and views cannot open one", () => {
+  expect(POD_TARGETS).not.toContain("k8s.connectPod");
+  const manifest = {
+    id: "org.test.kafka", name: "Kafka", version: "0.1.0", srelensApiVersion: "^0.9", kind: "executable",
+    permissions: [{ capability: "k8s.connectPod", namespaces: ["kafka"] }],
+    capabilities: [{ name: "broker", title: "Broker", target: "k8s.connectPod", arguments: { port: 9092 }, inputs: [] }],
+  };
+  render(<ExtensionBindings manifest={manifest} permissions={["k8s.connectPod"]} />);
+  const connect = screen.getByRole("listitem", { name: "k8s.connectPod bindings" });
+  expect(within(connect).getByRole("listitem", { name: "Binding broker" }).textContent).toContain(
+    "Lets this app's program connect to port 9092 of pods it is scoped to.",
+  );
+  expect(within(connect).getByText("High impact")).toBeTruthy();
 });

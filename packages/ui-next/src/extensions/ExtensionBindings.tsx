@@ -28,6 +28,8 @@ const show = (value: unknown): string =>
 const CUSTOM_RESOURCE = "k8s.listCustomResource";
 const EVENTS = "k8s.listEvents";
 const SECRET_STORE = "extension.secretStore";
+/** Not in core's `POD_TARGETS`, which is what a view may open: only the app's program opens one (#1091). */
+const POD_CONNECT = "k8s.connectPod";
 /** The arguments a custom-resource reader's row names in their own cells. */
 const RESOURCE_FIELDS: Array<[key: string, label: string]> = [
   ["group", "API group"],
@@ -418,6 +420,7 @@ export const POD_FACTS: Record<string, string> = {
   [POD_LOGS]: "Read-only · low impact",
   [POD_EXEC]: "Sensitive · high impact · confirmed on every run",
   [POD_FORWARD]: "Read-only · medium impact · opens a port on this computer while the view is open",
+  [POD_CONNECT]: "High impact",
 };
 
 /** The built-in kinds a pod scope's reader may list, by the reader's target (#567). */
@@ -500,6 +503,11 @@ function PodBindings({ target, bindings, all, manifest }: { target: string; bind
                   {podScope(binding, all)}. You confirm every run, with its pod, container and command.
                 </>
               )}
+              {target === POD_CONNECT && (
+                <>
+                  Lets this app's program connect to port <code>{port}</code> of pods it is scoped to.
+                </>
+              )}
               {target === POD_FORWARD && (
                 <>
                   forwards port <code>{port}</code>
@@ -573,7 +581,7 @@ export function ExtensionBindings({ manifest, permissions }: { manifest: unknown
                 <EventReaders bindings={bound} manifest={manifest} />
               ) : target === NETWORK_HTTP ? (
                 <NetworkRequests bindings={bound} manifest={manifest} />
-              ) : POD_TARGETS.includes(target) ? (
+              ) : POD_TARGETS.includes(target) || target === POD_CONNECT ? (
                 <PodBindings target={target} bindings={bound} all={bindings} manifest={manifest} />
               ) : (
                 <OtherReaders bindings={bound} />
