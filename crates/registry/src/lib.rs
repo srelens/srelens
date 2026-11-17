@@ -28,6 +28,7 @@ pub use extensions::fuzzing;
 pub use extensions::sidecars::SidecarHost;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
 pub use extensions::tools::AppTools;
+pub use extensions::tunnels::PodTunnels;
 pub use extensions::{
     AppPolicy, Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog, SharedPolicy,
     TrustRoot, MAX_POLICY_BYTES,

@@ -45,6 +45,9 @@ mod signing;
 mod store;
 pub mod streams;
 pub mod tools;
+pub mod tunnels;
+#[cfg(test)]
+mod tunnels_tests;
 mod operations;
 mod availability;
 pub(crate) mod jobs;

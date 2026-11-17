@@ -24,7 +24,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 
-const APP: &str = "org.example.certmanager";
+pub(super) const APP: &str = "org.example.certmanager";
 
 /// A cert-manager app: it reads Deployments and Argo Rollouts, and reaches the
 /// pods they select; one more logs binding reaches any pod in `cert-manager`.
@@ -86,7 +86,7 @@ enum LogStep {
     Fail(&'static str),
 }
 
-fn pod(name: &str, namespace: &str, labels: &[(&str, &str)]) -> PodFacts {
+pub(super) fn pod(name: &str, namespace: &str, labels: &[(&str, &str)]) -> PodFacts {
     PodFacts {
         name: name.into(),
         namespace: namespace.into(),
@@ -106,10 +106,10 @@ fn pod(name: &str, namespace: &str, labels: &[(&str, &str)]) -> PodFacts {
 }
 
 #[derive(Default)]
-struct Cluster {
-    objects: Mutex<BTreeMap<(String, String, String), Value>>,
-    pods: Mutex<Vec<PodFacts>>,
-    services: Mutex<Vec<ServiceFacts>>,
+pub(super) struct Cluster {
+    pub(super) objects: Mutex<BTreeMap<(String, String, String), Value>>,
+    pub(super) pods: Mutex<Vec<PodFacts>>,
+    pub(super) services: Mutex<Vec<ServiceFacts>>,
     logs: Mutex<std::collections::VecDeque<Vec<LogStep>>>,
     log_asks: Mutex<Vec<LogsAsk>>,
     exec_output: Mutex<Vec<(Output, &'static str)>>,
@@ -117,11 +117,11 @@ struct Cluster {
     exec_asks: Mutex<Vec<ExecAsk>>,
     /// Upstream connections open now, and ever opened.
     open: Arc<AtomicUsize>,
-    connected: Mutex<Vec<(String, u16)>>,
+    pub(super) connected: Mutex<Vec<(String, u16)>>,
     /// Exec never ends by itself when set.
     exec_hangs: std::sync::atomic::AtomicBool,
     /// Every port-forward connection is refused with this, when set.
-    refuse_connect: Mutex<Option<&'static str>>,
+    pub(super) refuse_connect: Mutex<Option<&'static str>>,
     /// Object reads so far, and which of them (counted from 1) fail, and how.
     object_reads: AtomicUsize,
     failed_reads: Mutex<BTreeMap<usize, ReadError>>,
@@ -336,14 +336,14 @@ const FAST: PodTiming = PodTiming {
 };
 
 #[derive(Default)]
-struct Trail(Mutex<Vec<AuditRecord>>);
+pub(super) struct Trail(Mutex<Vec<AuditRecord>>);
 impl AuditSink for Trail {
     fn record(&self, rec: AuditRecord) {
         self.0.lock().unwrap().push(rec);
     }
 }
 impl Trail {
-    fn seen(&self) -> Vec<AuditRecord> {
+    pub(super) fn seen(&self) -> Vec<AuditRecord> {
         self.0.lock().unwrap().clone()
     }
 }
@@ -359,7 +359,7 @@ struct Host {
     revision: u64,
 }
 
-fn install(path: &Path) -> u64 {
+pub(super) fn install(path: &Path) -> u64 {
     configure(
         path,
         json!({"action": "unsignedApps", "allowUnsignedApps": true}),
