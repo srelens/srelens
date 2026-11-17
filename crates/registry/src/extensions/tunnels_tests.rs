@@ -698,3 +698,47 @@ async fn a_pod_read_that_recovers_keeps_the_tunnel() {
     assert_eq!(host.cluster.pod_reads.load(Ordering::SeqCst), before + 5);
     assert!(host.cluster.pod_answers.lock().unwrap().is_empty());
 }
+
+/// A pod read that does not answer — an API server that is slow, up to the
+/// request timeout — never holds up the app's recheck: access taken away on
+/// disk by another process ends the tunnel within one tick.
+#[tokio::test(start_paused = true)]
+async fn access_removed_during_a_held_pod_read_ends_the_tunnel() {
+    let host = host();
+    let mut tunnel = host
+        .connect(ask("broker", Some("kafka"), Some("kafka-0"), None))
+        .await;
+    let before = host.cluster.pod_reads.load(Ordering::SeqCst);
+    host.cluster.hold_pod_reads.store(true, Ordering::SeqCst);
+    still_open(&mut tunnel, 1).await;
+    assert_eq!(host.cluster.pod_reads.load(Ordering::SeqCst), before + 1);
+    // The cluster taken off the app's list, as another process saves it.
+    let mut state = super::read(&host.path).unwrap();
+    state
+        .plugins
+        .iter_mut()
+        .find(|p| p.manifest.id == KAFKA)
+        .unwrap()
+        .contexts = Some(vec![format!("{}#cluster/b", host.kubeconfig.display())]);
+    super::write(&host.path, &state).unwrap();
+    let why = ends(&mut tunnel).await;
+    assert_eq!(
+        why,
+        "The connection to pod team/kafka-0 ended: App is not enabled for this cluster"
+    );
+}
+
+/// One pod read at a time: a read still pending at the next tick is waited
+/// for, not joined by another. Only a read that finishes counts towards the
+/// failed reads that end a tunnel; the cluster's request timeout bounds it.
+#[tokio::test(start_paused = true)]
+async fn a_held_pod_read_does_not_start_another() {
+    let host = host();
+    let mut tunnel = host
+        .connect(ask("broker", Some("kafka"), Some("kafka-0"), None))
+        .await;
+    let before = host.cluster.pod_reads.load(Ordering::SeqCst);
+    host.cluster.hold_pod_reads.store(true, Ordering::SeqCst);
+    still_open(&mut tunnel, 5).await;
+    assert_eq!(host.cluster.pod_reads.load(Ordering::SeqCst), before + 1);
+}

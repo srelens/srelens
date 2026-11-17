@@ -302,6 +302,9 @@ impl PodConnector for PodTunnels {
 // ponytail: a fixed count, about 6 s at the 2 s tick; a time budget per tunnel if that proves too short or too long.
 const MAX_FAILED_POD_READS: u32 = 3;
 
+/// What one pod read found: [`read_pod`]'s answer.
+type PodRead = Result<Result<bool, String>, String>;
+
 /// What an open tunnel is held to.
 struct Monitor {
     cluster: Arc<dyn PodCluster>,
@@ -319,17 +322,36 @@ impl Monitor {
     /// each inventory write announced in this process. The tick's recheck reads
     /// the saved inventory, so a change another process made (a headless
     /// `--mcp-stdio` beside the app's window) ends the tunnel too.
+    ///
+    /// One pod read is in flight at a time, polled beside the tick and the
+    /// inventory, so a slow read never holds up the app's recheck. A read still
+    /// pending at a tick is waited for, not repeated, and counts only once it
+    /// finishes: the cluster's request timeout bounds it. Nothing is spawned,
+    /// so dropping the tunnel drops the read with the monitor.
     async fn run(mut self) -> String {
         let mut tick =
             tokio::time::interval_at(Instant::now() + self.timing.monitor, self.timing.monitor);
         let mut failed = 0;
+        let mut pending: Option<Pin<Box<dyn Future<Output = PodRead> + Send>>> = None;
         let why = loop {
             tokio::select! {
                 _ = tick.tick() => {
                     if let Err(why) = self.authority.check().await {
                         break for_program(why);
                     }
-                    match read_pod(self.cluster.as_ref(), &self.context, &self.scope, &self.authority.id, &self.pod).await {
+                    if pending.is_none() {
+                        let (cluster, context, scope, app, pod) = (
+                            self.cluster.clone(), self.context.clone(), self.scope.clone(),
+                            self.authority.id.clone(), self.pod.clone(),
+                        );
+                        pending = Some(Box::pin(async move {
+                            read_pod(cluster.as_ref(), &context, &scope, &app, &pod).await
+                        }));
+                    }
+                }
+                read = async { pending.as_mut().expect("polled only while pending").await }, if pending.is_some() => {
+                    pending = None;
+                    match read {
                         Ok(Ok(true)) => failed = 0,
                         Ok(Ok(false)) => break format!("Pod {} is no longer running", self.pod),
                         Ok(Err(why)) => {

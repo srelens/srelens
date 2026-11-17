@@ -131,6 +131,8 @@ pub(super) struct Cluster {
     /// `None` answers; once it is empty every read answers.
     pub(super) pod_reads: AtomicUsize,
     pub(super) pod_answers: Mutex<std::collections::VecDeque<Option<ReadError>>>,
+    /// Every pod read from now on is held open, never answered, when set.
+    pub(super) hold_pod_reads: std::sync::atomic::AtomicBool,
 }
 
 /// Counts itself out of `open` when the connection it echoes on ends.
@@ -241,6 +243,9 @@ impl PodCluster for Cluster {
         name: &str,
     ) -> Result<Option<PodFacts>, ReadError> {
         self.pod_reads.fetch_add(1, Ordering::SeqCst);
+        if self.hold_pod_reads.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if let Some(Some(failure)) = self.pod_answers.lock().unwrap().pop_front() {
             return Err(failure);
         }
