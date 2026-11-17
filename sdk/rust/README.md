@@ -47,6 +47,7 @@ Declare the operations in the app's manifest
 - **Calls to srelens.**
   - The calls are `ctx.host().read`, `.resource` and `.action`. Each names its cluster with a `CallContext`.
   - srelens adds no cluster to an operation's input: declare one, and pass it on.
+  - There is no call for a pod connection yet. The SDK negotiates sidecar API 0.3.0, which has one ([pod tunnels](../../docs/extensions/sidecar-protocol.md#pod-tunnels-in-protocol-030)), but only the Go SDK can dial. It also lacks the 0.2.0 calls.
   - Every field is checked before the call is sent, against the shape srelens holds it to: `clusterId` is not blank and at most 4096 bytes, `namespace` is a Kubernetes namespace name or `None`, `capability` and `action` are identifiers (1 to 64 ASCII letters, digits and hyphens), `name` is an object name (1 to 253 ASCII letters, digits, dots and hyphens, and not `.` or `..`), and `uid` and `resourceVersion` are 1 to 128 printable ASCII characters. A call with a field srelens would refuse fails with `HostError::InvalidCall`, naming the field. Nothing is sent and no slot is taken.
   - A `CallContext` written as a struct literal is checked too, as `CallContext::new` checks its arguments. `CallContext::validate` runs the same check on one you hold.
   - At most 8 calls are in flight, which is srelens's limit, or fewer when the `maxConcurrentRequests` srelens sends in `initialize` is lower (0 is read as 8); the rest wait.

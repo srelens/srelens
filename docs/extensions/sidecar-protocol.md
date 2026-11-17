@@ -41,8 +41,8 @@ JSON-RPC 2.0, one message per line.
 - **Params** are an object or an array, or absent.
 
 The same contract in machine-readable form is
-[`schemas/sidecar-protocol.v0.2.json`](../../schemas/sidecar-protocol.v0.2.json), one
-file per sidecar API line. It is generated from the `srelens-sidecar-protocol` crate
+[`schemas/sidecar-protocol.v0.3.json`](../../schemas/sidecar-protocol.v0.3.json), one
+file per sidecar API line (the files of the earlier lines stay as they were). It is generated from the `srelens-sidecar-protocol` crate
 (`sdk/protocol/`), whose types srelens itself builds its messages from, and which the SDKs
 share. It has:
 
@@ -96,8 +96,9 @@ that is how it learns srelens has gone.
 ### Version negotiation
 
 The sidecar API has its own versions, listed in `SIDECAR_API_VERSIONS`
-(`sdk/protocol/src/lib.rs`). Today there is one, `0.1.0`. It is not
-the extension API version (`SUPPORTED_API_VERSIONS`), and the executable kind (#574) kept
+(`sdk/protocol/src/lib.rs`). Today there are three, `0.1.0`, `0.2.0` and `0.3.0`, and
+srelens offers all of them. A call that needs a newer line than the one negotiated is
+refused with `-32601`. It is not the extension API version (`SUPPORTED_API_VERSIONS`), and the executable kind (#574) kept
 the two apart: a manifest names the extension API it is written for, and its sidecar
 negotiates this one at `initialize`, so each can move without the other.
 
@@ -280,10 +281,17 @@ built from the token, failing to reach the cluster.
 
 ### Network
 
-A sidecar has no network (see [Sandbox](#sandbox)). What it reaches outside the machine it
-reaches through `host/read` of one of its `network.http` requests: a GET to one of the hosts
-its manifest declares, with the limits and redirect rules of
-[Network requests](manifest.md#network-requests).
+A sidecar opens no socket of its own (see [Sandbox](#sandbox)), and that has not changed.
+There are two ways out, both through srelens:
+
+- `host/read` of one of its `network.http` requests: a GET to one of the hosts its manifest
+  declares, with the limits and redirect rules of
+  [Network requests](manifest.md#network-requests).
+- `host/connect`, from protocol 0.3.0: a TCP connection to a pod, carried as bytes on the
+  same pipe ([Pod tunnels in protocol 0.3.0](#pod-tunnels-in-protocol-030)). The manifest
+  grant that makes it reachable arrives with the capability change that follows this one.
+  Until then a srelens process offers no pod connections, and `host/connect` is refused
+  with `-32601`.
 
 ### Audit
 
@@ -620,3 +628,152 @@ and credentials or raw results never travel in that reply. The app removes
 the temporary file after consumption. A failed worker's bounded diagnostic file remains private; the app classifies its cause without returning raw log lines, never saves it as a completed report, and removes it. Scheduling failures retain their scheduling reason. Cancellation drops the runner and
 cleans up that UID; ordinary approved action writes retain their existing
 finish-after-cancellation behavior. One scan per app may run through cleanup.
+
+## Pod tunnels in protocol 0.3.0
+
+A sidecar has no network, so it cannot speak a TCP protocol to anything. Protocol 0.3.0 adds
+one narrow way: the sidecar asks srelens for a TCP connection to a pod's port, and the bytes
+travel over the pipe it already has. The sandbox does not change. A sidecar still has stdin,
+stdout, stderr and nothing else, and nothing new is written to the pipe except bytes the pod
+sent.
+
+Everything below needs a negotiated version of at least 0.3.0. On a session negotiated
+lower, `host/connect` is refused with `-32601`, and every `tunnel/*` notification is
+ignored, as any unknown method is. This release specifies the wire only: a srelens process
+offers no pod connections yet, so `host/connect` is refused with `-32601` there too. The
+grant that makes it reachable arrives with the capability change that follows.
+
+| Message | Direction | Kind | Params |
+|---|---|---|---|
+| `host/connect` | sidecar → host | request | `context`: `clusterId` and `namespace`, which is a name, never `null`; `capability`; `name`, optional; exactly one of `pod` or `service`; `tunnel`. Result: `{pod}` |
+| `tunnel/data` | both ways | notification | `tunnel`, `data`: base64 |
+| `tunnel/credit` | both ways | notification | `tunnel`, `bytes` |
+| `tunnel/close` | both ways | notification | `tunnel`, `message`: optional |
+
+Each is in [the schema](../../schemas/sidecar-protocol.v0.3.json).
+
+```json
+{"jsonrpc": "2.0", "id": "c-2", "method": "host/connect",
+ "params": {"context": {"clusterId": "kind-dev", "namespace": "team"},
+            "capability": "broker", "pod": "kafka-0", "tunnel": 1}}
+```
+
+### Opening a tunnel
+
+- **The params.** `capability` names one of the app's declared bindings. `name` is the
+  object whose selector is the scope, when the binding has one. `pod` or `service` names
+  what to connect to: the pod itself, or a Service, which srelens resolves to one of its
+  ready pods. Name exactly one of `pod` and `service`. `capability` is an identifier, and
+  `name`, `pod` and `service` are Kubernetes object names, held to the shapes
+  [the other calls](#the-calls) are. Nothing else is accepted.
+- **The result** is `{"pod": "<the pod connected to>"}`: for a Service, the pod it resolved
+  to.
+- **`tunnel`** is chosen by the sidecar: a positive integer, greater than every tunnel id it
+  has used in this session. An id is never reused, so a frame still queued for a closed
+  tunnel cannot land on a new one. An id is used up by its call, whatever the outcome:
+  refused, failed or cancelled. Register the tunnel before sending the request, so data
+  that arrives before the answer has somewhere to go.
+- **Errors.**
+
+  | Code | When |
+  |---|---|
+  | `-32601` | the negotiated version is below 0.3.0, or this srelens process offers no pod connections |
+  | `-32602` | the params are not the shape above, the binding is not declared, or `tunnel` is not greater than the last one used |
+  | `-32603` | the sidecar already has 16 tunnels, or has made 60 `host/connect` calls this minute |
+  | `-32003` | the grants, the scope or the cluster refused it; the message is theirs |
+  | `-32800` | the sidecar cancelled the call |
+
+- **Cancelling.** The sidecar cancels a `host/connect` as it cancels any call, with
+  `$/cancelRequest` (see [Cancellation and bounds](#cancellation-and-bounds)). If the
+  cancellation wins, no tunnel is left, even if the connection to the pod had just opened.
+  The answer and the `$/cancelRequest` can cross, so an SDK that abandons a `host/connect`
+  must send `tunnel/close` for its tunnel after the `$/cancelRequest`. If the cancellation
+  won, that close is for a tunnel that is not open and is dropped. If the answer won, it
+  ends the tunnel, which would otherwise stay open until the session ends. The Go SDK does
+  this.
+
+### Limits
+
+| Limit | Value | When it is reached |
+|---|---|---|
+| Open tunnels | 16 per sidecar | The next `host/connect` is refused at once with `-32603`. A connect still being answered counts. |
+| `host/connect` calls | 60 a minute per sidecar | The call is refused at once with `-32603`, without reaching the cluster. |
+| Window | 256 KiB each way, per tunnel | See [Flow control](#flow-control). |
+| Chunk | 64 KiB in one `tunnel/data`, before base64 | The tunnel is closed with a message. |
+
+- The 16 tunnels are a constant of protocol 0.3 (`MAX_TUNNELS`), not a field of
+  `initialize`'s `limits`: `initialize` is sent before the version is negotiated, and a
+  sidecar of an earlier line refuses fields it does not know.
+- Every call that reaches the broker counts toward the 60, whatever its outcome. A call with
+  malformed params (a cluster id, a namespace, a capability or a name of the wrong shape),
+  one whose `tunnel` is not greater than the last, and one refused for the 16-tunnel limit
+  are refused before that, and are neither counted nor audited. Only the first call refused
+  for the rate in a minute is recorded in the audit trail, so a sidecar cannot flood it
+  through the limit. A hostile app can still make 60 calls a minute.
+- A `host/connect` takes one of the call slots (see
+  [Cancellation and bounds](#cancellation-and-bounds)) only until it is answered. An open
+  tunnel takes none.
+
+### Moving data
+
+`tunnel/data` carries a chunk of at most 65,536 bytes, as base64 text (the standard
+alphabet, with padding):
+
+```json
+{"jsonrpc": "2.0", "method": "tunnel/data", "params": {"tunnel": 1, "data": "AAAABw=="}}
+```
+
+The host relays both directions of a tunnel at once, so a pod that writes before it reads
+cannot stall it.
+
+### Flow control
+
+Each side starts with a full window of 262,144 bytes (256 KiB) to send on a tunnel. A sender
+spends credit as it sends and stops at zero. The receiver returns credit with
+`tunnel/credit` as it consumes the bytes:
+
+```json
+{"jsonrpc": "2.0", "method": "tunnel/credit", "params": {"tunnel": 1, "bytes": 65536}}
+```
+
+`bytes` is 1 to 262,144. The host returns credit for the sidecar's bytes once it has written
+them to the pod. It never holds more than one window per direction per tunnel.
+
+Each of these closes that tunnel with a message, and never the session:
+
+- credit that would take a window past 262,144;
+- data past the window;
+- a chunk of more than 65,536 bytes, or `data` that is not valid base64.
+
+### Closing
+
+- **Either side may close, and it is a full close.** There is no half-close.
+- **The sidecar's `tunnel/close`.** The host writes the bytes it had already accepted to the
+  pod, then drops the connection. It sends no close back, and it drops any later frame for
+  that id.
+- **The host's `tunnel/close`**, with an optional `message` that says why when the tunnel
+  failed, ends the tunnel. Data the host sent before it is still valid.
+- **Late frames.** A close and a frame can cross on the pipe, so both sides drop a frame for
+  a tunnel they no longer have. That is normal, not a violation.
+- **A `tunnel/*` frame with no usable tunnel id**, at 0.3.0 or later, is a protocol
+  violation and ends the session (see [Protocol violations](#protocol-violations)).
+- **When the session ends**, every pod connection is dropped.
+
+### Writing order
+
+The host writes its own requests, cancellations and health checks first, then answers to the
+sidecar's calls, then tunnel frames. Tunnel frames wait in a bounded lane (32 frames), and a
+tunnel stops reading its pod while the lane is full. So a busy tunnel cannot starve a health
+check or an answer. A sidecar that stops reading its stdin stalls its own tunnels, not
+srelens, and the health timeout ends the session.
+
+### In the SDKs
+
+The Go SDK has `Host.Dial(ctx, cc, PodTarget{Capability, Object, Pod, Service})`, which
+returns a `net.Conn`. Reads, writes and `Close` may run concurrently, and the conn supports
+deadlines. When srelens closes a tunnel, the bytes already received are read first, then
+`Read` returns an error that carries srelens's message (`io.EOF` when there was none).
+Close the conn: an open one holds one of the sidecar's 16 tunnels. If the `ctx` ends first,
+the SDK cancels the call and closes the tunnel as above.
+
+The Rust SDK negotiates 0.3.0 but has no way to dial yet.
