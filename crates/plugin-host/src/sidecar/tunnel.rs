@@ -190,7 +190,7 @@ impl Connection {
         };
         if let Some(why) = broken {
             if let Some(close) = open.close.take() {
-                let _ = close.send(format!("srelens closed the tunnel: the extension {why}"));
+                let _ = close.send(format!("The extension {why}"));
             }
         }
         Ok(())

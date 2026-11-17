@@ -673,9 +673,11 @@ Each is in [the schema](../../schemas/sidecar-protocol.v0.3.json).
   to.
 - **`tunnel`** is chosen by the sidecar: a positive integer, greater than every tunnel id it
   has used in this session. An id is never reused, so a frame still queued for a closed
-  tunnel cannot land on a new one. A call whose params are not the shape above is refused
-  with `-32602` before its id is counted. Once the call is well-formed its id is used up,
-  whatever the outcome: refused, failed or cancelled. A sidecar should treat every id it
+  tunnel cannot land on a new one. A call whose params do not parse as the shape above (a
+  missing or mistyped field, both or neither of `pod` and `service`) is refused with
+  `-32602` before its id is counted. Once the params parse, the id is used up, whatever the
+  outcome: refused (including for a `name`, `pod`, `service`, cluster or namespace that is
+  not a valid name), failed or cancelled. A sidecar should treat every id it
   has sent as used. Register the tunnel before sending the request, so data
   that arrives before the answer has somewhere to go.
 - **Errors.**
@@ -757,7 +759,10 @@ Each of these closes that tunnel with a message, and never the session:
   pod, then drops the connection. It sends no close back, and it drops any later frame for
   that id.
 - **The host's `tunnel/close`**, with an optional `message` that says why when the tunnel
-  failed, ends the tunnel. Data the host sent before it is still valid.
+  failed, ends the tunnel. Data the host sent before it is still valid. The host closes with
+  a message when the sidecar breaks a tunnel rule (see [Flow control](#flow-control)) and
+  when the connection to the pod fails. When the pod closes its own end, that is not a
+  failure: the host closes with no message, and the SDK reports end of stream.
 - **Late frames.** A close and a frame can cross on the pipe, so both sides drop a frame for
   a tunnel they no longer have. That is normal, not a violation.
 - **A `tunnel/*` frame with no usable tunnel id**, at 0.3.0 or later, is a protocol

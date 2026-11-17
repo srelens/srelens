@@ -2200,6 +2200,8 @@ mod tests {
         assert_eq!(close["params"]["tunnel"], tunnel);
         let message = close["params"]["message"].as_str().expect("a message");
         assert!(message.contains(says), "{message}");
+        // The SDK adds "srelens closed the tunnel: " itself, so the reason stands alone.
+        assert!(message.starts_with("The extension "), "{message}");
         reads_eof(&mut upstream.pod).await;
         assert!(!connection.is_ended());
         assert!(!connection.state().tunnels.contains_key(&tunnel));
@@ -2409,8 +2411,10 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(lines.tunnels.len(), TUNNEL_LANE);
         let written = written.load(std::sync::atomic::Ordering::SeqCst);
+        // The lane's frames, one read the pump holds while it waits for a
+        // place, and the pipe's own 1024 bytes.
         assert!(
-            written <= WINDOW,
+            written <= (TUNNEL_LANE + 2) * 1024,
             "the pump read {written} bytes from the pod"
         );
         pod.abort();

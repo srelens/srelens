@@ -1685,6 +1685,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn the_limit_is_audited_once_in_each_minute() {
+        let (broker, _, audit) = with_pods(false);
+        for minute in 1..=2 {
+            for _ in 0..63 {
+                let _ = broker.connect(connect_ask()).await;
+            }
+            assert_eq!(audit.records().len(), minute);
+            tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_refused_connect_counts() {
         let (broker, pods, _) = with_pods(true);
         for _ in 0..60 {
