@@ -63,6 +63,24 @@ fn invalid(why: String) -> Refusal {
     }
 }
 
+/// The app's authority refusing, as a program reads it: the shared check
+/// words it for a view, which a program has none of to refresh.
+fn for_program(why: String) -> String {
+    let why = why.strip_prefix("handler error: ").unwrap_or(&why);
+    why.strip_suffix("; refresh the view")
+        .unwrap_or(why)
+        .to_owned()
+}
+
+/// What a connect learned on its way, for its record: the context it resolved
+/// to, the binding's port and, through a Service, the pod's port it reached.
+#[derive(Default)]
+struct Seen {
+    context: Option<String>,
+    port: Option<u16>,
+    target_port: Option<u16>,
+}
+
 impl PodTunnels {
     /// The host's: the cluster through `streams`' client cache, rechecked on
     /// `streams`' inventory writes, recorded to `audit`.
@@ -88,13 +106,13 @@ impl PodTunnels {
         }
     }
 
-    /// The tunnel `ask` names, for `app`, or why not. `port` is the binding's
-    /// once it is found, for the record.
+    /// The tunnel `ask` names, for `app`, or why not; what it learned on the
+    /// way is left in `seen`, for the record.
     async fn open(
         &self,
         app: &AppIdentity,
         ask: &HostConnectParams,
-        port: &mut Option<u16>,
+        seen: &mut Seen,
     ) -> Result<Tunnel, Refusal> {
         // Before the app is checked, so no inventory write after the check
         // goes unseen by the tunnel.
@@ -108,7 +126,11 @@ impl PodTunnels {
             &ask.capability,
             &ask.context.cluster_id,
         );
-        let (context, manifest) = authority.app().await.map_err(refused)?;
+        let (context, manifest) = authority
+            .app()
+            .await
+            .map_err(|why| refused(for_program(why)))?;
+        seen.context = Some(context.clone());
         if manifest.kind != ManifestKind::Executable {
             return Err(refused(format!(
                 "App {} is not an executable app; only an app's program opens pod connections",
@@ -116,8 +138,10 @@ impl PodTunnels {
             )));
         }
         let binding = authority.binding(&manifest).map_err(invalid)?;
-        *port = srelens_plugin_host::forward_port(&binding);
-        let port = port.ok_or_else(|| refused(format!("\"{}\" binds no port", binding.name)))?;
+        seen.port = srelens_plugin_host::forward_port(&binding);
+        let port = seen
+            .port
+            .ok_or_else(|| refused(format!("\"{}\" binds no port", binding.name)))?;
         match (manifest.pod_scope(&binding).map_err(refused)?, &ask.name) {
             (PodScope::Namespaces(_), Some(_)) => {
                 return Err(invalid(format!(
@@ -191,9 +215,12 @@ impl PodTunnels {
                 (facts, port)
             }
             Err(service) => {
-                scope::service_target(cluster, &context, &scope, &app.id, service, port)
-                    .await
-                    .map_err(|why| refused(why.into()))?
+                let (facts, remote) =
+                    scope::service_target(cluster, &context, &scope, &app.id, service, port)
+                        .await
+                        .map_err(|why| refused(why.into()))?;
+                seen.target_port = Some(remote);
+                (facts, remote)
             }
         };
         let upstream = self
@@ -230,8 +257,8 @@ impl PodConnector for PodTunnels {
         ask: &'a HostConnectParams,
     ) -> Pin<Box<dyn Future<Output = Result<Tunnel, RpcError>> + Send + 'a>> {
         Box::pin(async move {
-            let mut port = None;
-            let opened = self.open(app, ask, &mut port).await;
+            let mut seen = Seen::default();
+            let opened = self.open(app, ask, &mut seen).await;
             // Written as the answer is, with no wait between: a connect the
             // sidecar cancels before this never opened, and one that opened
             // is recorded.
@@ -241,10 +268,18 @@ impl PodConnector for PodTunnels {
                 tool: POD_CONNECT,
                 app: &app.id,
                 revision: app.revision,
-                context: &ask.context.cluster_id,
+                // The pinned cluster once it resolved, as a view's forward
+                // records; until then the name the sidecar sent.
+                context: seen.context.as_deref().unwrap_or(&ask.context.cluster_id),
                 namespace: &ask.context.namespace,
             };
-            let args = |pod: Option<&str>| json!({"capability": ask.capability, "pod": pod, "service": ask.service, "port": port});
+            let args = |pod: Option<&str>| {
+                let mut args = json!({"capability": ask.capability, "pod": pod, "service": ask.service, "port": seen.port});
+                if let Some(target) = seen.target_port {
+                    args["targetPort"] = json!(target);
+                }
+                args
+            };
             match opened {
                 Ok(tunnel) => {
                     record.write(Some(&tunnel.pod), args(Some(&tunnel.pod)), "auto", None);
@@ -291,7 +326,7 @@ impl Monitor {
                         break "srelens stopped serving apps".to_owned();
                     }
                     if let Err(why) = self.authority.check().await {
-                        break why;
+                        break for_program(why);
                     }
                 }
             }

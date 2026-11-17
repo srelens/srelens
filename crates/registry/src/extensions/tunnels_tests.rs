@@ -104,7 +104,7 @@ fn host() -> Host {
         ports: vec![ServicePort {
             name: None,
             port: 9092,
-            target: PortTarget::Number(9092),
+            target: PortTarget::Number(19092),
         }],
     }];
     configure(
@@ -176,6 +176,7 @@ impl Host {
     /// message the sidecar is told.
     async fn refused(&self, app: &AppIdentity, ask: HostConnectParams, code: i64) -> String {
         let before = self.trail.seen().len();
+        let connected = self.cluster.connected.lock().unwrap().len();
         let error = match self.tunnels.connect(app, &ask).await {
             Ok(tunnel) => panic!("connected to {}", tunnel.pod),
             Err(error) => error,
@@ -189,10 +190,25 @@ impl Host {
         assert_eq!(record.tool, "k8s.connectPod");
         assert!(record.error.is_some(), "{record:?}");
         assert!(
-            self.cluster.connected.lock().unwrap().is_empty(),
+            self.cluster.connected.lock().unwrap().len() == connected,
             "a refused connect opened a connection"
         );
         error.message
+    }
+
+    /// The pinned ID `cluster/a` resolves to, which records name once it has.
+    fn pinned(&self) -> String {
+        let all = srelens_kube::context_resolve::resolve_contexts(&[self.kubeconfig.clone()]);
+        srelens_kube::context_resolve::find_context(&all, "cluster/a")
+            .and_then(|context| context.pinned_id())
+            .unwrap()
+    }
+
+    fn last_cluster(&self) -> Option<String> {
+        self.trail
+            .seen()
+            .last()
+            .and_then(|record| record.cluster.clone())
     }
 }
 
@@ -232,6 +248,10 @@ async fn an_in_scope_pod_connects_and_echoes() {
         json!({"capability": "broker", "pod": "kafka-0", "service": null, "port": 9092})
     );
     assert_eq!(record.resource.as_deref(), Some("team/kafka-0"));
+    // The sidecar named the context by its name; the record names the cluster
+    // it resolved to, as a view's forward does.
+    assert_eq!(record.cluster, Some(host.pinned()));
+    assert_ne!(host.pinned(), "cluster/a");
     assert_eq!(
         record.app,
         Some(AppRef {
@@ -256,14 +276,14 @@ async fn a_service_resolves_to_a_pod_the_scope_admits() {
     assert_eq!(tunnel.pod, "kafka-0");
     assert_eq!(
         *host.cluster.connected.lock().unwrap(),
-        [("kafka-0".to_owned(), 9092)]
+        [("kafka-0".to_owned(), 19092)]
     );
     let record = host.trail.seen().pop().unwrap();
     assert_eq!(record.outcome, OUTCOME_OK);
     assert_eq!(record.resource.as_deref(), Some("team/kafka-0"));
     assert_eq!(
         record.args,
-        json!({"capability": "bootstrap", "pod": "kafka-0", "service": "kafka-bootstrap", "port": 9092})
+        json!({"capability": "bootstrap", "pod": "kafka-0", "service": "kafka-bootstrap", "port": 9092, "targetPort": 19092})
     );
 }
 
@@ -352,6 +372,8 @@ async fn an_app_disabled_for_this_cluster() {
         )
         .await;
     assert!(why.contains("not enabled for this cluster"), "{why}");
+    // Refused before it resolved: the record keeps the name the sidecar sent.
+    assert_eq!(host.last_cluster().as_deref(), Some("cluster/a"));
 }
 
 #[tokio::test]
@@ -416,6 +438,8 @@ async fn an_undeclared_binding() {
         )
         .await;
     assert!(why.contains("nope"), "{why}");
+    // Refused after the context resolved: the record names the pinned cluster.
+    assert_eq!(host.last_cluster(), Some(host.pinned()));
 }
 
 #[tokio::test]
@@ -523,10 +547,19 @@ async fn the_tunnel_ends_when_the_app_is_disabled() {
     )
     .unwrap();
     let why = ends(&mut tunnel).await;
-    assert!(
-        why.contains("team/kafka-0") && why.contains("disabled"),
-        "{why}"
+    // Said to a program: what happened, with no view to refresh.
+    assert_eq!(
+        why,
+        "The connection to pod team/kafka-0 ended: Extension was disabled or updated"
     );
+    let refused = host
+        .refused(
+            &host.app,
+            ask("broker", Some("kafka"), Some("kafka-0"), None),
+            code::CAPABILITY_FAILED,
+        )
+        .await;
+    assert_eq!(refused, "Extension was disabled or updated");
 }
 
 #[tokio::test(start_paused = true)]
@@ -555,7 +588,7 @@ async fn a_service_tunnel_does_not_move() {
     );
     assert_eq!(
         *host.cluster.connected.lock().unwrap(),
-        [("kafka-0".to_owned(), 9092)],
+        [("kafka-0".to_owned(), 19092)],
         "no reconnect"
     );
 }
