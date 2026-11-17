@@ -42,7 +42,8 @@ JSON-RPC 2.0, one message per line.
 
 The same contract in machine-readable form is
 [`schemas/sidecar-protocol.v0.3.json`](../../schemas/sidecar-protocol.v0.3.json), one
-file per sidecar API line (the files of the earlier lines stay as they were). It is generated from the `srelens-sidecar-protocol` crate
+file per sidecar API line (the files of the earlier lines stay as they were). It is
+generated from the `srelens-sidecar-protocol` crate
 (`sdk/protocol/`), whose types srelens itself builds its messages from, and which the SDKs
 share. It has:
 
@@ -98,9 +99,10 @@ that is how it learns srelens has gone.
 The sidecar API has its own versions, listed in `SIDECAR_API_VERSIONS`
 (`sdk/protocol/src/lib.rs`). Today there are three, `0.1.0`, `0.2.0` and `0.3.0`, and
 srelens offers all of them. A call that needs a newer line than the one negotiated is
-refused with `-32601`. It is not the extension API version (`SUPPORTED_API_VERSIONS`), and the executable kind (#574) kept
-the two apart: a manifest names the extension API it is written for, and its sidecar
-negotiates this one at `initialize`, so each can move without the other.
+refused with `-32601`. The sidecar API version is not the extension API version
+(`SUPPORTED_API_VERSIONS`), and the executable kind (#574) kept the two apart: a
+manifest names the extension API it is written for, and its sidecar negotiates this one at
+`initialize`, so each can move without the other.
 
 `initialize` offers every version srelens speaks, and the sidecar answers with the one it
 chose:
@@ -168,7 +170,7 @@ frame.
 
 A sidecar gets Kubernetes data, and data from outside the machine, the way a declarative
 app does, and only that way: it asks srelens. It has no kubeconfig, no token, no network
-and no filesystem beyond its [data directory](#data-directory), so there is nothing else
+of its own and no filesystem beyond its [data directory](#data-directory), so there is nothing else
 it could do. Its calls are requests on the same pipe: they stay on stdio, so no sandbox has
 to open any network, loopback included (the ADR's open question, answered).
 
@@ -185,7 +187,8 @@ sidecar is held to exactly what the app's own pages are. The broker
 | `host/resource` | `capability`: a declared custom-resource reader; `name` | `extensions.resource` | the object, with the actions declared for it |
 | `host/action` | `capability`, `name`, `action`: one of the app's declared actions; `uid`, `resourceVersion`: the object's, as read | `extensions.action`, once a person has confirmed it | the primitive's answer |
 
-Every param is a string, every one is required, and nothing else is accepted: a call
+Every param of these three is a string, every one is required, and nothing else is
+accepted (`host/connect` is in [its own section](#pod-tunnels-in-protocol-030)): a call
 naming `id`, `revision`, a second `cluster` or `namespace`, or anything the table does not
 list is refused with `-32602`. Each is held to its shape before anything runs, so nothing a
 sidecar sends reaches a capability, a person or the audit trail unbounded: `capability` and
@@ -193,7 +196,7 @@ sidecar sends reaches a capability, a person or the audit trail unbounded: `capa
 `name` is a Kubernetes object name (1 to 253 ASCII letters, digits, dots and hyphens), and
 `uid` and `resourceVersion` are 1 to 128 visible ASCII characters. Any other method, a host capability named directly
 (`k8s.getSecret`, `network.http`, `extensions.configure`) included, is refused with
-`-32601`, naming the three above.
+`-32601`, naming the three above and `host/connect`.
 
 ```json
 {"jsonrpc": "2.0", "id": "c-1", "method": "host/read",
@@ -634,8 +637,8 @@ finish-after-cancellation behavior. One scan per app may run through cleanup.
 A sidecar has no network, so it cannot speak a TCP protocol to anything. Protocol 0.3.0 adds
 one narrow way: the sidecar asks srelens for a TCP connection to a pod's port, and the bytes
 travel over the pipe it already has. The sandbox does not change. A sidecar still has stdin,
-stdout, stderr and nothing else, and nothing new is written to the pipe except bytes the pod
-sent.
+stdout, stderr and nothing else, and no kubeconfig, token or secret crosses the pipe: what
+a tunnel carries is the bytes the sidecar and the pod send each other.
 
 Everything below needs a negotiated version of at least 0.3.0. On a session negotiated
 lower, `host/connect` is refused with `-32601`, and every `tunnel/*` notification is
@@ -670,8 +673,10 @@ Each is in [the schema](../../schemas/sidecar-protocol.v0.3.json).
   to.
 - **`tunnel`** is chosen by the sidecar: a positive integer, greater than every tunnel id it
   has used in this session. An id is never reused, so a frame still queued for a closed
-  tunnel cannot land on a new one. An id is used up by its call, whatever the outcome:
-  refused, failed or cancelled. Register the tunnel before sending the request, so data
+  tunnel cannot land on a new one. A call whose params are not the shape above is refused
+  with `-32602` before its id is counted. Once the call is well-formed its id is used up,
+  whatever the outcome: refused, failed or cancelled. A sidecar should treat every id it
+  has sent as used. Register the tunnel before sending the request, so data
   that arrives before the answer has somewhere to go.
 - **Errors.**
 

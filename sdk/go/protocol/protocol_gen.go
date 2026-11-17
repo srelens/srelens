@@ -107,7 +107,7 @@ type HostBindingAvailabilityParams struct {
 	Context  CallContext `json:"context"`
 }
 
-// HostConnectParams: Open a TCP connection to a pod's port as tunnel `tunnel`, under the declared `capability` (API 0.3). Names exactly one of `pod` and `service`; `name` picks one of the capability's declared ports.
+// HostConnectParams: Open a TCP connection to a pod's port as tunnel `tunnel`, under the declared `capability` (API 0.3). Names exactly one of `pod` and `service`; `name` is the object whose selector is the scope; leave it out for a namespace-granted binding.
 type HostConnectParams struct {
 	Capability string     `json:"capability"`
 	Context    JobContext `json:"context"`
@@ -234,7 +234,7 @@ type TunnelCloseParams struct {
 	Tunnel  uint64  `json:"tunnel"`
 }
 
-// TunnelCreditParams: `tunnel/credit`'s params: the sender of this frame may send `bytes` more on tunnel `tunnel`.
+// TunnelCreditParams: `tunnel/credit`'s params: the receiver of this frame may send `bytes` more on tunnel `tunnel`.
 type TunnelCreditParams struct {
 	Bytes  uint64 `json:"bytes"`
 	Tunnel uint64 `json:"tunnel"`

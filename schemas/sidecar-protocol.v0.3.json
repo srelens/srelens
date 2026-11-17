@@ -135,7 +135,7 @@
     },
     "HostConnectParams": {
       "additionalProperties": false,
-      "description": "Open a TCP connection to a pod's port as tunnel `tunnel`, under the declared `capability` (API 0.3). Names exactly one of `pod` and `service`; `name` picks one of the capability's declared ports.",
+      "description": "Open a TCP connection to a pod's port as tunnel `tunnel`, under the declared `capability` (API 0.3). Names exactly one of `pod` and `service`; `name` is the object whose selector is the scope; leave it out for a namespace-granted binding.",
       "oneOf": [
         {
           "required": [
@@ -1332,7 +1332,7 @@
     },
     "TunnelCreditParams": {
       "additionalProperties": false,
-      "description": "`tunnel/credit`'s params: the sender of this frame may send `bytes` more on tunnel `tunnel`.",
+      "description": "`tunnel/credit`'s params: the receiver of this frame may send `bytes` more on tunnel `tunnel`.",
       "properties": {
         "bytes": {
           "maximum": 262144.0,

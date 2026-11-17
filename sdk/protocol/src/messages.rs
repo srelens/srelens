@@ -321,7 +321,8 @@ fn binding_names(generator: &mut SchemaGenerator) -> Schema {
 
 /// Open a TCP connection to a pod's port as tunnel `tunnel`, under the
 /// declared `capability` (API 0.3). Names exactly one of `pod` and `service`;
-/// `name` picks one of the capability's declared ports.
+/// `name` is the object whose selector is the scope; leave it out for a
+/// namespace-granted binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
@@ -388,7 +389,7 @@ pub struct TunnelDataParams {
     pub data: String,
 }
 
-/// `tunnel/credit`'s params: the sender of this frame may send `bytes` more
+/// `tunnel/credit`'s params: the receiver of this frame may send `bytes` more
 /// on tunnel `tunnel`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
