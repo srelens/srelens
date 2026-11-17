@@ -212,7 +212,8 @@ type tunnelConn struct {
 	h      *Host
 	id     uint64
 	remote net.Addr
-	rd, wd deadline      // fired for good by Close
+	rd, wd deadline      // the read and write deadlines; fired for good when the conn ends, wd too
+	cd     deadline      // bounds the credit Read sends: the read deadline, and fired for good when the conn ends
 	rlock  chan struct{} // held for the whole of a Read
 	wlock  chan struct{} // held for the whole of a Write
 	rsig   chan struct{} // woken by data, a close, or the session's end
@@ -230,7 +231,7 @@ type tunnelConn struct {
 func newTunnelConn(h *Host, id uint64) *tunnelConn {
 	return &tunnelConn{
 		h: h, id: id, remote: tunnelAddr("pod"),
-		rd: newDeadline(), wd: newDeadline(),
+		rd: newDeadline(), wd: newDeadline(), cd: newDeadline(),
 		rlock: make(chan struct{}, 1), wlock: make(chan struct{}, 1), rsig: make(chan struct{}, 1), wsig: make(chan struct{}, 1),
 		allowed: tunnelWindow, credit: tunnelWindow,
 	}
@@ -298,8 +299,9 @@ func (c *tunnelConn) Read(p []byte) (int, error) {
 }
 
 // flushCredit sends what has been read as credit. If it cannot be sent (the
-// read deadline passed, the conn closed) it is owed still, and the next Read
-// sends it: srelens would otherwise wait on credit for good.
+// read deadline passed) it is owed still, and the next Read sends it: srelens
+// would otherwise wait on credit for good. Once the conn has ended the credit
+// is dropped: the tunnel is gone.
 func (c *tunnelConn) flushCredit() {
 	c.mu.Lock()
 	n := c.owed
@@ -311,7 +313,7 @@ func (c *tunnelConn) flushCredit() {
 	c.allowed += n
 	c.mu.Unlock()
 	params, _ := json.Marshal(protocol.TunnelCreditParams{Tunnel: c.id, Bytes: uint64(n)})
-	if c.h.out.send(c.h.out.general, protocol.Notification{Method: protocol.MethodTunnelCredit, Params: params}, c.rd.wait()) != nil {
+	if c.h.out.send(c.h.out.general, protocol.Notification{Method: protocol.MethodTunnelCredit, Params: params}, c.cd.wait()) != nil {
 		c.mu.Lock()
 		c.owed += n
 		c.allowed -= n
@@ -358,11 +360,8 @@ func (c *tunnelConn) reserve(want int) (int, error) {
 			c.mu.Unlock()
 			return 0, net.ErrClosed
 		case c.gone != nil:
-			err := c.gone
+			err := c.writeErr()
 			c.mu.Unlock()
-			if err == io.EOF {
-				err = io.ErrClosedPipe
-			}
 			return 0, err
 		case c.wd.expired():
 			c.mu.Unlock()
@@ -392,12 +391,26 @@ func (c *tunnelConn) acquire(lock chan struct{}, d *deadline) error {
 	}
 }
 
-// stoppedErr is why a send stopped: Close, or else the write deadline.
+// writeErr is what a Write returns once srelens has ended the tunnel or the
+// session has: the reason, which is io.ErrClosedPipe for a close with no
+// message. c.mu is held.
+func (c *tunnelConn) writeErr() error {
+	if c.gone == io.EOF {
+		return io.ErrClosedPipe
+	}
+	return c.gone
+}
+
+// stoppedErr is why a wait stopped: Close, or the tunnel's end, or else the
+// write deadline.
 func (c *tunnelConn) stoppedErr() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
+	switch {
+	case c.closed:
 		return net.ErrClosed
+	case c.gone != nil:
+		return c.writeErr()
 	}
 	return os.ErrDeadlineExceeded
 }
@@ -427,9 +440,8 @@ func (c *tunnelConn) finish() (first, gone bool) {
 	c.in.Reset()
 	c.mu.Unlock()
 	c.h.forgetTunnel(c.id)
+	c.stopWaits()
 	c.rd.fire()
-	c.wd.fire()
-	c.wake()
 	return true, gone
 }
 
@@ -492,16 +504,24 @@ func (c *tunnelConn) end(why error) {
 	}
 	c.mu.Unlock()
 	c.h.forgetTunnel(c.id)
+	c.stopWaits()
+}
+
+// stopWaits ends every wait the conn makes on the output queue, and wakes the
+// callers waiting on data or credit. They find out why from the conn's state.
+// The read deadline is left alone: bytes already received are still read.
+func (c *tunnelConn) stopWaits() {
+	c.wd.fire()
+	c.cd.fire()
 	c.wake()
 }
 
 func (c *tunnelConn) SetDeadline(t time.Time) error {
-	c.rd.set(t)
-	c.wd.set(t)
-	return nil
+	c.SetReadDeadline(t)
+	return c.SetWriteDeadline(t)
 }
 
-func (c *tunnelConn) SetReadDeadline(t time.Time) error  { c.rd.set(t); return nil }
+func (c *tunnelConn) SetReadDeadline(t time.Time) error  { c.rd.set(t); c.cd.set(t); return nil }
 func (c *tunnelConn) SetWriteDeadline(t time.Time) error { c.wd.set(t); return nil }
 
 // deadline is a channel that closes when its time passes, as net.Pipe's is:

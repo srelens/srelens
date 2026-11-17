@@ -244,8 +244,6 @@ func TestAnIntegerMaximumGeneratesAnUnsignedField(t *testing.T) {
 	}
 }
 
-// The one pattern allowed to go without a maxLength: tunnel/data's base64,
-// which the line size bounds and the SDK writes with encoding/base64.
 func TestAnyOtherPatternWithoutAMaxLengthStillFailsGeneration(t *testing.T) {
 	_, err := generate(minimal(`"Blob": {"type":"object","additionalProperties":false,"required":["data"],"properties":{"data":{"type":"string","pattern":"^[A-Za-z0-9+/=]*$"}}}`))
 	if err == nil || !strings.Contains(err.Error(), "a pattern needs a maxLength") || !strings.Contains(err.Error(), "Blob") {

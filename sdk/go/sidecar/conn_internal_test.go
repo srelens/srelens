@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +110,117 @@ func TestConcurrentDialsQueueTheirIDsInOrder(t *testing.T) {
 			t.Fatalf("tunnel %d queued after %d", p.Tunnel, last)
 		}
 		last = p.Tunnel
+	}
+}
+
+// A conn whose output queue has room for room more lines, and nothing is
+// draining it: the next send past that waits, as it does behind a slow pipe.
+func queuedConn(t *testing.T, room int) (*Host, *tunnelConn) {
+	t.Helper()
+	h, out := dialHost(t)
+	c, err := h.openTunnel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < queueLines-room; i++ {
+		if err := out.send(out.general, i, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return h, c
+}
+
+type ioResult struct {
+	n   int
+	err error
+}
+
+// returns runs f and reports its result, or fails if it has not returned
+// within the harness's wait.
+func returns(t *testing.T, f func() (int, error)) func() ioResult {
+	t.Helper()
+	done := make(chan ioResult, 1)
+	go func() {
+		n, err := f()
+		done <- ioResult{n, err}
+	}()
+	return func() ioResult {
+		t.Helper()
+		select {
+		case r := <-done:
+			return r
+		case <-time.After(5 * time.Second):
+			t.Fatal("the call is still waiting on the output queue")
+		}
+		return ioResult{}
+	}
+}
+
+// A Write waiting for room in the output queue stops when the host closes the
+// tunnel, with what was queued before it and the host's reason.
+func TestABlockedWriteReturnsTheHostsCloseReason(t *testing.T) {
+	_, c := queuedConn(t, 1)
+	result := returns(t, func() (int, error) { return c.Write(make([]byte, 2*maxChunk)) })
+	time.Sleep(20 * time.Millisecond) // the first chunk is queued, the second waits
+	msg := "the pod left scope"
+	c.peerClosed(&msg)
+	if r := result(); r.n != maxChunk || r.err == nil || !strings.Contains(r.err.Error(), msg) {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestABlockedWriteReturnsErrClosedAfterALocalClose(t *testing.T) {
+	h, c := queuedConn(t, 1)
+	result := returns(t, func() (int, error) { return c.Write(make([]byte, 2*maxChunk)) })
+	time.Sleep(20 * time.Millisecond)
+	closed := make(chan struct{})
+	go func() { c.Close(); close(closed) }() // its own tunnel/close waits for room too
+	if r := result(); r.n != maxChunk || !errors.Is(r.err, net.ErrClosed) {
+		t.Fatalf("%+v", r)
+	}
+	h.disconnect() // ends the Close's wait
+	<-closed
+}
+
+// A Read that is returning credit stops waiting when the host closes the
+// tunnel; the bytes already received are still read, then the reason.
+func TestABlockedCreditSendReturnsAfterTheHostsCloseAndKeepsBufferedBytes(t *testing.T) {
+	_, c := queuedConn(t, 0)
+	if why := c.deliver([]byte("0123456789")); why != "" {
+		t.Fatal(why)
+	}
+	result := returns(t, func() (int, error) { return c.Read(make([]byte, 4)) })
+	time.Sleep(20 * time.Millisecond) // the credit for those 4 bytes waits
+	msg := "the pod left scope"
+	c.peerClosed(&msg)
+	if r := result(); r.n != 4 || r.err != nil {
+		t.Fatalf("%+v", r)
+	}
+	rest := make([]byte, 6)
+	if n, err := io.ReadFull(c, rest); n != 6 || err != nil || string(rest) != "456789" {
+		t.Fatalf("%q, %v", rest, err)
+	}
+	if _, err := c.Read(rest); err == nil || !strings.Contains(err.Error(), msg) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestTheSessionEndingStopsBlockedSends(t *testing.T) {
+	h, c := queuedConn(t, 1)
+	c.deliver([]byte("0123456789"))
+	write := returns(t, func() (int, error) { return c.Write(make([]byte, 2*maxChunk)) })
+	time.Sleep(20 * time.Millisecond)
+	h.disconnect()
+	if r := write(); r.n != maxChunk || !errors.Is(r.err, ErrSessionEnded) {
+		t.Fatalf("%+v", r)
+	}
+	// The credit send of a Read blocked the same way.
+	h2, c2 := queuedConn(t, 0)
+	c2.deliver([]byte("0123456789"))
+	read := returns(t, func() (int, error) { return c2.Read(make([]byte, 4)) })
+	time.Sleep(20 * time.Millisecond)
+	h2.disconnect()
+	if r := read(); r.n != 4 || r.err != nil {
+		t.Fatalf("%+v", r)
 	}
 }
