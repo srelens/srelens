@@ -198,6 +198,8 @@ const POLARITY: [type: string, wellWhen: "True" | "False", note: string][] = [
   ["ControllerResizeError", "False", "core/v1 PersistentVolumeClaim"],
   ["NodeResizeError", "False", "core/v1 PersistentVolumeClaim"],
   ["ModifyVolumeError", "False", "core/v1 PersistentVolumeClaim"],
+  // A whole-type match, so "Installed" above keeps its polarity.
+  ["Stalled", "False", "kstatus / Flux — reconciliation has given up"],
 ];
 
 describe("conditionKind — the polarity of every type it claims to know", () => {
@@ -234,6 +236,18 @@ describe("conditionKind — the polarity of every type it claims to know", () =>
 // The new design's opt-in extension of `conditionKind`: same rule, plus a
 // reason read for the types that need one. Classic must never call this.
 describe("conditionKindWithReason", () => {
+  it("reads kstatus's Reconciling as work under way, not as health", () => {
+    // Flux sets it `True` with a reason such as `Progressing` while it works.
+    expect(conditionKindWithReason({ type: "Reconciling", status: "True", reason: "Progressing" })).toBe("warning");
+    expect(conditionKindWithReason({ type: "Reconciling", status: "True" })).toBe("warning");
+    expect(conditionKindWithReason({ type: "Reconciling", status: "False" })).toBe("success");
+    expect(conditionKindWithReason({ type: "Reconciling", status: "Unknown" })).toBe("warning");
+  });
+
+  it("leaves classic's Reconciling as it was", () => {
+    expect(conditionKind({ type: "Reconciling", status: "True" })).toBe("success");
+  });
+
   it("separates a rollout in flight from one that has landed, on the reason", () => {
     // The design mock draws both frames of this pair: frame A's degraded
     // Deployment has `Progressing · True · ReplicaSetUpdated` in amber, and

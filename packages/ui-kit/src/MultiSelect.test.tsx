@@ -328,6 +328,17 @@ describe("MultiSelect matches the design's picker", () => {
       expect(screen.getByRole("button", { name }).getAttribute("type")).toBe("button");
     }
   });
+
+  it("draws its footer's buttons as the kit's small button, as a caller's footer row draws its own", async () => {
+    // `btn !py-0` was the kit's own class patched by hand, at the body's size,
+    // beside a caller's `Button size="xs"` in the same row.
+    await opened({ selection: ["alpha"] });
+    for (const name of ["Select all", "Reset"]) {
+      const button = screen.getByRole("button", { name });
+      expect(button.dataset.size).toBe("xs");
+      expect(button.className).not.toContain("!py-0");
+    }
+  });
 });
 
 /**

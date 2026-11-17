@@ -46,6 +46,14 @@ describe("ConfigDetailsBody", () => {
     expect(screen.getByText("on")).toBeDefined();
   });
 
+  it("draws a value in the content's own ink, at the size of a value (#1001)", () => {
+    render(<ConfigDetailsBody object={configMap({ "app.conf": "level=info" })} />);
+    const value = screen.getByText("level=info");
+    expect(value.className).toContain("text-ink");
+    expect(value.className).toContain("text-[0.75rem]");
+    expect(value.className).not.toContain("text-muted");
+  });
+
   it("preserves a multi-line value's line breaks", () => {
     render(<ConfigDetailsBody object={configMap({ "nginx.conf": "server {\n  listen 80;\n}" })} />);
     const value = screen.getByText((_, el) => el?.tagName === "PRE" && el.textContent === "server {\n  listen 80;\n}");
@@ -65,8 +73,8 @@ describe("ConfigDetailsBody", () => {
   });
 
   describe("composition with GenericBody", () => {
-    it("states the ConfigMap's namespace once, as a fact the screen draws, and renders no Pods section", async () => {
-      const cm = configMap({ "app.conf": "level=info" });
+    it("leaves the lead facts to the screen, and renders no Pods section", async () => {
+      const cm = { ...configMap({ "app.conf": "level=info" }), metadata: { name: "app-config", creationTimestamp: "2026-08-20T00:00:00Z" } };
       render(
         <GenericBody kind="ConfigMap" object={cm} context="ctx">
           <ConfigDetailsBody object={cm} />
@@ -74,10 +82,10 @@ describe("ConfigDetailsBody", () => {
       );
       // Once, and not here: the lead facts are data (`detailFacts`) that each
       // screen lays out itself, so neither the wrapper nor this body may draw
-      // a Namespace row of its own — two would be two answers to one
+      // a Created row of its own — two would be two answers to one
       // question, which is the duplication this split exists to prevent.
-      expect(detailFacts({ kind: "ConfigMap", object: cm }).map((f) => f.label)).toContain("Namespace");
-      expect(screen.queryByText("Namespace")).toBeNull();
+      expect(detailFacts({ kind: "ConfigMap", object: cm }).map((f) => f.label)).toContain("Created");
+      expect(screen.queryByText("Created")).toBeNull();
       expect(screen.queryAllByRole("heading", { name: "Pods" })).toHaveLength(0);
       expect(podsForSelector).not.toHaveBeenCalled();
     });

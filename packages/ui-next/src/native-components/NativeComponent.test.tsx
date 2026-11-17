@@ -78,7 +78,12 @@ describe("NativeComponent", () => {
 it("retains condition generation without treating every true condition as healthy", () => {
   render(<NativeComponent label="Conditions" payload={p("Conditions",{items:[{type:"Degraded",status:"True",observedGeneration:3}]})}/>);
   expect(screen.getByText("Observed generation: 3")).toBeTruthy();
-  expect(screen.getByText("True").getAttribute("data-tone")).toBe("muted");
+  expect(screen.getByText("True").dataset.kind).toBe("danger");
+});
+
+it.each([["Reconciling", "warning"], ["Stalled", "danger"]])("does not draw a true %s as healthy", (type, kind) => {
+  render(<NativeComponent label="Conditions" payload={p("Conditions",{items:[{type,status:"True"}]})}/>);
+  expect(screen.getByText("True").dataset.kind).toBe(kind);
 });
 
 it("opens a Markdown link only on click and reports failures with retry", async () => {

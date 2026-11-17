@@ -64,11 +64,10 @@ describe("withNamespaceSelect", () => {
 
   it("reads as a link before it is hovered — underlined at rest, not only under the pointer", () => {
     renderList([], vi.fn());
+    // The kit's link button, whose dotted-at-rest, solid-under-the-pointer
+    // rule ui-kit's Button.test pins.
     const classes = screen.getByRole("button", { name: "Show only namespace shop" }).className.split(/\s+/);
-    expect(classes).toContain("underline");
-    expect(classes).toContain("decoration-dotted");
-    expect(classes).toContain("hover:decoration-solid");
-    expect(classes).toContain("focus-visible:decoration-solid");
+    expect(classes).toContain("link-btn");
   });
 
   it("hands the clicked namespace to onAdd, and leaves the row beneath it alone", async () => {
@@ -327,6 +326,17 @@ describe("useRowRefocus", () => {
     view.rerender(<Reloading rows={[ROWS[0]]} />);
     act(() => finish());
     expect(document.activeElement).toBe(document.body);
+  });
+
+  it("falls back to the table's tab stop when other rows came back without it", async () => {
+    // A long table does this too: a row scrolled out of its window isn't drawn.
+    const view = render(<Reloading />);
+    screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
+    await userEvent.keyboard("{Enter}");
+
+    view.rerender(<Reloading rows={[{ name: "alertmanager-0", namespace: "monitoring" }]} />);
+    act(() => finish());
+    expect(document.activeElement).toBe(rowOf("alertmanager-0"));
   });
 
   it("gives up after a while rather than moving focus on a reader who has moved on", async () => {

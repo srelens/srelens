@@ -784,6 +784,10 @@ function contextPreface(about: AskContext | undefined): string {
   let text = `Current context: cluster ${cluster}`;
   if (about?.namespace) text += `, namespace ${about.namespace}`;
   if (about?.kind && about.name) text += `, ${about.kind} ${about.name}`;
+  // Without it, `Deployment api` reads as the built-in Deployment even when it
+  // is `acme.io`'s, and the agent has no group to call `k8s.getCustomResource`
+  // with (#1076).
+  if (about?.kind && about.name && about.group) text += ` (a custom resource in API group ${about.group})`;
   text += ".";
   // Said out loud, because it is the difference between answering the question
   // and going to look for its subject. "Summarise this stream" with only a

@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
-use crate::manifest::gvk_for;
+use crate::manifest::{gvk_for, resolve_kind};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeletePodIn {
@@ -93,12 +93,47 @@ fn dynamic_api(
 ) -> Result<Api<DynamicObject>, CapabilityError> {
     let (gvk, namespaced) =
         gvk_for(kind).ok_or_else(|| CapabilityError::Handler(format!("unsupported kind: {kind}")))?;
-    let ar = ApiResource::from_gvk(&gvk);
-    Ok(if namespaced && !namespace.is_empty() {
-        Api::namespaced_with(client, namespace, &ar)
+    Ok(scoped_api(client, &ApiResource::from_gvk(&gvk), namespaced, namespace))
+}
+
+/// Whether `plural` in `group/version` is namespaced, by that API's own
+/// discovery, which every authenticated user may read. The host's confirmation
+/// names the caller's `kind`, so a plural that serves another kind is refused:
+/// approving "ConfigMap default/db" must not delete a Secret.
+async fn served_scope(
+    client: &kube::Client,
+    group: &str,
+    version: &str,
+    plural: &str,
+    kind: &str,
+) -> Result<bool, CapabilityError> {
+    let list = if group.is_empty() {
+        tokio::time::timeout(request_timeout(), client.list_core_api_resources(version)).await
     } else {
-        Api::all_with(client, &ar)
-    })
+        tokio::time::timeout(request_timeout(), client.list_api_group_resources(&format!("{group}/{version}"))).await
+    }
+    .map_err(|_| CapabilityError::Handler("discovery timed out".into()))?
+    .map_err(|e| CapabilityError::Handler(format!("discover {plural}: {e}")))?;
+    let served = list
+        .resources
+        .iter()
+        .find(|r| r.name == plural)
+        .ok_or_else(|| CapabilityError::Handler(format!("{} serves no {plural}", list.group_version)))?;
+    if !served.kind.eq_ignore_ascii_case(kind) {
+        return Err(CapabilityError::Handler(format!(
+            "{plural} in {} are {}, not {kind}",
+            list.group_version, served.kind
+        )));
+    }
+    Ok(served.namespaced)
+}
+
+fn scoped_api(client: kube::Client, ar: &ApiResource, namespaced: bool, namespace: &str) -> Api<DynamicObject> {
+    if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, ar)
+    } else {
+        Api::all_with(client, ar)
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -108,6 +143,16 @@ pub struct DeleteResourceIn {
     #[serde(default)]
     pub namespace: String,
     pub name: String,
+    /// For a custom resource, its CRD's group, version and plural (e.g.
+    /// "traefik.io", "v1alpha1", "ingressroutes"), as `k8s.getManifest` takes
+    /// them. Give all three or none: a kind outside the built-in table is
+    /// refused without them, and any one of them alone is refused too.
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub plural: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -176,13 +221,35 @@ pub fn update_config_data_capability(cache: Arc<ClientCache>) -> Capability {
 pub fn delete_resource_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<DeleteResourceIn, ActionOut, _, _>(
         "k8s.deleteResource",
-        "delete any supported resource by kind/namespace/name (destructive)",
+        "delete any supported resource by kind/namespace/name (destructive); a custom resource also takes its group, version and plural",
         Annotations::DESTRUCTIVE,
         move |input: DeleteResourceIn| {
             let cache = cache.clone();
             async move {
+                // All three or none: a group given without its version and
+                // plural must not be dropped on the way to the built-in table.
+                let given = [&input.group, &input.version, &input.plural].iter().filter(|f| f.is_some()).count();
+                if given != 0 && given != 3 {
+                    return Err(CapabilityError::Handler(
+                        "a custom resource needs its group, version and plural together".into(),
+                    ));
+                }
+                // Resolved before anything reaches the cluster, by the reads'
+                // own resolver: a custom kind by its group/version/plural, a
+                // built-in by the table, anything else refused.
+                let (ar, namespaced) = resolve_kind(
+                    &input.kind,
+                    Some(&input.namespace),
+                    input.group.as_deref(),
+                    input.version.as_deref(),
+                    input.plural.as_deref(),
+                )?;
                 let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
-                let api = dynamic_api(client, &input.kind, &input.namespace)?;
+                let namespaced = match (&input.group, &input.version, &input.plural) {
+                    (Some(g), Some(v), Some(p)) => served_scope(&client, g, v, p, &input.kind).await?,
+                    _ => namespaced,
+                };
+                let api = scoped_api(client, &ar, namespaced, &input.namespace);
                 tokio::time::timeout(request_timeout(), api.delete(&input.name, &DeleteParams::default()))
                     .await
                     .map_err(|_| CapabilityError::Handler("delete timed out".into()))?
@@ -456,5 +523,231 @@ mod tests {
         assert_eq!(evict.id, "k8s.evictPod");
         assert!(evict.annotations.destructive);
         assert!(evict.annotations.requires_confirm);
+    }
+
+    /// What the fake API server's discovery says a group/version serves.
+    fn served(path: &str) -> Option<serde_json::Value> {
+        let resource = |name: &str, kind: &str, namespaced: bool| {
+            json!({ "name": name, "singularName": "", "kind": kind, "namespaced": namespaced, "verbs": ["delete"] })
+        };
+        let (group_version, resources) = match path {
+            "/apis/acme.io/v1" => (
+                "acme.io/v1",
+                vec![resource("widgets", "Widget", true), resource("deployments", "Deployment", true)],
+            ),
+            "/apis/acme.io/v1beta1" => ("acme.io/v1beta1", vec![resource("gadgets", "Gadget", false)]),
+            "/api/v1" => ("v1", vec![resource("secrets", "Secret", true), resource("configmaps", "ConfigMap", true)]),
+            _ => return None,
+        };
+        Some(json!({ "kind": "APIResourceList", "apiVersion": "v1", "groupVersion": group_version, "resources": resources }))
+    }
+
+    /// Runs `k8s.deleteResource` against a fake API server that answers
+    /// discovery from [`served`] and every other request with `status` and
+    /// `body`, and hands back what it was asked.
+    async fn delete(
+        input: serde_json::Value,
+        status: u16,
+        body: serde_json::Value,
+    ) -> (Result<serde_json::Value, CapabilityError>, Vec<String>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            log.lock()
+                .unwrap()
+                .push(format!("{} {}", request.method(), request.uri().path()));
+            let discovery = (request.method() == http::Method::GET)
+                .then(|| served(request.uri().path()))
+                .flatten();
+            let (status, body) = match discovery {
+                Some(list) => (200, list.to_string()),
+                None => (status, body.to_string()),
+            };
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let cache = cache();
+        cache.preload("prod", kube::Client::new(service, "default")).await;
+        let out = (delete_resource_capability(cache).handler)(input).await;
+        let seen = seen.lock().unwrap().clone();
+        (out, seen)
+    }
+
+    fn deleted(kind: &str, name: &str) -> serde_json::Value {
+        json!({ "apiVersion": "v1", "kind": kind, "metadata": { "name": name } })
+    }
+
+    #[tokio::test]
+    async fn delete_resource_reaches_a_namespaced_custom_resource_through_its_crd() {
+        let (out, seen) = delete(
+            json!({ "context": "prod", "kind": "Widget", "namespace": "default", "name": "left",
+                    "group": "acme.io", "version": "v1", "plural": "widgets" }),
+            200,
+            deleted("Widget", "left"),
+        )
+        .await;
+        out.expect("the delete is sent");
+        assert_eq!(seen, ["GET /apis/acme.io/v1", "DELETE /apis/acme.io/v1/namespaces/default/widgets/left"]);
+    }
+
+    #[tokio::test]
+    async fn delete_resource_reaches_a_cluster_scoped_custom_resource_with_no_namespace() {
+        let (out, seen) = delete(
+            json!({ "context": "prod", "kind": "Gadget", "namespace": "", "name": "big",
+                    "group": "acme.io", "version": "v1beta1", "plural": "gadgets" }),
+            200,
+            deleted("Gadget", "big"),
+        )
+        .await;
+        out.expect("the delete is sent");
+        assert_eq!(seen, ["GET /apis/acme.io/v1beta1", "DELETE /apis/acme.io/v1beta1/gadgets/big"]);
+    }
+
+    /// A CRD may reuse a built-in kind's name in its own group. Resolved by the
+    /// kind alone, this delete went to `apps/v1` — another object entirely.
+    #[tokio::test]
+    async fn delete_resource_deletes_a_crd_named_like_a_built_in_in_its_own_group() {
+        let (out, seen) = delete(
+            json!({ "context": "prod", "kind": "Deployment", "namespace": "default", "name": "api",
+                    "group": "acme.io", "version": "v1", "plural": "deployments" }),
+            200,
+            deleted("Deployment", "api"),
+        )
+        .await;
+        out.expect("the delete is sent");
+        assert_eq!(seen, ["GET /apis/acme.io/v1", "DELETE /apis/acme.io/v1/namespaces/default/deployments/api"]);
+    }
+
+    #[tokio::test]
+    async fn delete_resource_still_resolves_a_built_in_kind_by_its_name() {
+        let (out, seen) = delete(
+            json!({ "context": "prod", "kind": "ConfigMap", "namespace": "default", "name": "web" }),
+            200,
+            deleted("ConfigMap", "web"),
+        )
+        .await;
+        out.expect("the delete is sent");
+        assert_eq!(seen, ["DELETE /api/v1/namespaces/default/configmaps/web"]);
+    }
+
+    /// A kind outside the built-in table, with nothing to say which API serves
+    /// it, is refused before anything is sent — never resolved by a guess.
+    #[tokio::test]
+    async fn delete_resource_refuses_a_custom_kind_given_by_name_alone() {
+        let (out, seen) = delete(
+            json!({ "context": "prod", "kind": "Widget", "namespace": "default", "name": "left" }),
+            200,
+            deleted("Widget", "left"),
+        )
+        .await;
+        let Err(CapabilityError::Handler(message)) = out else {
+            panic!("a bare custom kind must be refused, got {out:?}");
+        };
+        assert!(message.contains("unsupported kind: Widget"), "{message}");
+        assert!(seen.is_empty(), "nothing may reach the cluster: {seen:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_resource_reports_an_rbac_refusal_as_a_failure() {
+        let (out, seen) = delete(
+            json!({ "context": "prod", "kind": "Widget", "namespace": "default", "name": "left",
+                    "group": "acme.io", "version": "v1", "plural": "widgets" }),
+            403,
+            json!({ "apiVersion": "v1", "kind": "Status", "status": "Failure", "reason": "Forbidden", "code": 403,
+                    "message": "widgets.acme.io \"left\" is forbidden: User \"jane\" cannot delete resource \"widgets\" in API group \"acme.io\" in the namespace \"default\"" }),
+        )
+        .await;
+        let Err(CapabilityError::Handler(message)) = out else {
+            panic!("a refusal must not read as success, got {out:?}");
+        };
+        assert!(message.contains("forbidden"), "{message}");
+        assert_eq!(seen, ["GET /apis/acme.io/v1", "DELETE /apis/acme.io/v1/namespaces/default/widgets/left"]);
+    }
+
+    /// The confirmation names the caller's kind, so that kind must be what the
+    /// plural reaches: approving "ConfigMap default/db" must not delete a Secret.
+    #[tokio::test]
+    async fn delete_resource_refuses_a_plural_that_serves_another_kind() {
+        let (out, seen) = delete(
+            json!({ "context": "prod", "kind": "ConfigMap", "namespace": "default", "name": "db",
+                    "group": "", "version": "v1", "plural": "secrets" }),
+            200,
+            deleted("Secret", "db"),
+        )
+        .await;
+        let Err(CapabilityError::Handler(message)) = out else {
+            panic!("a kind the plural does not serve must be refused, got {out:?}");
+        };
+        assert!(message.contains("Secret"), "{message}");
+        assert_eq!(seen, ["GET /api/v1"], "nothing may be deleted");
+    }
+
+    /// A group without its version and plural must not be dropped on the way
+    /// to the built-in table: `Deployment` in `acme.io` would delete `apps/v1`'s.
+    #[tokio::test]
+    async fn delete_resource_refuses_a_custom_resource_given_only_part_of_its_coordinates() {
+        for (group, version, plural) in [
+            (Some("acme.io"), None, None),
+            (Some("acme.io"), Some("v1"), None),
+            (Some("acme.io"), None, Some("deployments")),
+            (None, Some("v1"), Some("deployments")),
+        ] {
+            let mut input = json!({ "context": "prod", "kind": "Deployment", "namespace": "default", "name": "api" });
+            for (field, value) in [("group", group), ("version", version), ("plural", plural)] {
+                if let Some(value) = value {
+                    input[field] = json!(value);
+                }
+            }
+            let (out, seen) = delete(input, 200, deleted("Deployment", "api")).await;
+            let Err(CapabilityError::Handler(message)) = out else {
+                panic!("{group:?}/{version:?}/{plural:?} must be refused, got {out:?}");
+            };
+            assert!(message.contains("group, version and plural"), "{message}");
+            assert!(seen.is_empty(), "nothing may reach the cluster for {group:?}/{version:?}/{plural:?}: {seen:?}");
+        }
+    }
+
+    /// The scope is the cluster's answer, not a guess from whether a namespace
+    /// came along.
+    #[tokio::test]
+    async fn delete_resource_takes_a_custom_kind_s_scope_from_discovery() {
+        let (out, seen) = delete(
+            json!({ "context": "prod", "kind": "Gadget", "namespace": "default", "name": "big",
+                    "group": "acme.io", "version": "v1beta1", "plural": "gadgets" }),
+            200,
+            deleted("Gadget", "big"),
+        )
+        .await;
+        out.expect("the delete is sent");
+        assert_eq!(seen, ["GET /apis/acme.io/v1beta1", "DELETE /apis/acme.io/v1beta1/gadgets/big"]);
+    }
+
+    /// Group, version and plural become path segments, so each must be a name
+    /// Kubernetes could have given it.
+    #[tokio::test]
+    async fn delete_resource_refuses_a_group_version_or_plural_that_is_not_a_name() {
+        for (group, version, plural) in [
+            ("acme.io", "v1", "widgets/../../../api/v1/namespaces/default/secrets"),
+            ("acme.io/../../api", "v1", "secrets"),
+            ("acme.io", "v1/..", "widgets"),
+            ("acme.io", "v1", "widgets%2Fx"),
+        ] {
+            let (out, seen) = delete(
+                json!({ "context": "prod", "kind": "Widget", "namespace": "default", "name": "left",
+                        "group": group, "version": version, "plural": plural }),
+                200,
+                deleted("Widget", "left"),
+            )
+            .await;
+            assert!(out.is_err(), "{group}/{version}/{plural} must be refused, got {out:?}");
+            assert!(seen.is_empty(), "nothing may reach the cluster for {group}/{version}/{plural}: {seen:?}");
+        }
     }
 }

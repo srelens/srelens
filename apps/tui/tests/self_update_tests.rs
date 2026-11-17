@@ -736,6 +736,21 @@ fn the_binary_is_pulled_out_of_a_zip() {
     assert_eq!(got.unwrap(), b"MZ-ish");
 }
 
+/// Zip cloaking (GHSA-m665-v7pm-7grj): the central directory says `srectl.exe`
+/// while the entry's own header names another file, so one archive means two
+/// things depending on who reads it. That is not something to install.
+#[test]
+fn a_zip_whose_headers_disagree_on_the_name_is_refused() {
+    let mut archive = zip_with("srectl.exe", b"MZ-ish");
+    // The local header's 30 fixed bytes come first, then its copy of the name.
+    let name = &mut archive[30..30 + "srectl.exe".len()];
+    assert_eq!(name, b"srectl.exe", "the fixture's layout changed");
+    name.copy_from_slice(b"cloaked.sh");
+
+    let got = extract_binary(&archive, "srectl-1.2.3-x86_64-pc-windows-msvc.zip");
+    assert!(matches!(got, Err(UpdateError::Archive(_))), "got {got:?}");
+}
+
 #[test]
 fn an_archive_without_the_binary_is_an_error_naming_the_asset() {
     let archive = targz("README", b"nope");

@@ -30,7 +30,7 @@ function ConnectionSection({ object }: { object: K8sObject }) {
     <Section title="Connection">
       <KV k="Type" v={str(spec.type) || "ClusterIP"} />
       <KV k="Cluster IP" v={str(spec.clusterIP)} mono />
-      <KV k="External IP" v={serviceExternalAddress(object) || "—"} mono />
+      <KV k="External IP" v={serviceExternalAddress(object)} mono />
       <KV k="Session affinity" v={str(spec.sessionAffinity)} />
       {/* `breakValues`: `PairList` truncates by default and no longer writes
           the value into a row `title` — that attribute was how a Secret's
@@ -179,22 +179,22 @@ function EndpointSlicesSection({ context, object }: { context: string; object: K
   // design change, where saying "we were refused" is a correction.
   if (state.status === "error") {
     return (
-      <Section title="Endpoint Slices">
-        <SectionFailure error={state.error} />
+      <Section title="Endpoint slices">
+        <SectionFailure what="endpoint slices" error={state.error} onRetry={state.retry} />
       </Section>
     );
   }
   const names = state.data ?? [];
   if (names.length === 0) return null;
   return (
-    <Section title="Endpoint Slices">
+    <Section title="Endpoint slices">
       <StringList items={names.map((n) => `EndpointSlice/${n}`)} />
     </Section>
   );
 }
 
 /**
- * A Service's Details pane: Connection, Ports and Endpoint Slices, in
+ * A Service's Overview pane: Connection, Ports and Endpoint slices, in
  * classic's own order (`ServiceBody`). Related pods and Conditions come from
  * `GenericBody`, not from here — `relatedPodSelector` returns the Service's
  * own `spec.selector` non-empty, so `GenericBody` already renders a "Pods"

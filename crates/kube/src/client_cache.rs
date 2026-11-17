@@ -370,7 +370,7 @@ impl ClientCache {
 
     /// Resolve an arbitrary Kubernetes kind/plural/alias to its `(ApiResource, namespaced)`.
     /// 1. If explicit group, version, and plural are provided, build custom ApiResource directly.
-    /// 2. If group/version/plural are omitted and kind matches built-in static table, resolve via `gvk_for`.
+    /// 2. If plural is omitted, kind matches the built-in static table, and group and version are omitted or match it, resolve via `gvk_for`.
     /// 3. Otherwise, look up in cached discovery index for `context`.
     /// 4. On cache miss, run dynamic discovery against the cluster and populate the cache.
     ///
@@ -410,10 +410,14 @@ impl ClientCache {
             return Ok((crate::crds::custom_api_resource(g, v, kind, p), namespaced));
         }
 
-        // Tier 2: Static built-ins when group/version are omitted or match
-        if version.is_none() && plural.is_none() {
+        // Tier 2: Static built-ins when group/version are omitted or match. A
+        // matching version is no reason to need discovery (#980 review); any
+        // other is the cluster's to say.
+        if plural.is_none() {
             if let Some((gvk, namespaced)) = crate::manifest::gvk_for(kind) {
-                if group.map_or(true, |g| g.is_empty() || g == gvk.group) {
+                if group.map_or(true, |g| g.is_empty() || g == gvk.group)
+                    && version.is_none_or(|v| v == gvk.version)
+                {
                     return Ok((ApiResource::from_gvk(&gvk), namespaced));
                 }
             }
@@ -733,6 +737,36 @@ mod tests {
             .await
             .expect("resolves with explicit hints");
         assert!(!namespaced);
+    }
+
+    #[tokio::test]
+    async fn a_built_in_named_at_its_own_version_resolves_without_discovery() {
+        // No cluster to ask, as when discovery is refused: the static table answers.
+        let cache = ClientCache::new(PathBuf::from("/nonexistent"));
+        let (ar, namespaced) = cache
+            .resolve_resource("ctx", "Pod", None, Some("v1"), None, true)
+            .await
+            .expect("Pod v1 is a built-in");
+        assert_eq!(ar.api_version, "v1");
+        assert_eq!(ar.plural, "pods");
+        assert!(namespaced);
+        let (ar, _) = cache
+            .resolve_resource("ctx", "Deployment", Some("apps"), Some("v1"), None, true)
+            .await
+            .expect("apps/v1 Deployment is a built-in");
+        assert_eq!(ar.api_version, "apps/v1");
+        // Another version is the cluster's to say, so it still asks discovery.
+        let other = cache
+            .resolve_resource(
+                "ctx",
+                "Deployment",
+                Some("apps"),
+                Some("v1beta1"),
+                None,
+                true,
+            )
+            .await;
+        assert!(other.is_err());
     }
 
     #[tokio::test]

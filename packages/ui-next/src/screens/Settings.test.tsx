@@ -272,6 +272,19 @@ describe("Settings", () => {
     expect(pane.className).toContain("min-w-0");
   });
 
+  it("runs a pane made of ruled bands to the column's edges, and insets a pane of cards", async () => {
+    // A band pane opens with a PaneIntro whose rule meets the rail; inside the
+    // column's inset it floated 12px short, unlike the Apps or Clusters pane.
+    const { user } = paint();
+    const pane = document.querySelector('[data-slot="settings-content"]') as HTMLElement;
+    for (const name of ["Workspaces", "Collections", "Clusters", "Apps"]) {
+      await user.click(screen.getByRole("tab", { name }));
+      expect(pane.classList.contains("p-3"), name).toBe(false);
+    }
+    await user.click(screen.getByRole("tab", { name: "Appearance" }));
+    expect(pane.classList.contains("p-3")).toBe(true);
+  });
+
   it("opens on the first section and switches to the one asked for", async () => {
     const { user } = paint();
     expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
@@ -303,7 +316,7 @@ describe("Settings", () => {
       await assistantSaved();
     });
     onTestFinished(__resetAssistantForTests);
-    const alert = screen.getByText(/Could not save the AI Assistant setting/);
+    const alert = screen.getByText(/Could not save the AI Assistant setting/).closest("[role]") as HTMLElement;
     expect(alert.getAttribute("role")).toBe("alert");
     expect(alert.textContent).toContain("settings.json is locked");
   });

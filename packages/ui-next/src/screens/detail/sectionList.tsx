@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FailureLine } from "../../lib/errorCopy";
+import { FailureAlert } from "../../lib/errorCopy";
 
 /**
  * ONE ANSWER FOR "A BLOCK'S OWN LIST WAS REFUSED", for every detail block that
@@ -48,6 +48,8 @@ export interface SectionListState<T> {
   /** The refusal, raw, as the backend gave it — worded by `describeError` at
    *  the surface, per this package's error rule. */
   error?: string;
+  /** Read the list again, from `loading`. */
+  retry?: () => void;
 }
 
 /**
@@ -69,6 +71,7 @@ export function useSectionList<T>(
 ): SectionListState<T> {
   const [state, setState] = useState<SectionListState<T>>({ status: enabled ? "loading" : "idle" });
   const gen = useRef(0);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     const mine = ++gen.current;
@@ -98,23 +101,32 @@ export function useSectionList<T>(
     // — `deps` is the identity of what it fetches, the same call `useLoad`
     // makes for the same reason.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, ...deps]);
+  }, [enabled, attempt, ...deps]);
 
-  return state;
+  return { ...state, retry: () => setAttempt((n) => n + 1) };
 }
 
 /**
  * What a block says when its own list could not be read, in the block, under
  * its heading.
  *
- * A LINE and not an `ErrorState` card: the heading above it and the blocks
+ * An ALERT and not an `ErrorState` card: the heading above it and the blocks
  * either side of it are real, and the `.section + .section` adjacency that
  * draws every hairline between them is exactly what the old `return null` was
- * protecting. Through `FailureLine`, so the sentence is `describeError`'s — "The
+ * protecting. Through `FailureAlert`, so the sentence is `describeError`'s — "The
  * cluster rejected your credentials", not an `ApiError: Unauthorized (Status {
  * metadata: Some(ListMeta { … })` struct — with the original folded away one
- * click behind it.
+ * click behind it, and Retry beside it.
  */
-export function SectionFailure({ error }: { error: unknown }) {
-  return <FailureLine error={error} className="text-[0.8125rem] text-sev" />;
+export function SectionFailure({
+  what,
+  error,
+  onRetry,
+}: {
+  /** The plural noun of what was listed — "pods", "jobs". */
+  what: string;
+  error: unknown;
+  onRetry?: () => void;
+}) {
+  return <FailureAlert title={`Could not read ${what}`} error={error} onRetry={onRetry} />;
 }

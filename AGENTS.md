@@ -81,11 +81,23 @@ button anywhere for weeks.
 
 The host blanks a Secret's `data`, `stringData` and every annotation value on
 every ungated read — `k8s.getObject`, `k8s.getManifest`, `k8s.diffManifest` —
-through `redact_secret_data`. The frontend redacts again on arrival with
-`redactSecretManifest` and fails closed; keep the editor read-only until the
-reader reveals through `k8s.getSecret`, the consent-gated read. Apply stays off
-while placeholders are shown, or applying writes the placeholders over the
-values.
+through `redact_secret_data`. That is for every caller, MCP clients included,
+and it stays.
+
+The desktop app shows a Secret whole, with nothing redacted (#1085), and it
+does so through one read: `k8s.getSecret`, the audited, consent-gated one,
+which returns the values, the annotations and the manifest in server order.
+The detail pane's Overview, annotations and YAML and the Edit screen all draw
+from it. The Edit screen's diff panel, while open on a Secret, compares
+through `k8s.diffSecret`, the gated twin of `k8s.diffManifest` with the values
+left in; the background "changed elsewhere" check stays on the ungated diff so
+typing does not fill the audit trail. The one mask left is the Overview's Data block: each value starts
+masked behind its own Reveal, so opening a Secret on a shared screen does not
+show them all. Do not un-redact an ungated read to feed a screen; read
+`k8s.getSecret` instead. When it refuses, a pane says so with a Retry: the
+YAML pane falls back to the ungated manifest, redacted again on arrival with
+`redactSecretManifest`, and the Edit screen opens nothing, because applying a
+blanked manifest writes the blanks over the values.
 
 **Add the redaction to the path, not to the file.** `k8s.getManifest` was left
 returning Secrets in the clear for two rounds because the fix went in beside
@@ -116,10 +128,14 @@ returns.
   which is a card in a design that has none. A component that IS a region
   fills it; a control inside one keeps its frame (that is what `CodeEditor`'s
   `flush` distinguishes). Prose still gets a gutter — a document does not.
-- **Machine text does not wrap.** A `last-applied-configuration` annotation is
-  one line of a thousand characters; `break-all` turns it into a
+- **Long machine text does not wrap.** A `last-applied-configuration`
+  annotation is one line of a thousand characters; `break-all` turns it into a
   paragraph-shaped block that hides the short lines around it. Let it run and
-  scroll the block.
+  scroll the block. The same goes for a manifest, a diff, and a path or URL in a
+  wide pane (`KV wrap={false}`). A short identifier in a narrow pane — an
+  image, a node name, an IP in a detail pane — may wrap: `KV`'s
+  `overflow-wrap: anywhere` breaks it at a space or hyphen first, and scrolled
+  instead it would hide its tag or the end of its name. (#1062)
 - **Do not render walls.** A manifest diff is almost entirely unchanged lines.
   Collapse long unchanged runs behind a counted, expandable gap and keep a few
   lines of context — but leave a run shorter than the marker that would

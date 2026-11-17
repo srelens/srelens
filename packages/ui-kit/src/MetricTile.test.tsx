@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MetricTile } from "./MetricTile";
 
 /** The classic component's tests, carried over and re-toned. (#318) */
@@ -61,6 +62,60 @@ describe("MetricTile", () => {
     const { container } = render(<MetricTile label="Nodes" value={12} className="extra" />);
     expect(container.querySelector(".stat.extra")).not.toBeNull();
   });
+  it("is named by its label, so a row of tiles can be told apart", () => {
+    render(<MetricTile label="Pods" value={248} />);
+    expect(screen.getByRole("article", { name: "Pods" })).toBeDefined();
+  });
+
+  it("opens what it counts from its label, when there is somewhere to go", async () => {
+    // (#1001) An app's dashboard card opens the list behind its figure.
+    const onOpen = vi.fn();
+    render(<MetricTile label="Expiring" value={3} onOpen={onOpen} />);
+    await userEvent.click(screen.getByRole("button", { name: "Open Expiring" }));
+    expect(onOpen).toHaveBeenCalledOnce();
+    // The tile keeps its own name; "Open" belongs to the button.
+    expect(screen.getByRole("article", { name: "Expiring" })).toBeDefined();
+  });
+
+  it("keeps the label's case on the open button, as on every other tile's label", () => {
+    // A button resets text-transform, so "PODS" beside it read "Expiring". Seen live.
+    render(<MetricTile label="Expiring" value={3} onOpen={() => {}} />);
+    expect(screen.getByRole("button", { name: "Open Expiring" }).className).toContain("[text-transform:inherit]");
+  });
+
+  it("draws its label as plain text when there is nowhere to go", () => {
+    render(<MetricTile label="Expiring" value={3} />);
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("draws more under the figure, above the description", () => {
+    // A breakdown by status, or the rows behind a count.
+    render(
+      <MetricTile label="Certificates" value={12} description="cert-manager">
+        <ul aria-label="By status"><li>Ready 10</li></ul>
+      </MetricTile>,
+    );
+    const tile = screen.getByRole("article", { name: "Certificates" });
+    const list = within(tile).getByRole("list", { name: "By status" });
+    const description = within(tile).getByText("cert-manager");
+    expect(list.compareDocumentPosition(description) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("draws no figure while there is none, rather than an empty one", () => {
+    // Loading, or a read that failed: a blank or a zero there would read as an answer.
+    const { container } = render(<MetricTile label="Expiring">Loading…</MetricTile>);
+    expect(container.querySelector(".stat-value")).toBeNull();
+  });
+
+  it("wraps a long label or description inside the tile rather than running out of it", () => {
+    // An app names its own cards, and one unbroken word is enough to overflow.
+    const { container } = render(
+      <MetricTile label="Certificatesexpiringsoonacrossclusters" value={1} description="org.example.certificates" />,
+    );
+    expect(container.querySelector(".eyebrow")?.className).toContain("[overflow-wrap:anywhere]");
+    expect(container.querySelector("p")?.className).toContain("[overflow-wrap:anywhere]");
+  });
+
   it("treats conditional slots that resolved to false as absent", () => {
     // (#325 review)
     const { container } = render(

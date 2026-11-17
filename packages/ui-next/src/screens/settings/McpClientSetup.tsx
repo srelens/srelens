@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { installSrelensCli, srelensCliStatus, mcpClientConfig, MCP_TOOLS, type CliStatus, type McpTool, type McpTransport } from "@srelens/core";
-import { Button, Field, Panel, Select } from "@srelens/ui-kit";
+import { Button, Field, LoadingState, Panel, Select } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 
 interface McpClientSetupProps {
@@ -64,7 +64,7 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
   }
   return <>
     <Panel title="srelens CLI" description={windows ? "Windows MCP clients start the installed desktop executable directly." : "Install the srelens command so MCP clients can start a stdio connection."}>
-      {loading ? <p role="status" className="text-[0.75rem] text-muted">Checking CLI installation…</p> :
+      {loading ? <LoadingState compact label="Checking CLI installation" /> :
         cli && <p className="text-[0.75rem] text-muted">{windows ? (cli.path ? <>Using <code className="block max-w-full overflow-x-auto whitespace-nowrap font-mono">{cli.path}</code></> : "The desktop executable could not be located.") :
           cli.installed ? <>Installed at <code className="block max-w-full overflow-x-auto whitespace-nowrap font-mono">{cli.path}</code></> : "The srelens CLI is not installed."}</p>}
       <div className="mt-2 flex flex-wrap gap-2">
@@ -95,8 +95,8 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
             {onRetryStatus && <Button variant="ghost" onClick={onRetryStatus}>Retry server status</Button>}</>}
           {tokenError !== undefined && <><FailureAlert tone="sev" title="The MCP bearer token could not be read" error={tokenError} />
             {onRetryToken && <Button variant="ghost" onClick={onRetryToken}>Retry bearer token</Button>}</>}
-          {(statusLoading || tokenLoading) && <p role="status" className="text-[0.75rem] text-muted">Checking the remaining MCP server details…</p>}
-        </div> : transport === "http" && (statusLoading || tokenLoading) ? <p role="status" className="mt-2 text-[0.75rem] text-muted">Checking the MCP server address and bearer token…</p> :
+          {(statusLoading || tokenLoading) && <LoadingState compact label="Checking the remaining MCP server details" />}
+        </div> : transport === "http" && (statusLoading || tokenLoading) ? <LoadingState compact label="Checking the MCP server address and bearer token" className="mt-2" /> :
         transport === "http" && !ready ? <p className="mt-2 text-[0.75rem] text-muted">Start the MCP server to obtain its address and bearer token.</p> :
         transport === "stdio" && !ready ? <p className="mt-2 text-[0.75rem] text-muted">{windows ? "The desktop executable path is required before a Windows stdio configuration can be generated." : "Install the srelens CLI before generating a stdio configuration."}</p> :
         <pre data-testid="mcp-client-config" className="scroll mt-2 whitespace-pre border-y border-rule py-2 text-[0.75rem]"><code>{preview.snippet}</code></pre>}

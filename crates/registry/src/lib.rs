@@ -662,6 +662,7 @@ fn build_with(
     reg.register(srelens_kube::manifest::diff_manifest_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::manifest::diff_secret_capability(cache.clone()));
     reg.register(srelens_kube::access::can_i_capability(cache.clone()));
     // Collections (#881, #885): pure matching over what the caller hands in.
     // For srelens's own views only for now: the collections live in the UI's

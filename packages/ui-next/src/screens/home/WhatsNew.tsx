@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { appVersion, checkForUpdate, isTauri, loadUpdateChannel } from "@srelens/core";
-import { Button } from "@srelens/ui-kit";
+import { Button, LoadingState } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { openTab } from "../../lib/tabsStore";
 import { useResource } from "../../lib/useResource";
@@ -32,7 +32,7 @@ function DesktopWhatsNew() {
     <section className="home-side-section" aria-labelledby="home-new-title">
       <h2 id="home-new-title" className="home-section-heading">What's new</h2>
       {found.status === "loading" ? (
-        <p className="home-note">Checking for updates…</p>
+        <LoadingState compact label="Checking for updates" />
       ) : found.status === "error" ? (
         <>
           <FailureAlert title="Could not check for updates" error={found.error} domain="http" className="home-section-alert" />

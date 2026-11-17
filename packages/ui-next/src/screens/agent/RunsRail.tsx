@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listSkills, relativeTime, type SkillMeta } from "@srelens/core";
-import { Alert, RawError, Section, Switch, cx } from "@srelens/ui-kit";
+import { Alert, EmptyState, RawError, Section, Switch, cx } from "@srelens/ui-kit";
 import {
   getActiveRunKey,
   openSavedRun,
@@ -159,10 +159,11 @@ export function RunsRail() {
           </Alert>
         )}
         {runs.length === 0 ? (
-          <p className="min-w-0 break-words px-3 text-xs text-muted">
-            No questions yet. Asking one from any screen starts a conversation about that thing, and
-            it appears here.
-          </p>
+          <EmptyState
+            compact
+            title="No questions yet"
+            hint="Asking one from any screen starts a conversation about that thing, and it appears here."
+          />
         ) : (
           <div className="flex min-w-0 flex-col">
             {runs.map((r) => (
@@ -209,7 +210,7 @@ export function RunsRail() {
             <RawError text={String(skills.error)} />
           </Alert>
         ) : skills.value.length === 0 ? (
-          <p className="min-w-0 break-words px-3 text-xs text-muted">No skills saved yet.</p>
+          <EmptyState compact title="No skills saved yet" />
         ) : (
           <div className="flex min-w-0 flex-col">
             {skills.value.map((s) => (

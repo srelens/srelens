@@ -32,6 +32,7 @@ import {
   Maximize,
   Maximize2,
   Minimize2,
+  Minus,
   Moon,
   Network,
   Pause,
@@ -116,6 +117,7 @@ export const Icons = {
   /** A protected workspace and cluster (#101): the sealed chip and the strip above a protected tab. */
   shield: Shield,
   add: Plus,
+  minus: Minus,
   close: X,
   search: Search,
   warn: TriangleAlert,

@@ -1,5 +1,5 @@
 # Suppressions for the OSSF Scorecard "Vulnerabilities" check (code-scanning
-# alert #32) and any local `osv-scanner scan source --lockfile=Cargo.lock`.
+# alert #32) and matching local scans.
 #
 # Everything listed here is a transitive advisory we cannot act on: the crate is
 # pinned by an upstream dependency, or no fixed version exists. Advisories we
@@ -7,7 +7,15 @@
 # file. Every entry carries `ignoreUntil` so the suppression expires and forces
 # a re-review rather than silently hiding a vulnerability forever.
 #
-# To re-audit: `osv-scanner scan source --lockfile=Cargo.lock`
+# A config beside a lockfile normally applies only to that directory. Passing
+# `--config` explicitly makes this reviewed ledger cover every Cargo/pnpm
+# lockfile and Go manifest found below the repository root.
+#
+# Dependency-audit CI deliberately bypasses this ledger: its PR check compares
+# raw base/head occurrence counts, so a disposition cannot suppress a net count
+# increase, and its scheduled SARIF inventory includes the full raw result set.
+#
+# To re-audit: `osv-scanner scan source --config=osv-scanner.toml --recursive .`
 
 # --- gtk-rs GTK3 bindings: unmaintained, no fixed version ---------------------
 # Pulled in only on Linux via tauri -> muda/tray-icon -> gtk 0.18 (webkit2gtk

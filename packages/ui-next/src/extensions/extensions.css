@@ -3,22 +3,6 @@
 .extension-results {
   min-width: 0;
 }
-.extension-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  flex-wrap: wrap;
-  border-bottom: 1px solid var(--rule, var(--fl-color-border));
-}
-.extension-toolbar > strong {
-  margin-right: auto;
-}
-.extension-toolbar label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
 .extension-install {
   display: grid;
   /* One track that never grows past the pane: a grid column is as wide as its widest
@@ -28,61 +12,29 @@
   padding: 12px;
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
-.extension-install textarea {
-  width: 100%;
-  padding: 8px;
-  border: 1px solid var(--rule, var(--fl-color-border));
-  border-radius: 4px;
-  background: var(--surface, var(--fl-color-surface));
-  color: inherit;
-  font-family: var(--font-mono);
-  resize: vertical;
-}
 .extension-installed {
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
 .extension-message {
   padding: 10px 12px;
 }
-.extension-error,
-.extension-warning {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--rule, var(--fl-color-border));
-}
-.extension-error {
-  color: var(--sev, var(--fl-color-danger));
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.extension-warning {
-  color: var(--warn, var(--fl-color-warning));
-}
 .extension-table-scroll {
   overflow: auto;
 }
-.extension-results table {
+.extension-results table:not(.tbl) {
   width: 100%;
   border-collapse: collapse;
   white-space: nowrap;
 }
-.extension-results th,
-.extension-results td {
+.extension-results table:not(.tbl) th,
+.extension-results table:not(.tbl) td {
   padding: 7px 12px;
   text-align: left;
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
-.extension-results th {
+.extension-results table:not(.tbl) th {
   font-weight: 600;
   background: var(--surface, var(--fl-color-surface));
-}
-.extension-column-sort {
-  all: unset;
-  cursor: pointer;
-}
-.extension-column-sort:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
 }
 /* An app's resolved status or badge (#541): a word in a badge, and the
    reason beside it as one line that does not wrap into the row. */
@@ -105,36 +57,9 @@
 }
 
 
-.extension-error pre {
-  max-width: 100%;
-  overflow: auto;
-  white-space: pre;
-}
-
-.extension-error > div {
-  min-width: 0;
-  flex: 1;
-}
-.extension-error > button {
-  flex-shrink: 0;
-}
-
 .extension-workspace {
   min-width: 0;
   container-type: inline-size;
-}
-.extension-workspace nav [aria-pressed="true"] {
-  color: var(--accent, var(--fl-color-accent));
-  box-shadow: inset 0 -2px currentColor;
-}
-.extension-search {
-  min-width: 10rem;
-  flex: 1;
-  padding: 0.4rem 0.6rem;
-  background: transparent;
-  color: inherit;
-  border: 1px solid var(--rule, var(--fl-color-border));
-  border-radius: 4px;
 }
 .extension-summaries {
   display: grid;
@@ -188,63 +113,36 @@
   font-family: inherit;
   font-size: var(--text-body, 0.8125rem);
 }
-.extension-navigation {
-  gap: 2px;
-  padding: 0 8px;
-  min-height: 32px;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-}
-.extension-navigation > button {
-  flex-shrink: 0;
-  align-self: stretch;
-  border-radius: 0;
-  padding: 6px 10px;
-  font-size: inherit;
-  font-weight: 500;
-}
 .extension-subnavigation {
   background: var(--surface-sunk, var(--fl-color-bg));
 }
-.extension-filters {
-  padding: 6px 10px;
-  gap: 8px;
-  flex-wrap: nowrap;
+.extension-card-scope {
+  font-size: var(--text-meta, 0.6875rem);
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  white-space: nowrap;
 }
-.extension-filters > button {
-  flex-shrink: 0;
-}
-.extension-search {
-  font: inherit;
-  min-width: 4rem;
-  width: 0;
-  height: 28px;
-  box-sizing: border-box;
-  padding: 3px 8px;
-}
-.extension-results th {
+.extension-results table:not(.tbl) th {
   font-size: var(--text-meta, 0.6875rem);
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--ink-faint, var(--fl-color-text-muted));
   padding: 5px 10px;
 }
-.extension-results td {
+.extension-results table:not(.tbl) td {
   font-size: var(--text-body, 0.8125rem);
   padding: var(--pad-y, 0.2rem) 10px;
   height: var(--row-h, 27px);
   box-sizing: border-box;
   font-variant-numeric: tabular-nums;
 }
-.extension-results td:last-child,
-.extension-results th:last-child {
+.extension-results table:not(.tbl) td:last-child,
+.extension-results table:not(.tbl) th:last-child {
   text-align: right;
 }
-.extension-results tbody tr:hover {
+.extension-results table:not(.tbl) tbody tr:hover {
   background: var(--surface-sunk, var(--fl-color-surface-alt));
 }
-.extension-value,
-.extension-resource-name {
+.extension-value {
   display: inline-block;
   max-width: 32ch;
   vertical-align: middle;
@@ -252,37 +150,8 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.extension-value[data-tone="ready"] {
-  color: var(--ok, var(--fl-color-success));
-}
-.extension-value[data-tone="warning"] {
-  color: var(--warn, var(--fl-color-warning));
-}
-.extension-value[data-tone="muted"],
-.extension-namespace {
+.extension-value[data-tone="muted"] {
   color: var(--ink-muted, var(--fl-color-text-muted));
-}
-.extension-value[data-tone="ready"]::before,
-.extension-value[data-tone="warning"]::before {
-  content: "";
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  vertical-align: middle;
-  margin-right: 6px;
-}
-
-.extension-catalog-search {
-  min-width: 0;
-  max-width: 100%;
-  padding: 6px 8px;
-  border: 1px solid var(--rule, var(--fl-color-border));
-  border-radius: 4px;
-  background: var(--surface, var(--fl-color-surface));
-  color: inherit;
-  font: inherit;
 }
 
 /* Settings uses the same body/meta scale as the owning design. */
@@ -320,7 +189,6 @@
   white-space: nowrap;
   overflow-x: auto;
 }
-.extension-catalog-entry > .extension-toolbar { border-bottom: 0; }
 .extension-catalog-entry .extension-catalog-meta { margin-top: 3px; }
 .extension-permission-review { background: var(--surface, var(--fl-color-surface)); }
 .extension-access-diff { min-width: 0; }
@@ -465,54 +333,38 @@
 
 .extension-logo { display: inline-block; flex-shrink: 0; vertical-align: middle; }
 
-.extension-resource-link { padding: 0; background: none; border: 0; color: var(--accent, var(--fl-color-primary)); font: inherit; cursor: pointer; text-align: left; }
-.extension-resource-link:hover { text-decoration: underline; }
-.extension-resource-link:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 .extension-resource-detail { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
 .extension-resource-detail > .pane { flex: 1; min-height: 0; }
-.extension-detail-heading { margin: 0; padding: 8px 12px; font-size: inherit; font-weight: 600; background: var(--surface, var(--fl-color-surface)); border-block: 1px solid var(--rule, var(--fl-color-border)); }
-.extension-detail-fields { margin: 0; }
 /* The Inspector's Related links (#545): one row per target, text and links on one gutter. */
 .extension-related { list-style: none; margin: 0; padding: 6px 0; }
 /* A row names a resource: machine text, so one line that scrolls rather than wraps. */
 .extension-related > li { padding: 4px 12px; white-space: nowrap; overflow-x: auto; }
 .extension-related > li > button { justify-content: flex-start; height: auto; min-height: 0; padding: 0; font-size: inherit; text-align: start; white-space: nowrap; text-decoration: underline; }
 /* A failure is prose, and wraps. */
-.extension-related > li.extension-related-error { color: var(--danger, var(--fl-color-danger, inherit)); white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
+.extension-related > li.extension-related-error { color: var(--sev); white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
 /* A note on a reverse link — the list was cut off, or some resources could not be read — is prose too. */
 .extension-related > li.extension-related-note { color: var(--ink-muted, var(--fl-color-text-muted)); white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
 /* The reverse links (#728), grouped under the word the relation reads as from the target. */
 .extension-related-group { margin: 0; padding: 6px 12px 0; color: var(--ink-muted, var(--fl-color-text-muted)); font-size: var(--text-caption, 0.75rem); font-weight: var(--weight-semibold); }
 .extension-related + button, [role="group"]:has(> .extension-related) + button { margin: 0 12px 8px; }
 .extension-resource-detail pre { white-space: pre; overflow: auto; max-width: 100%; font-family: var(--font-mono); font-size: inherit; }
-.extension-detail-metadata { padding: 12px; margin: 0; }
 .extension-action-review { padding: 12px; border-block: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
-.extension-action-review .extension-toolbar { padding: 0; border: 0; }
 
 /* App resources use the same list + independently scrolling right-hand peek as core resources. */
 .extension-workspace { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow: auto; }
-.extension-workspace > nav, .extension-workspace > .extension-toolbar { flex-shrink: 0; }
+.extension-workspace > nav { flex-shrink: 0; }
 .extension-results { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .extension-resource-list { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
-.extension-resource-list > .extension-toolbar { flex-shrink: 0; }
 .extension-resource-list > .extension-table-scroll { flex: 1; min-height: 0; }
+/* The kit's table draws only the rows in view of a scroller with a height of its own. */
+.extension-resource-slot .extension-results { max-height: 60vh; }
 .extension-detail-peek { position: relative; display: flex; flex-direction: column; flex-shrink: 0; min-height: 0; }
 .extension-detail-peek > .extension-resource-detail { flex: 1; min-height: 0; }
 .extension-resource-detail { flex: 1; min-height: 0; }
-.extension-detail-peek .extension-toolbar { gap: 6px; padding: 8px 12px; }
-.extension-results tbody tr[aria-selected="true"] { background: var(--accent-wash, var(--fl-color-surface)); }
-.extension-condition-list article { padding: 8px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
-.extension-condition-list p { margin: 4px 0; white-space: normal; overflow-wrap: break-word; }
-.extension-condition-list strong { font-weight: 600; }
 
-.extension-detail-fields { padding: 4px 12px; }
 .extension-field-value { display: block; overflow-x: auto; white-space: nowrap; }
-.extension-nested-fields { padding-block: 6px; }
-.extension-nested-fields h5 { margin: 0 0 4px; font-size: inherit; font-weight: 600; }
-.extension-nested-fields > .extension-detail-fields { padding: 0 0 0 10px; border-left: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-nested-fields { padding: 6px 0 6px 10px; border-left: 1px solid var(--rule, var(--fl-color-border)); }
 
-.extension-entries { margin-block: 6px; }
-.extension-entries > summary { cursor: pointer; padding-block: 4px; font-weight: 600; }
 .extension-entries-scroll { max-height: 20rem; overflow: auto; border-block: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-entries table { min-width: 100%; border-collapse: separate; border-spacing: 0; font: inherit; }
 .extension-entries th, .extension-entries td { padding: 5px 8px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
@@ -520,8 +372,8 @@
 .extension-entries tbody tr:last-child td { border-bottom: 0; }
 
 /* Bulk actions over a selection of an app's resources (#553). */
-.extension-results th.extension-check, .extension-results td.extension-check { width: 2.25rem; padding-right: 0; }
 .extension-bulk { flex-shrink: 0; border-bottom: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
+.extension-bulk:empty { display: none; }
 .extension-bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; }
 .extension-bulk > .extension-action-review { border-top: 1px solid var(--rule, var(--fl-color-border)); border-bottom: 0; }
 .extension-bulk-applies { margin: 8px 0 0; font-weight: 600; }
@@ -543,170 +395,30 @@
 .extension-bulk-result[data-status="partial"] .extension-bulk-headline { color: var(--warn, var(--fl-color-warning)); }
 .extension-bulk-group { margin-top: 8px; }
 .extension-bulk-group h5 { margin: 0; font-size: inherit; font-weight: 600; }
-/* An action the declared `availableWhen` rules exclude (#550).
-   The control keeps its place and its focus, and the reason it carries is a
-   real element rather than only a `title`: `title` draws on hover alone and
-   the accessibility tree reads it as a description of last resort, so a
-   sighted keyboard user reached the dimmed control and was told nothing.
-   Hidden visually — never with `display: none`, which would take it out of
-   the tree the control's `aria-describedby` points into — and brought on
-   screen while the control has focus. It is positioned rather than laid out,
-   so revealing it does not reflow the row of buttons around it.
-
-   It is anchored to the ROW, across the row's full width and just above it —
-   not to its own button. Anchored to the button and sized to its text, the
-   reason ran off the right edge of a 375px screen for any button in the right
-   half, and from a button that had wrapped onto a second line it sat on top
-   of the buttons above. Spanning the row, it cannot leave the row's bounds
-   and cannot cover one of its buttons; a long reason wraps, and grows upward
-   over the content the row sits under. (#668 review) */
-.extension-actions { position: relative; }
-.extension-action { display: inline-flex; }
-.extension-action-reason {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-.extension-action:focus-within .extension-action-reason {
-  width: auto;
-  height: auto;
-  padding: 5px 8px;
-  overflow: visible;
-  clip-path: none;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  bottom: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  z-index: 3;
-  border: 1px solid var(--rule, var(--fl-color-border));
-  background: var(--surface, var(--fl-color-surface));
-  color: var(--ink, var(--fl-color-text));
-  font-size: var(--text-meta, 0.6875rem);
-  line-height: 1.35;
-}
-
 /* Full identifiers remain single-line machine text; focus permits native
    horizontal keyboard scrolling without widening the containing panel. */
 .extension-bulk-name[data-expanded="true"] { overflow-x: auto; text-overflow: clip; }
 .extension-bulk-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* Dashboard cards (#540). Flush tiles divided by hairlines, like the capacity
-   strip's `.stat`s: no gap, no radius, no lifted surface. Each wrapped row
-   shares its space, with lists taking more room beside the figures. */
+/* Dashboard cards (#540): the kit's MetricTile, one per cell. Flush tiles divided by
+   hairlines, like the capacity strip's: no gap, no radius, no lifted surface. Each
+   wrapped row shares its space, with lists taking more room beside the figures. */
 .dashboard-cards-band { container-type: inline-size; }
-.dashboard-cards-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--rule, var(--fl-color-border));
-}
-.dashboard-cards-message { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; }
 .dashboard-cards {
   display: flex;
   flex-wrap: wrap;
 }
-.dashboard-cards > .dashboard-card { flex: 1 1 14rem; }
-.dashboard-cards > .dashboard-card[data-size="m"] { flex: 2 1 28rem; }
-.dashboard-cards > .dashboard-card[data-size="l"] { flex: 4 1 28rem; }
-.dashboard-card {
+.dashboard-cards > .dashboard-tile { flex: 1 1 14rem; }
+.dashboard-cards > .dashboard-tile[data-size="m"] { flex: 2 1 28rem; }
+.dashboard-cards > .dashboard-tile[data-size="l"] { flex: 4 1 28rem; }
+.dashboard-tile {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
   min-width: 0;
-  padding: 0.5rem 0.75rem;
   /* Every tile rules its right and bottom edge; the band clips the outer ones. */
   border-right: 1px solid var(--rule, var(--fl-color-border));
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
-.dashboard-card[data-size="s"] { grid-column: span 1; }
-.dashboard-card[data-size="m"] { grid-column: span 2; }
-.dashboard-card[data-size="l"] { grid-column: 1 / -1; }
-.dashboard-card-head { display: flex; flex-direction: column; min-width: 0; }
-/* App prose, not machine text: it wraps, so the whole of it is readable
-   without a pointer, and a long unbroken word breaks inside the tile. */
-.dashboard-card-app {
-  font-size: 0.6875rem;
-  color: var(--ink-faint, var(--fl-color-text-muted));
-  overflow-wrap: anywhere;
-}
-.dashboard-card-title {
-  margin: 0;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--ink-soft, inherit);
-  overflow-wrap: anywhere;
-}
-.dashboard-card-link {
-  display: block;
-  max-width: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
-  text-align: left;
-  color: var(--accent, var(--fl-color-primary));
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-.dashboard-card-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.dashboard-card-figure {
-  margin: 0.15rem 0 0;
-  font-size: 1.375rem;
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  font-variant-numeric: tabular-nums;
-}
-/* None is an answer, drawn quieter than a count but still a figure. */
-.dashboard-card[data-state="zero"] .dashboard-card-figure { color: var(--ink-muted, var(--fl-color-text-muted)); }
-.dashboard-card-caption {
-  margin: 0;
-  font-size: 0.75rem;
-  color: var(--ink-muted, var(--fl-color-text-muted));
-}
-.dashboard-card-loading {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0.4rem 0 0;
-  font-size: 0.75rem;
-  color: var(--ink-muted, var(--fl-color-text-muted));
-}
-/* A failed read: words first, colour second, and never a figure. */
-.dashboard-card-error {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  margin-top: 0.25rem;
-  font-size: 0.75rem;
-}
-.dashboard-card-error p { margin: 0; }
-.dashboard-card-error strong { color: var(--sev, var(--fl-color-danger)); }
-.dashboard-card-statuses,
-.dashboard-card-rows {
-  margin: 0.25rem 0 0;
-  padding: 0;
-  list-style: none;
-  font-size: 0.75rem;
-}
-.dashboard-card-statuses li { display: flex; justify-content: space-between; gap: 8px; }
-/* Machine text keeps its line and scrolls rather than wrapping. */
-.dashboard-card-row {
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  white-space: nowrap;
-  overflow-x: auto;
-}
-.dashboard-card-row-value { color: var(--ink-muted, var(--fl-color-text-muted)); font-variant-numeric: tabular-nums; }
+.dashboard-tile > .stat { flex: 1; min-width: 0; border-left: 0; }
 
 /* A dashboard card's target page says what it is narrowed to. */
 .extension-card-filter {
@@ -731,7 +443,6 @@
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
 }
 .extension-settings > .extension-message { padding: 0; }
-.extension-settings > .extension-error { border-bottom: 0; padding: 0; }
 .extension-setting {
   display: grid;
   grid-template-columns: minmax(0, 32rem);
@@ -748,31 +459,8 @@
   overflow-wrap: anywhere;
 }
 .extension-setting > legend { padding: 0; margin-bottom: 4px; }
-.extension-setting input:not([type="checkbox"]) {
-  width: 100%;
-  min-width: 0;
-  padding: 6px 8px;
-  /* The kit's control boundary (3:1 in every theme), as the pickers beside it use. */
-  border: 1px solid var(--control-line, var(--fl-color-border));
-  border-radius: 4px;
-  background: var(--surface, var(--fl-color-surface));
-  color: inherit;
-  font: inherit;
-}
-.extension-setting input:focus-visible {
-  outline: 2px solid var(--accent, var(--fl-color-primary));
-  outline-offset: 1px;
-}
-.extension-setting input[aria-invalid="true"] {
-  border-color: var(--sev, var(--fl-color-danger));
-}
 /* An option in a group is not a field's label; a lone checkbox's label is. */
-.extension-setting > .extension-setting-check {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 400;
-}
+.extension-setting > .extension-setting-check { font-weight: 400; }
 .extension-setting > .extension-setting-check:first-child { font-weight: 600; }
 .extension-setting-pair {
   display: flex;
@@ -790,27 +478,9 @@
   color: var(--sev, var(--fl-color-danger));
   overflow-wrap: anywhere;
 }
-.extension-settings-actions { padding: 0; border-bottom: 0; }
 .extension-settings-saved { color: var(--ink-muted, var(--fl-color-text-muted)); }
 
-/* Live app views (#566). The word says the state; the dot only repeats it. */
-.extension-live {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-muted, var(--fl-color-text-muted));
-  font-size: var(--text-body, 0.8125rem);
-  white-space: nowrap;
-}
-.extension-live-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--ink-faint, var(--fl-color-text-muted));
-}
-.extension-live[data-live="live"] .extension-live-dot { background: var(--ok, var(--fl-color-success)); }
-.extension-live[data-live="reconnecting"] .extension-live-dot { background: var(--warn, var(--fl-color-warning)); }
-.extension-live[data-live="reconnecting"] { color: var(--warn, var(--fl-color-warning)); }
+/* Live app views (#566): the kit's LiveSignal, beside a picker. */
 .extension-live-row {
   display: flex;
   justify-content: flex-end;
@@ -944,20 +614,11 @@
   font-weight: 600;
   color: var(--ink-muted, var(--fl-color-text-muted));
 }
-.extension-facts {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 2px 16px;
-  margin: 0;
-}
-.extension-facts > div { display: contents; }
-.extension-facts dt { color: var(--ink-muted, var(--fl-color-text-muted)); }
-.extension-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.extension-facts code { font-family: var(--font-mono); }
+.extension-inspector-part .kv-v code { font-family: var(--font-mono); }
 /* The state is a word; its tint only helps. */
-.extension-facts [data-state="disabled"],
-.extension-facts [data-state="refused"] { color: var(--sev, var(--fl-color-danger)); font-weight: 600; }
-.extension-facts [data-state="restarting"] { color: var(--warn, var(--fl-color-warning)); font-weight: 600; }
+.extension-inspector-part [data-state="disabled"],
+.extension-inspector-part [data-state="refused"] { color: var(--sev, var(--fl-color-danger)); font-weight: 600; }
+.extension-inspector-part [data-state="restarting"] { color: var(--warn, var(--fl-color-warning)); font-weight: 600; }
 .extension-inspector-counts,
 .extension-inspector-streams {
   display: grid;
@@ -987,26 +648,12 @@
 }
 .extension-inspector-table th { font-weight: 600; color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-inspector-table code { font-family: var(--font-mono); }
-/* A crashed sidecar's headline: ruled in the danger colour, with the reason in words. */
-.extension-process-alert {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
-  padding: 10px 12px;
-  background: var(--surface-sunk, var(--fl-color-surface-alt));
-  box-shadow: inset 3px 0 0 var(--sev, var(--fl-color-danger));
-}
-.extension-process-alert strong { color: var(--sev, var(--fl-color-danger)); }
-.extension-process-alert p { margin: 0; }
-.extension-process-alert .extension-toolbar { padding: 0; border: 0; }
 .extension-log-levels { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .extension-log-levels > span { margin-right: 4px; color: var(--ink-muted, var(--fl-color-text-muted)); }
-.extension-log-levels [aria-pressed="true"] {
-  color: var(--accent, var(--fl-color-accent));
-  box-shadow: inset 0 -2px currentColor;
-}
-/* An app's log is machine text: each line runs on and the region scrolls both ways on
-   its own, flush with the Details' edges and divided from them by hairlines. */
+/* An app's log, in the kit's log lines. A message is machine text: each line stays whole,
+   spaces and all, and the region scrolls sideways, as the built-in Logs do until Wrap is
+   pressed. The region scrolls on its own, flush with the Details' edges and divided from
+   them by hairlines. */
 .extension-app-log {
   max-height: 24rem;
   margin: 0 -12px;
@@ -1023,17 +670,6 @@
   outline: 2px solid var(--accent, var(--fl-color-primary));
   outline-offset: -2px;
 }
-.extension-app-log-line { width: max-content; min-width: 100%; padding: 1px 12px; }
-.extension-app-log-line:hover { background: var(--field, var(--fl-color-surface-alt)); }
-.extension-log-time,
-.extension-log-source { color: var(--ink-muted, var(--fl-color-text-muted)); }
-.extension-log-level { display: inline-block; min-width: 5ch; }
-.extension-log-source { display: inline-block; min-width: 7ch; }
-/* The level is a word on the line; its tint only helps. */
-.extension-log-level[data-level="error"] { color: var(--sev, var(--fl-color-danger)); font-weight: 600; }
-.extension-log-level[data-level="warn"] { color: var(--warn, var(--fl-color-warning)); }
-.extension-log-level[data-level="trace"],
-.extension-log-level[data-level="debug"] { color: var(--ink-muted, var(--fl-color-text-muted)); }
 
 /* Metric and trace providers (#569): the kit's section, flush, its range and Refresh a
    toolbar under the title, then a panel per provider that says which app asked for it. */
@@ -1047,24 +683,21 @@
 .extension-overview { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); min-width: 0; container-type: inline-size; }
 .extension-overview > .extension-summary { order: 4; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-overview > .extension-summary:first-child { order: 0; grid-column: span 2; }
-.extension-overview > .dashboard-card { order: 1; padding: 20px 24px; }
-.extension-overview > .dashboard-card[data-size="l"] { grid-column: 1 / -1; order: 3; }
-.extension-overview > .dashboard-card[data-size="m"] { grid-column: span 2; }
+.extension-overview > .dashboard-tile { order: 1; }
+.extension-overview > .dashboard-tile[data-size="l"] { grid-column: 1 / -1; order: 3; }
+.extension-overview > .dashboard-tile[data-size="m"] { grid-column: span 2; }
 .extension-overview .extension-summary-body { display: flex; gap: 24px; align-items: center; justify-content: center; padding-top: 12px; }
 .extension-overview .extension-summary ul, .extension-overview .extension-donut { margin: 0; }
 .extension-overview .extension-summary:not(:first-child) .extension-donut { width: 64px; height: 64px; flex-shrink: 0; }
 .extension-overview .extension-summary:not(:first-child) .extension-donut > span { width: 54px; height: 54px; font-size: 18px; }
-.extension-overview .dashboard-card-figure { font-size: 48px; margin-top: 16px; }
 .extension-overview-live { order: 2; grid-column: 1 / -1; padding: 6px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-overview-list { order: 3; grid-column: 1 / -1; min-width: 0; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
-.extension-overview-list > header { justify-content: space-between; }
-.extension-overview-list h3 { font-size: 13px; font-weight: 600; }
 .extension-overview-list .extension-results { min-height: 160px; max-height: 340px; }
 @container (max-width: 48rem) {
   .extension-overview .extension-summary-body { flex-wrap: wrap; gap: 12px; }
 }
 @container (max-width: 900px) {
   .extension-overview { grid-template-columns: minmax(0,1fr); }
-  .extension-overview > .extension-summary:first-child, .extension-overview > .dashboard-card[data-size] { grid-column: 1; }
+  .extension-overview > .extension-summary:first-child, .extension-overview > .dashboard-tile[data-size] { grid-column: 1; }
   .extension-overview .extension-summary-body { flex-wrap: nowrap; }
 }

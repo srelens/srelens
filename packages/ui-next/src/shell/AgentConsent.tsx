@@ -593,13 +593,11 @@ export function AgentConsent() {
                   where focus already is.
                 */}
                 {failed?.id === current.id && (
-                  <div role="alert" className="text-sev">
-                    <p className="m-0">
-                      This request was not answered by you: your answer did not take effect. Try
-                      again — if the call is no longer waiting, this prompt goes away on its own.
-                    </p>
+                  <Alert tone="sev" title="Your answer did not take effect">
+                    This request was not answered by you. Try again — if the call is no longer
+                    waiting, this prompt goes away on its own.
                     <FailureLine error={failed.error} className="mt-1" />
-                  </div>
+                  </Alert>
                 )}
               </div>
             }

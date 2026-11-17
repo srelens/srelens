@@ -115,7 +115,7 @@ export function AgentAccess() {
       <p data-testid="agent-consent" className="mt-3 text-[0.75rem] leading-relaxed text-muted">
         A connected agent reads cluster state without asking first. Nothing it proposes to change
         runs without approval — every change stops at a confirmation prompt in this window, and so
-        does the one capability that returns Secret values.
+        does every read that returns Secret values.
       </p>
       <SubHead className="mt-4" variant="caps">
         Never without confirmation
@@ -125,8 +125,8 @@ export function AgentAccess() {
           "the destructive ones": `k8s.getSecret` changes nothing and is gated,
           and `k8s.scale` changes something without being destructive. */}
       <p data-testid="gated-count" className="mt-1 text-[0.75rem] leading-relaxed text-muted">
-        All {gated.length} of them — every capability that changes anything, and the one that returns
-        Secret values. The list is srelens&apos;s own capability registry, not a selection: nothing
+        All {gated.length} of them — every capability that changes anything, and every read that
+        returns Secret values. The list is srelens&apos;s own capability registry, not a selection: nothing
         here can be switched off, and nothing outside it needs a confirmation.
       </p>
       <div className="mt-2 flex flex-wrap gap-2">

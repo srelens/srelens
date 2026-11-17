@@ -7,7 +7,6 @@ import {
   listCrds,
   namespacePhrase,
   rowInSelection,
-  watchNamespaceForSelection,
   type ClusterContext,
   type CrdRef,
 } from "@srelens/core";
@@ -22,7 +21,6 @@ import {
   Alert,
   ResizeHandle,
   Screen,
-  SideRail,
   Table,
   filterTableData,
   tableFilterError,
@@ -47,7 +45,6 @@ import { useNamespaces, useFallbackNamespace, useSetNamespaces } from "../lib/wo
 import { FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import { useExtensions } from "../extensions/inventoryStore";
 import { qualifiedTableKind, useResolvedColumns } from "../extensions/useResolvedColumns";
-import { AboutKind } from "./crd/AboutKind";
 import { ResourceDetailView } from "./detail/ResourceDetailView";
 import { ResourceTabView } from "./detail/ResourceTabView";
 import { ResourceBulk } from "./ResourceBulk";
@@ -70,9 +67,6 @@ const NAME_KEY = "name";
 
 /** Stable identity for "no columns", so a memo on it does not churn. */
 const NO_COLUMNS: Column<ListRow>[] = [];
-
-/** The "About this kind" rail's width, from the design's own table (§12). */
-const CRD_RAIL_WIDTH = 264;
 
 /**
  * The resource list: one screen for every `/k/<slug>` route there is.
@@ -141,25 +135,12 @@ function KindList({
   );
   const crds = discovery.data;
 
-  /**
-   * The CRD this route names, once discovery has answered — `undefined` for a
-   * built-in kind, and for a slug this cluster has no definition for (a tab
-   * restored from a session can name a kind whose operator is gone).
-   *
-   * Looked up ONCE, here, rather than inside the memo below and again beside
-   * it for the rail: the columns and the "About this kind" rail have to
-   * describe the same definition, and two finds are two chances for them not
-   * to. `builtIn` is the same flag discovery itself is gated on, so the slug's
-   * shape is still tested in exactly one place. (`customDescriptorFor` did
-   * this find and was deleted with this hoist — it had no other caller.)
-   */
-  const crd = useMemo(
-    () => (builtIn ? undefined : crds?.find((c) => c.name === slug)),
-    [builtIn, crds, slug],
-  );
-
   const descriptor = useMemo(() => {
     if (builtIn) return descriptorFor(slug);
+    // `undefined` until discovery answers, and for a slug this cluster has no
+    // definition for (a tab restored from a session can name a kind whose
+    // operator is gone).
+    const crd = crds?.find((c) => c.name === slug);
     // The same variance cast `descriptors.ts` makes for its typed column sets:
     // `CustomRow` is a proper subtype of `ListRow` on the data side, but
     // `Column`'s render/sort functions take the row contravariantly, so
@@ -167,7 +148,7 @@ function KindList({
     // column only reads fields `ListRow` does not promise (`columns`,
     // `sortKeys`), so a bare `ListRow` cannot reach one wrongly.
     return (crd ? customDescriptor(crd) : undefined) as KindDescriptor<ListRow> | undefined;
-  }, [builtIn, slug, crd]);
+  }, [builtIn, slug, crds]);
 
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
@@ -182,10 +163,6 @@ function KindList({
   // Each selected namespace is listed on its own (#688); none is "all
   // namespaces". A cluster-scoped kind has no namespace to narrow by.
   const list = useResourceList<ListRow>(name, slug, descriptor, clusterScoped ? [] : selection, files);
-  // The one namespace an app column is told the table is scoped to, or ""
-  // for several — its contract is a single namespace, not the list's scopes.
-  const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
-
   const scoped = useMemo(
     () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
     [list.rows, clusterScoped, selection],
@@ -206,7 +183,7 @@ function KindList({
   const rows = useMemo(() => narrow(scoped), [narrow, scoped]);
   const inventory = useExtensions();
   const appColumns = useResolvedColumns({
-    plugins: inventory.data?.plugins ?? [], context: name, contextId: context.key, namespace,
+    plugins: inventory.data?.plugins ?? [], context: name, contextId: context.key, namespaces: clusterScoped ? [] : selection,
     kind: qualifiedTableKind(descriptor?.k8sKind ?? "", descriptor?.group), rows,
   });
 
@@ -458,10 +435,6 @@ function KindList({
    * window — without it a flex item refuses to shrink below its content and
    * the whole screen scrolls sideways instead of the table scrolling inside
    * itself.
-   *
-   * Named rather than written inline because a custom resource wraps it in a
-   * rail and a built-in kind does not, and one copy of it is the only way
-   * those two branches cannot drift.
    */
   const listAndPeek = (
     <div ref={listRow.ref} className="flex min-h-0 flex-1">
@@ -673,26 +646,7 @@ function KindList({
           More remain on the cluster. This list stops at the shared list row cap.
         </Alert>
       )}
-      {crd ? (
-        // The rail is the whole of what a custom resource's list adds. It is
-        // mounted off `crd` rather than off the slug's shape: `builtIn` already
-        // decided that once, upstream, and it is what gates discovery itself.
-        <SideRail
-          head="About this kind"
-          width={CRD_RAIL_WIDTH}
-          // No object count here any more: it is in the header, for every
-          // kind, and the same figure in two places on one screen is two
-          // things to keep agreeing (#402).
-          rail={<AboutKind crd={crd} context={name} />}
-        >
-          {/* The left pane's own head, as the design words it. `crd.kind` again
-              — the slug is a plural DNS name and reads as one. */}
-          <div className="pane-head">{`${crd.kind} \u00b7 custom resource`}</div>
-          {listAndPeek}
-        </SideRail>
-      ) : (
-        listAndPeek
-      )}
+      {listAndPeek}
       {/* Outside the scrolling table body: a `ConfirmDialog` is a portal
           anyway, but a clipped ancestor is one fewer thing to reason about. */}
       {rowMenuDialog}

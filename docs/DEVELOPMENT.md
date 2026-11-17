@@ -45,6 +45,7 @@ The first `pnpm dev` compiles the full Rust dependency tree and takes a few minu
 | `cargo build -p srelens-plugin-host --bin srelens-sandbox-launch`, then `SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1` | The example inside the OS sandbox, run from the workspace root (Linux needs the launcher built first and passed as an absolute path; it asks the systemd user manager for a delegated scope, and without a user session needs `SRELENS_SANDBOX_CGROUP_ROOT`; on Windows neither variable is needed) |
 | `PROPTEST_RNG_SEED=7 PROPTEST_CASES=10000 cargo test -p srelens-registry --lib fuzzing` | Run the extension parser property tests past their fixed cases |
 | `cargo +nightly fuzz run manifest` | Fuzz an extension parser (Linux or macOS, nightly); setup in [docs/extensions/testing.md](extensions/testing.md#fuzzing) |
+| `osv-scanner scan source --config=osv-scanner.toml --recursive .` | Run a local Cargo, pnpm and Go dependency audit with the repository's reviewed, expiry-bound dispositions |
 
 Live-cluster suites are `#[ignore]`d and need an explicit run — see [Testing standards](#testing-standards).
 
@@ -340,6 +341,41 @@ All must be green.
 `.github/workflows/extension-catalog.yml` runs the `#[ignore]`d live extension catalog check daily, and on pull requests that change anything its verdict depends on: the extension module (`crates/registry/src/extensions.rs` and `extensions/`), `crates/plugin-host`, the reader capabilities app bindings are checked against (`crates/kube/src/crds.rs` and `events.rs`, with `gitops.rs` beside them), their registration in `crates/registry/src/lib.rs`, and `crates/capability`, which derives their schemas: every release in the public catalog must download, match its checksum and publisher signature, and validate on this host. A re-uploaded release asset or a bad signature breaks installs without any commit here, so a schedule is what catches it.
 
 A separate Fuzz workflow (`.github/workflows/fuzz.yml`) runs the extension parsers' cargo-fuzz targets on nightly: for a minute each on a pull request that touches those parsers, their fixtures or `Cargo.lock`, and for fifteen minutes each night. It is not a required check. See [docs/extensions/testing.md](extensions/testing.md#fuzzing).
+
+The separate Dependency audit workflow (`.github/workflows/dependency-audit.yml`)
+uses OSV-Scanner over every Cargo/pnpm lockfile and Go manifest. On a pull
+request it compares primary OSV ID occurrence counts in the target branch and
+the proposed merge. If a count increases, OSV Reporter annotates the
+source/package diff and fails for a called or unanalyzed group. Cargo and pnpm
+findings have no default call analysis and therefore fail; a Go finding proven
+uncalled is annotated but does not fail. Moving a lockfile or swapping packages
+without increasing an ID's total occurrence count does not fail. The job has
+read-only repository access, keeps scan results outside both checkouts, builds
+OSV Reporter from the exact scanner release commit, and does not publish SARIF.
+Both modes scan tracked files even when `.gitignore` lists them and reject
+symbolic-link dependency inputs, so repository metadata cannot silently remove
+inputs from the audit. Every tracked lockfile or Go manifest is passed to the
+scanner explicitly, which makes an extraction failure fatal instead of silently
+omitting that input. Because OSV v2.7 audits Go modules rather than Go workspace
+overlays, the audit rejects tracked `go.work` and `go.work.sum` files. Before
+coverage, the backend CI job runs Cargo's built-in `metadata --locked` for the
+root workspace and the independent sidecar sandbox workspace; a repository
+alias cannot shadow that command, so a tracked Cargo manifest change cannot
+pass CI by leaving its `Cargo.lock` stale.
+Weekly and manual full inventories publish all current findings to the
+repository's Code scanning dashboard. Those inventories are informational
+because newly disclosed advisories can make an unchanged lockfile vulnerable;
+scanner failures still fail the run. CI intentionally uses an empty
+configuration for raw results.
+`osv-scanner.toml` remains the reasoned, expiry-bound ledger for local triage and
+the OSSF Scorecard scan.
+
+Like every repository-local `pull_request` workflow, a proposed change can also
+change this workflow's own merge-ref definition. Maintainers must review changes
+to `.github/workflows/dependency-audit.yml`. To make the result merge-blocking,
+configure `newly introduced vulnerabilities` as a required status check. Where
+available, separately protect this workflow through a trusted required-workflow
+or review ruleset.
 
 A separate Release workflow (`.github/workflows/release.yml`) publishes on pushes to `main` — Conventional-Commit-driven stable releases. Rolling `dev` pre-releases are **not** cut on every push: they come from a daily 18:00 UTC cron, or on demand via *Run workflow*. AUR publishing is split into `.github/workflows/aur-publish.yml` so it can also be run by hand.
 

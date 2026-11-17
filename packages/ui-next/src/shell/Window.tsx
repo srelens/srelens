@@ -48,7 +48,7 @@ import {
 } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
-import { getMark, getContextLabel, loadMarks, useMark } from "../lib/marks";
+import { getMark, loadMarks, useMark } from "../lib/marks";
 import { useContextLabel } from "../lib/contextLabel";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { openCluster } from "../lib/openCluster";
@@ -116,7 +116,7 @@ import { ClusterTerminalConfirm } from "./ClusterTerminalConfirm";
 import { Console } from "./Console";
 import { isWorkspaceSealed, LockGate, lockWorkspace, useWorkspaceSealed } from "./LockGate";
 import { Nav } from "./Nav";
-import { ProtectedStrip, protectedStripCluster } from "./ProtectedStrip";
+import { clusterContextForRoute, ProtectedStrip, protectedStripCluster } from "./ProtectedStrip";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
@@ -226,9 +226,20 @@ export function Window({
   
   const { setOpen, setScope } = useConsole();
   const { tabs, activeId, workspace } = useTabs();
+  // Subscribe once for the whole strip; individual tabs read their context's
+  // mark below, and any mark edit must rebuild both the labels and collisions.
   useMark("", "");
   const activeIdCluster = useActiveCluster();
   const activeCtx = resolveContext(contexts, activeIdCluster) ?? null;
+  const stripMarks = new Map<string, ReturnType<typeof getMark>>();
+  const contextNameCounts = new Map<string, number>();
+  const markNameCounts = new Map<string, number>();
+  for (const context of contexts) {
+    const mark = getMark(context.stableId, context.name);
+    stripMarks.set(context.key, mark);
+    contextNameCounts.set(context.name, (contextNameCounts.get(context.name) ?? 0) + 1);
+    markNameCounts.set(mark.name, (markNameCounts.get(mark.name) ?? 0) + 1);
+  }
   // The console dock's own scope label — `Window`'s job because it is the one
   // place that already knows both the active tab's route and the active
   // cluster's name; `Console` itself only reads `scope` back off the provider.
@@ -933,13 +944,22 @@ export function Window({
         {active && (
           <TabStrip
             tabs={tabs.map(tab => {
-              const context = contexts.find(c => c.name === tab.sub);
-              const tooltipName = parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster ?? tab.sub
-                ?? (isClusterScopedRoute(tab.route) ? activeCtx?.name : undefined);
-              const tooltipContext = contexts.find(c => c.name === tooltipName);
+              const context = clusterContextForRoute(tab.route, activeCtx, contexts);
+              const fallbackContext = protectedStripCluster(tab.route, activeCtx?.name ?? null, contexts) ?? tab.sub;
+              if (!context) return { ...tab, context: fallbackContext, detail: tabDetail(tab.route) };
+              const mark = stripMarks.get(context.key) ?? getMark(context.stableId, context.name);
+              // A context name is normally enough. When kubeconfig identities
+              // collide, only the route key is unique (#623).
+              const identity = (contextNameCounts.get(context.name) ?? 0) > 1 ? context.key : context.name;
+              // Custom display names are presentation, not identity. If two
+              // contexts choose the same one, write the identity beside it so
+              // colour is never the only way to tell same-title tabs apart.
+              const collides = (markNameCounts.get(mark.name) ?? 0) > 1;
+              const label = collides ? `${mark.name} (${identity})` : mark.name;
               return { ...tab,
-                sub: context ? getMark(context.stableId, context.name).name : tab.sub,
-                context: tooltipContext ? getContextLabel(tooltipContext.stableId, tooltipContext.name) : tooltipName,
+                sub: label,
+                clusterColor: mark.color,
+                context: collides ? label : identity,
                 detail: tabDetail(tab.route),
               };
             })}

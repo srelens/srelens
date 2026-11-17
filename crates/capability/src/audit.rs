@@ -137,6 +137,19 @@ pub const OUTCOME_FAILED: &str = "failed";
 
 pub trait AuditSink: Send + Sync {
     fn record(&self, rec: AuditRecord);
+
+    /// A chronological snapshot of every retained record, for a user-requested
+    /// export. Sinks without a readable trail must refuse, not report no calls.
+    fn retained(&self) -> std::io::Result<RetainedAudit> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "this audit sink has no readable trail"))
+    }
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetainedAudit {
+    pub entries: Vec<Value>,
+    pub skipped_lines: usize,
 }
 
 /// Default sink: records nothing. Used by tests and by hosts that opt out.
@@ -773,6 +786,33 @@ fn unix_now() -> u64 {
 }
 
 impl AuditSink for JsonlAuditLog {
+    fn retained(&self) -> std::io::Result<RetainedAudit> {
+        use std::io::{BufRead, BufReader, Read};
+        // The same lock as rotation and append: neither can move a record
+        // between the two files while this process takes its snapshot.
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut snapshot = RetainedAudit::default();
+        for path in [self.path.with_extension("jsonl.1"), self.path.clone()] {
+            let file = match std::fs::File::open(&path) {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            // Pin the length too: a separate headless process can append to
+            // this file. This is a local snapshot, not an integrity guarantee.
+            let length = file.metadata()?.len();
+            for line in BufReader::new(file.take(length)).split(b'\n') {
+                let line = line?;
+                if line.iter().all(u8::is_ascii_whitespace) { continue; }
+                match serde_json::from_slice::<Value>(&line) {
+                    Ok(value) if value.is_object() => snapshot.entries.push(upgrade_record(value)),
+                    _ => snapshot.skipped_lines += 1,
+                }
+            }
+        }
+        Ok(snapshot)
+    }
+
     fn record(&self, rec: AuditRecord) {
         // Bookkeeping fails open: a lost log line must never break a working
         // cluster operation, so every error here is swallowed after logging.

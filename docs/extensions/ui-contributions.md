@@ -1,7 +1,7 @@
 # UI contributions
 
-Everything an app shows is rendered by srelens with its own components, in both the new
-and classic designs. User-facing extension management is named **Apps**; internal
+Everything an app shows is rendered by srelens with its own components, in the new
+design; the deprecated classic design shows a notice in their place. User-facing extension management is named **Apps**; internal
 `extensions.*` capability IDs, manifest IDs and routes keep their names. Field
 reference: [manifest.md](manifest.md#contributions).
 
@@ -55,8 +55,9 @@ with an explicit error notice.
 - **`statusResolvers`** (#541) resolve each listed resource to one of six statuses —
   healthy, warning, error, progressing, suspended, unknown — by the app's first-hit
   rules, evaluated by the host on the whole object. App tables show a **Status**
-  column: the rule's word in a toned badge, and its reason beside it as plain text.
-  A kind with no resolver has no status column.
+  column: the rule's word as a toned status, and its reason beside it as plain text.
+  A resource's details show the same status in their header. A kind with no resolver
+  has no status column, and no status in its details.
 - **`statusColumns`** are deprecated but still accepted on the 0.3 and 0.4 lines. They
   name printer-column indices for `ready`, and optionally `suspended` and `progressing`,
   and map onto the same statuses: suspended, then progressing, then Ready True (healthy) or
@@ -100,10 +101,9 @@ namespace-restricted credential is never shown a refusal for namespaces it was n
 going to read; it then reads its one namespace.
 
 A card with a `target` opens that app page narrowed to what the card counted, over the
-same namespaces; the page names them, its namespace picker shows them, and it offers
-the whole list. Choosing another namespace in that picker opens the plain page for it,
-and the card's page keeps showing what the card counted. A card the app no longer
-declares is reported as gone rather than shown as every row. Titles, app names and
+same namespaces; the page names them, shows them read-only in its filter row, and offers
+the whole list, which follows the tab's own namespaces. A card the app no longer declares
+is reported as gone rather than shown as every row. Titles, app names and
 values render as plain text.
 
 ## Detail tabs and detail links
@@ -230,7 +230,7 @@ places, in the new design:
   goes on following the provider. "all" in **since** reaches back 7 days for a
   provider, and says so.
 
-The classic design does not draw providers. On the web, metric and trace panels answer
+On the web, metric and trace panels answer
 only under the operator's network ceiling, as every `network.http` request there does,
 and the log view offers no provider, since the web host runs no app streams yet.
 
@@ -256,8 +256,7 @@ host confirmation as the footer button, pinned to the UID and resourceVersion sh
 and nothing is written until it is confirmed there. An action the resource's
 availability rules exclude, or a resource read without a UID and resourceVersion to
 pin, says why instead; a failed read drops the request, so a later Retry does not open
-a review. The classic palette does not list app
-commands.
+a review.
 
 Arbitrary custom renderer code is not supported.
 

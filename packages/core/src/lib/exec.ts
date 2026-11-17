@@ -1,4 +1,5 @@
 import { invokeCommand, subscribe } from "../transport/transport";
+import { isApplePlatform } from "./shortcuts";
 
 export interface ExecSession {
   /** Send a keystroke / input string to the pod's stdin. */
@@ -86,9 +87,27 @@ async function subscribeWithin(
 }
 
 /**
+ * The command a pod or node shell runs: `/bin/sh` handing over to the first
+ * shell the image has of zsh then bash on a Mac, or bash elsewhere, and
+ * staying in `/bin/sh` without one. Plain `/bin/sh` is dash on Debian and
+ * Ubuntu images, which has no line editing or bracketed paste, so arrow keys
+ * print `^[[A` and a pasted block runs line by line (#1040). zsh is macOS's
+ * login shell. Busybox images have neither.
+ *
+ * Picked here, by the reader's own OS, rather than by the backend's: in web
+ * mode the server's OS is not the reader's. The TUI runs the same script from
+ * `srelens_kube::exec::shell_command`.
+ */
+export function interactiveShell(platform?: string): string[] {
+  const shells = isApplePlatform(platform) ? "zsh bash" : "bash";
+  return ["/bin/sh", "-c", `for s in ${shells}; do command -v $s >/dev/null 2>&1 && exec $s; done; exec /bin/sh`];
+}
+
+/**
  * Open an interactive shell into a pod. `onData` receives stdout chunks;
  * `onExit` fires when the session ends (with an optional error). `size` sizes
  * the remote PTY at attach so it matches the panel from the first prompt.
+ * `command` defaults to {@link interactiveShell}.
  * Returns a session handle for sending input, resizing, and closing.
  *
  * **Both listeners are registered before the backend is told to start.** The
@@ -138,7 +157,7 @@ export async function startPodExec(
       pod,
       container: container ?? null,
       shell: null,
-      command: command ?? null,
+      command: command ?? interactiveShell(),
       channel,
       cols: size?.cols ?? null,
       rows: size?.rows ?? null,

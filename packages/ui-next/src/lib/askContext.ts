@@ -44,6 +44,13 @@ export interface AskContext {
   namespace?: string;
   /** `Pod`, `Deployment`, … as core names them. */
   kind?: string;
+  /**
+   * The API group, for a custom kind only, as its detail route carries it
+   * (#919). A kind's name alone does not say which kind it is: `Deployment`
+   * in `acme.io` is not a Deployment, and `k8s.getCustomResource` takes the
+   * group (#1076).
+   */
+  group?: string;
   name?: string;
   /**
    * The surface the reader is looking at, when it narrows what they mean.
@@ -108,6 +115,7 @@ export function askContextFor(route: string, cluster: string, namespaces: string
       cluster: detail.cluster ?? cluster,
       namespace: detail.namespace ?? undefined,
       kind: detail.kind,
+      ...(detail.group ? { group: detail.group } : {}),
       name: detail.name,
     };
   }
@@ -148,9 +156,19 @@ export function askContextFor(route: string, cluster: string, namespaces: string
 export function runKeyFor(about: AskContext, route: string): string {
   const cluster = about.cluster.trim();
   if (about.kind && about.name) {
-    return `${cluster}|${about.kind}|${about.namespace ?? ""}|${about.name}`;
+    return `${cluster}|${qualifiedKind(about)}|${about.namespace ?? ""}|${about.name}`;
   }
   return `${cluster}|${route}`;
+}
+
+/**
+ * `Deployment.acme.io` for a custom kind, kubectl's `kind.group` spelling, and
+ * the bare kind for a built-in one. A built-in kind's run key and label are
+ * unchanged, so its saved conversations still open. A custom kind's no longer
+ * match the built-in kind of the same name (#1076).
+ */
+function qualifiedKind(about: AskContext): string | undefined {
+  return about.group ? `${about.kind}.${about.group}` : about.kind;
 }
 
 /**
@@ -160,7 +178,7 @@ export function runKeyFor(about: AskContext, route: string): string {
  * reader recognises, and the cluster is already the rail's own context.
  */
 export function runLabelFor(about: AskContext, route: string): string {
-  if (about.kind && about.name) return `${about.kind}/${about.name}`;
+  if (about.kind && about.name) return `${qualifiedKind(about)}/${about.name}`;
   const tail = route.split("/").filter(Boolean).pop() ?? "cluster";
   return tail;
 }

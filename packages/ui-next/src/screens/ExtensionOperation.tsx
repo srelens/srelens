@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { listContexts, callExtensionOperation, describeError, describeStreamEnd, extensionEnabledFor, extensionOperationRoute, openExtensionView, parseExtensionOperationRoute, relativeTime, type ExtensionOperation as Operation, type ExtensionView, type ExtensionStream } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { ActionBar, Badge, Button, Combobox, Popover, Screen, Table, TextInput, type BadgeTone } from "@srelens/ui-kit";
+import { ActionBar, Alert, Badge, Button, Checkbox, Combobox, EmptyState, FilterBar, KV, LoadingState, Popover, Screen, Table, Tabs, TextInput, useListFilter, type BadgeTone } from "@srelens/ui-kit";
 import { ExtensionLogo } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/inventoryStore";
-import { ErrorNotice } from "../extensions/ExtensionResults";
+import { FailureState } from "../lib/errorCopy";
 import { plainText } from "../extensions/displayText";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
 import type { RoutedScreenProps } from "../lib/routes";
@@ -24,6 +24,23 @@ const severityTone: Record<string, BadgeTone> = { CRITICAL: "sev", HIGH: "sev", 
 const severityName = (name: string) => name.replace(/Count$/i, "").toUpperCase();
 const severityOrder = (name: string) => { const index = Object.keys(severityTone).indexOf(severityName(name)); return index < 0 ? 100 : index; };
 type ResultRow = { index: number; data: Record<string, unknown> };
+const severityLabel = (name: string) => label((severityTone[severityName(name)] ? severityName(name) : name).toLowerCase());
+const reportSource = (source: unknown) => source === "app" ? "App scan" : source === "operator" ? "Operator" : cell(source);
+const reportDate = (value: unknown) => { const date = typeof value === "string" ? new Date(value) : null; return date && Number.isFinite(date.getTime()) ? date : null; };
+const reportedAt = (date: Date) => date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const reportSeverities = (data: Record<string, unknown>) => object(data.summary) ? Object.entries(data.summary).filter(([, count]) => typeof count === "number" && count > 0) : [];
+const reportFindings = (data: Record<string, unknown>) => data.findings === 0 ? "No findings" : "Severity unavailable";
+/** The words `ReportTable` draws for a report: a filter finds these, and no hidden metadata. */
+const reportText = (data: Record<string, unknown>) => {
+  const severities = reportSeverities(data).map(([name, count]) => `${severityLabel(name)} ${cell(count)}`);
+  const date = reportDate(data.reportedAt);
+  return [
+    cell(data.subject || "Unnamed report"), `${label(String(data.category))} report`, ...(data.image ? [cell(data.image)] : []),
+    cell(data.findings), ...(severities.length ? severities : [reportFindings(data)]),
+    cell(data.namespace || "Cluster"), reportSource(data.source), label(String(data.freshness ?? "unknown")),
+    date ? reportedAt(date) : "Not reported",
+  ];
+};
 const reportRow = (value: unknown): value is Record<string, unknown> => object(value) && typeof value.reportId === "string" && typeof value.category === "string" && typeof value.subject === "string";
 const rowActions = (operations: Operation[], current: string, data: Record<string, unknown>) => operations.filter((op) => op.name !== current && (op.inputs ?? []).some((input) => input.required && input.name !== "clusterId") && (op.inputs ?? []).every((input) => !input.required || input.name === "clusterId" || (scalar(data[input.name]) && data[input.name] !== ""))).sort((a,b)=>{const priority=(operation:Operation)=>(operation.inputs??[]).some(input=>input.required&&input.name==="reportId") ? 3 : (operation.inputs??[]).some(input=>input.required&&input.name==="image") ? 2 : 1;return priority(b)-priority(a);});
 const rowParams = (operation: Operation, data: Record<string, unknown>) => Object.fromEntries((operation.inputs ?? []).filter((input) => input.name !== "clusterId" && scalar(data[input.name])).map((input) => [input.name, data[input.name] as Scalar]));
@@ -44,10 +61,10 @@ function ReportActions({ data, operations, current, onOpen }: { data: Record<str
 function ReportTable({ rows, operations, current, onOpen }: { rows: ResultRow[]; operations: Operation[]; current: string; onOpen: (operation: string, params: Record<string, Scalar>) => void }) {
  return <Table<ResultRow> data={rows} getRowKey={({data,index})=>typeof data.reportId === "string" ? data.reportId : `row-${index}`} columns={[
   {key:"subject",header:"Report",getValue:({data})=>data.subject,render:({data})=><div className="app-report-subject"><strong tabIndex={0} title={cell(data.subject)}>{cell(data.subject || "Unnamed report")}</strong><span tabIndex={0} title={cell(data.image || data.category)}>{label(String(data.category))} report{data.image && data.image !== data.subject ? <> · <span>{cell(data.image)}</span></> : null}</span></div>},
-  {key:"findings",header:"Findings",getValue:({data})=>data.findings,render:({data})=><div className="app-report-findings"><strong>{cell(data.findings)}</strong>{object(data.summary) && Object.values(data.summary).some(count=>typeof count==="number"&&count>0) ? <ResultValue field="summary" value={Object.fromEntries(Object.entries(data.summary).filter(([,count])=>typeof count==="number"&&count>0))}/> : <span className="text-muted">{data.findings===0 ? "No findings" : "Severity unavailable"}</span>}</div>},
+  {key:"findings",header:"Findings",getValue:({data})=>data.findings,render:({data})=><div className="app-report-findings"><strong>{cell(data.findings)}</strong>{reportSeverities(data).length ? <ResultValue field="summary" value={Object.fromEntries(reportSeverities(data))}/> : <span className="text-muted">{reportFindings(data)}</span>}</div>},
   {key:"namespace",header:"Namespace",getValue:({data})=>data.namespace,render:({data})=><ResultValue field="namespace" value={data.namespace || "Cluster"}/>},
-  {key:"source",header:"Source",getValue:({data})=>data.source,render:({data})=><div className="app-report-source"><span>{data.source==="app" ? "App scan" : data.source==="operator" ? "Operator" : cell(data.source)}</span><ResultValue field="freshness" value={data.freshness ?? "unknown"}/></div>},
-  {key:"reportedAt",header:"Reported",getValue:({data})=>data.reportedAt,render:({data})=>{const date=typeof data.reportedAt==="string" ? new Date(data.reportedAt) : null;return date && Number.isFinite(date.getTime()) ? <time className="app-report-time" dateTime={String(data.reportedAt)} title={String(data.reportedAt)}><span>{date.toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span><span>{relativeTime(date.getTime(),Date.now())}</span></time> : <span className="text-muted">Not reported</span>; }},
+  {key:"source",header:"Source",getValue:({data})=>data.source,render:({data})=><div className="app-report-source"><span>{reportSource(data.source)}</span><ResultValue field="freshness" value={data.freshness ?? "unknown"}/></div>},
+  {key:"reportedAt",header:"Reported",getValue:({data})=>data.reportedAt,render:({data})=>{const date=reportDate(data.reportedAt);return date ? <time className="app-report-time" dateTime={String(data.reportedAt)} title={String(data.reportedAt)}><span>{reportedAt(date)}</span><span>{relativeTime(date.getTime(),Date.now())}</span></time> : <span className="text-muted">Not reported</span>; }},
   {key:"actions",header:"Actions",sortable:false,sticky:"end",render:({data})=><ReportActions data={data} operations={operations} current={current} onOpen={onOpen}/>},
  ]} emptyText="No reports match these filters" emptyHint="Try another source or clear the search."/>;
 }
@@ -56,7 +73,7 @@ function ResultValue({ field, value, compact = false }: { field: string; value: 
   if (field === "image" && typeof value === "string") return <span tabIndex={0} className="app-image-reference" title={cell(value)}>{cell(value)}</span>;
   if (["name", "namespace", "container"].includes(field) && typeof value === "string") return <span tabIndex={0} className="app-resource-reference" title={cell(value)}>{cell(value)}</span>;
   if (compact && Array.isArray(value)) return <div className="flex flex-wrap gap-1">{value.map((item, index) => <Badge key={index}>{cell(item)}</Badge>)}</div>;
-  if (field === "summary" && object(value)) return <div className="flex flex-wrap gap-1">{Object.entries(value).sort(([a],[b])=>severityOrder(a)-severityOrder(b)).map(([name, count]) => <Badge key={name} tone={severityTone[severityName(name)] ?? "muted"}>{label((severityTone[severityName(name)] ? severityName(name) : name).toLowerCase())} {cell(count)}</Badge>)}</div>;
+  if (field === "summary" && object(value)) return <div className="flex flex-wrap gap-1">{Object.entries(value).sort(([a],[b])=>severityOrder(a)-severityOrder(b)).map(([name, count]) => <Badge key={name} tone={severityTone[severityName(name)] ?? "muted"}>{severityLabel(name)} {cell(count)}</Badge>)}</div>;
   if (["severity", "state", "freshness", "source"].includes(field) && typeof value === "string") {
     const tone = field === "severity" ? severityTone[value.toUpperCase()] ?? "muted" : ["unknown", "stale", "failed"].includes(value) ? "warn" : value === "served" || value === "completed" ? "ok" : "muted";
     return <Badge tone={tone}>{label(value)}</Badge>;
@@ -66,7 +83,7 @@ function ResultValue({ field, value, compact = false }: { field: string; value: 
 }
 
 function ResultDetails({ entries, title }: { entries: Array<[string, unknown]>; title: string }) {
-  return <details className="min-w-0 text-xs"><summary className="cursor-pointer py-1 text-muted">{title}</summary><dl className="space-y-2 py-2">{entries.map(([key, value]) => <div key={key}><dt className="text-xs text-muted">{label(key)}</dt><dd className="max-w-full overflow-auto whitespace-nowrap text-[0.8125rem]">{cell(value)}</dd></div>)}</dl></details>;
+  return <details className="min-w-0 text-xs"><summary className="cursor-pointer py-1 text-muted">{title}</summary><div className="pb-1">{entries.map(([key, value]) => <KV key={key} stacked k={label(key)} v={cell(value)} mono wrap={false} />)}</div></details>;
 }
 
 function NamespaceInput({ context, value, onChange, required }: { context: string; value: string; onChange: (value: string) => void; required?: boolean }) {
@@ -82,7 +99,7 @@ function NamespaceInput({ context, value, onChange, required }: { context: strin
 
 /** Bounded data from a sidecar is rendered by the host, never as app HTML. */
 function OperationResult({ value, operations, current, onOpen }: { value: unknown; operations: Operation[]; current: string; onOpen: (operation: string, params: Record<string, Scalar>) => void }) {
-  const [filter, setFilter] = useState("");
+  const filter = useListFilter();
   const [source, setSource] = useState("");
   const fields = object(value) ? Object.entries(value) : [["Result", value] as const];
   const reports = object(value) && !value.state && Array.isArray(value.items) && value.items.every(reportRow) && (typeof value.totalReports === "number" || value.items.length > 0);
@@ -92,29 +109,32 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
   const warnings = object(value) && Array.isArray(value.warnings) ? value.warnings.filter((warning): warning is string => typeof warning === "string") : [];
   const lists = fields.filter(([key, value]) => key !== "warnings" && Array.isArray(value) && !compactList(key, value));
   return <div className="app-results scroll min-h-0 min-w-0 flex-1">
-    {warnings.length > 0 && <div className="extension-message" role="alert">{warnings.map((warning, index) => <p key={index}>{plainText(warning)}</p>)}</div>}
-    {reports ? <div className="app-report-intro"><h2>Security reports <span>{object(value) ? cell(value.totalReports ?? (value.items as unknown[]).length) : ""}</span></h2><p>Scan history and Operator reports. Severity counts belong to each report.</p></div> : metadata.length > 0 && <dl className="flex flex-wrap gap-x-6 gap-y-2 border-b px-3 py-2" style={{ borderColor: "var(--rule)" }}>
-      {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <div key={key} className="min-w-0 max-w-full"><dt className="text-xs text-muted">{label(key)}</dt><dd className={`text-[0.8125rem] ${prose(key) ? "whitespace-normal" : "overflow-auto whitespace-nowrap"}`}><ResultValue field={key} value={value} compact={compactList(key, value)} /></dd></div>)}
-      {identity.length > 0 && <div className="min-w-0 basis-full"><ResultDetails entries={identity} title="Technical details" /></div>}
-    </dl>}
-    {lists.length > 0 && <div className="app-result-filters"><TextInput aria-label="Filter results" placeholder={reports ? "Search reports, images or namespaces…" : "Filter results…"} value={filter} onValueChange={setFilter}/>{reports && <div className="app-source-filters" role="group" aria-label="Report source">{[["","All sources"],["app","App scans"],["operator","Operator reports"]].map(([value,title])=><Button key={value} variant="ghost" type="button" aria-pressed={source===value} onClick={()=>setSource(value)}>{title}</Button>)}</div>}</div>}
+    {warnings.length > 0 && <Alert tone="warn" title="The app reported warnings">{warnings.map((warning, index) => <p key={index}>{plainText(warning)}</p>)}</Alert>}
+    {reports ? <div className="app-report-intro"><h2>Security reports <span>{object(value) ? cell(value.totalReports ?? (value.items as unknown[]).length) : ""}</span></h2><p>Scan history and Operator reports. Severity counts belong to each report.</p></div> : metadata.length > 0 && <div className="grid grid-cols-[repeat(auto-fill,minmax(12rem,1fr))] gap-x-6 border-b px-3 py-1" style={{ borderColor: "var(--rule)" }}>
+      {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <KV key={key} stacked k={label(key)} v={<ResultValue field={key} value={value} compact={compactList(key, value)} />} wrap={prose(key)} />)}
+      {identity.length > 0 && <div className="col-span-full min-w-0"><ResultDetails entries={identity} title="Technical details" /></div>}
+    </div>}
+    {lists.length > 0 && <FilterBar {...filter} label={reports ? "Filter reports" : "Filter results"} placeholder={reports ? "Filter reports…" : "Filter results…"}>{reports && <Tabs variant="segmented" label="Report source" active={source} onChange={setSource} tabs={[{id:"",label:"All sources"},{id:"app",label:"App scans"},{id:"operator",label:"Operator reports"}]}/>}</FilterBar>}
     {lists.map(([key, values]) => {
-      const rows = (values as unknown[]).map((value, index) => ({ index, data: object(value) ? value : { value } })).filter(({ data }) => (!reports || !source || data.source===source) && JSON.stringify(data).toLowerCase().includes(filter.toLowerCase()));
-      const columns = [...new Set(rows.flatMap(({ data }) => Object.keys(data)))].filter((key) =>
+      const all = (values as unknown[]).map((value, index) => ({ index, data: object(value) ? value : { value } }));
+      const columns = [...new Set(all.flatMap(({ data }) => Object.keys(data)))].filter((key) =>
         !metadata.some(([field, shared]) => field === key && scalar(shared) &&
           (values as unknown[]).every((value) => object(value) && value[key] === shared)));
       const visible = columns.filter((key) => !technical(key) || key === "clusterId").sort((a, b) => (firstColumns.indexOf(a) < 0 ? 100 : firstColumns.indexOf(a)) - (firstColumns.indexOf(b) < 0 ? 100 : firstColumns.indexOf(b)));
       const details = columns.filter((key) => technical(key) && key !== "clusterId");
+      // Matched against what the rows show: a query never finds a key or a hidden field.
+      const shown = (data: Record<string, unknown>) => reports && key === "items" ? reportText(data) : visible.map((field) => cell(data[field]));
+      const rows = all.filter(({ data }) => (!reports || !source || data.source===source) && (!filter.value.trim() || shown(data).some(filter.matches)));
       const secondary = (key: string): string | undefined => key === "name" && visible.includes("kind") ? "kind" : key === "container" && visible.includes("containerType") ? "containerType" : undefined;
       const combined = new Set(visible.map(secondary).filter(Boolean));
       const actions = (data: Record<string, unknown>) => rowActions(operations,current,data);
       return <section key={key} className="min-w-0">
-        <h2 className={reports ? "sr-only" : "border-b px-3 py-2 text-[0.8125rem] font-medium"} style={{ borderColor: "var(--rule)" }}>{key === "items" ? `${rows.length} ${rows.length === 1 ? "result" : "results"}` : `${label(key)} (${rows.length})`}{filter && <span className="text-muted"> of {(values as unknown[]).length}</span>}</h2>
+        <h2 className={reports ? "sr-only" : "border-b px-3 py-2 text-[0.8125rem] font-medium"} style={{ borderColor: "var(--rule)" }}>{key === "items" ? `${rows.length} ${rows.length === 1 ? "result" : "results"}` : `${label(key)} (${rows.length})`}{filter.value && <span className="text-muted"> of {(values as unknown[]).length}</span>}</h2>
         {reports && key==="items" ? <ReportTable rows={rows} operations={operations} current={current} onOpen={onOpen}/> : <Table<(typeof rows)[number]> data={rows} getRowKey={(row) => String(row.index)} columns={[
           ...visible.filter((key) => !combined.has(key)).map((key) => ({ key, header: key === "name" && secondary(key) ? "Resource" : label(key), getValue: ({ data }: (typeof rows)[number]) => data[key], render: ({ data }: (typeof rows)[number]) => <div><ResultValue field={key} value={data[key]} />{secondary(key) && <div className="text-xs text-muted"><ResultValue field={secondary(key)!} value={data[secondary(key)!]} /></div>}</div> })),
           ...(details.length > 0 ? [{ key: "identity", header: "Details", sortable: false, render: ({ data }: (typeof rows)[number]) => <ResultDetails title="Inspect" entries={details.map((key) => [key, data[key]])} /> }] : []),
           ...(rows.some(({ data }) => actions(data).length) ? [{ key: "open", header: "Actions", sortable: false, sticky: "end" as const, render: ({ data }: (typeof rows)[number]) => <ActionBar className="app-row-actions" label="Result actions" max={1} actions={actions(data).map(op=>({id:op.name,label:op.title,onSelect:()=>onOpen(op.name,rowParams(op,data))}))}/> }] : []),
-        ]} emptyText={filter ? "No results match this filter" : `No ${label(key).toLowerCase()} returned`} />}
+        ]} emptyText={filter.value ? "No results match this filter" : `No ${label(key).toLowerCase()} returned`} />}
       </section>;
     })}
   </div>;
@@ -183,7 +203,7 @@ function OperationForm({ id, revision, context, contextKey, operation, operation
     <form className="flex flex-wrap items-end gap-2 border-b px-3 py-2" style={{ borderColor: "var(--rule)" }} onSubmit={(event) => { event.preventDefault(); setHistory([]); void run(); }}>
       {inputs.map((input) => input.name === "namespace" ? <NamespaceInput key={input.name} required={input.required} context={context} value={String(values.namespace ?? "")} onChange={(namespace) => { if (!busy || operation.view?.autoRun) setValues({ ...values, namespace }); }} /> : <label key={input.name} className="flex min-w-40 flex-col gap-1 text-xs text-muted">
         {input.title ?? label(input.name)}
-        {input.type === "boolean" ? <input type="checkbox" checked={values[input.name] === true} disabled={busy} onChange={(event) => setValues({ ...values, [input.name]: event.target.checked })} />
+        {input.type === "boolean" ? <Checkbox checked={values[input.name] === true} disabled={busy} onChange={(checked) => setValues({ ...values, [input.name]: checked })} />
           : <TextInput value={String(values[input.name] ?? "")} type={input.type === "string" ? "text" : "number"} disabled={busy} onValueChange={(value) => setValues({ ...values, [input.name]: value })} />}
       </label>)}
       <Button type="submit" variant={operation.view?.autoRun ? "secondary" : "primary"} disabled={busy}>{busy ? "Running…" : operation.view?.autoRun ? "Refresh" : operation.title}</Button>
@@ -193,10 +213,13 @@ function OperationForm({ id, revision, context, contextKey, operation, operation
         const owned = view.current; view.current = undefined; void owned?.close();
       }}>Cancel</Button>}
     </form>
-    {busy && <p className="extension-message" role="status">Running {operation.title.toLowerCase()}…</p>}
-    {error && <div className="app-operation-error" role="alert"><strong>Could not load {operation.title.toLowerCase()}</strong><p>{error}</p>{error.includes("narrow the namespace") && <p>Select a namespace above to reduce the inventory.</p>}<Button variant="secondary" onClick={() => void run(cursor.current)}>Retry</Button>{history.length > 0 && <Button variant="secondary" onClick={() => {setHistory([]);void run();}}>Start from first page</Button>}</div>}
+    {busy && <LoadingState compact label={`Running ${operation.title.toLowerCase()}`} className="px-3" />}
+    {error && <FailureState title={`Could not load ${operation.title.toLowerCase()}`} error={error} domain="local"
+      detail={error.includes("narrow the namespace") ? `${error} Select a namespace above to reduce the inventory.` : undefined}
+      onRetry={() => void run(cursor.current)}
+      action={history.length > 0 ? { label: "Start from first page", onClick: () => { setHistory([]); void run(); } } : undefined} />}
     {result !== undefined && <OperationResult value={result} operations={operations} current={operation.name} onOpen={(operation, params) => openTab(extensionOperationRoute(contextKey, id, revision, operation, params))} />}
-    {!busy && !error && result === undefined && <p className="extension-message">Run {operation.title.toLowerCase()} to load its data.</p>}
+    {!busy && !error && result === undefined && <EmptyState title="Nothing loaded yet" hint={`Run ${operation.title.toLowerCase()} to load its data.`} />}
     {(next || history.length > 0) && <div className="flex shrink-0 justify-end gap-2 border-t px-3 py-2" style={{ borderColor: "var(--rule)" }}><Button variant="secondary" disabled={busy || !history.length} onClick={() => { const previous = history.at(-1)!; setHistory(history.slice(0, -1)); void run(previous); }}>Previous page</Button><Button variant="secondary" disabled={busy || !next} onClick={() => { setHistory([...history, cursor.current]); void run(next); }}>Next page</Button></div>}
   </>;
 }
@@ -224,10 +247,10 @@ export function ExtensionOperation({ route }: RoutedScreenProps) {
     : !operation ? "This app does not declare this operation." : "";
   return <Screen title={<span className="flex min-w-0 items-center gap-2"><ExtensionLogo icon={app?.icon} name={app?.manifest.name ?? target.id} size={22} /><span className="text-muted">{app?.manifest.name ?? target.id}</span><span className="text-faint">/</span><span>{operation?.title ?? "App"}</span></span>} actions={<span className="block max-w-56 truncate text-xs text-muted" title={cluster?.name ?? target.contextKey}>{cluster?.name ?? target.contextKey}</span>} fill>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      {inventory.status === "loading" || status === "loading" ? <p className="extension-message" role="status">Loading app…</p>
-        : inventory.status === "error" ? <ErrorNotice title="Could not load apps" message={inventory.error} retry={inventory.reload} />
-        : !cluster && status === "failed" ? <ErrorNotice title="Could not load clusters" message={contextError} retry={() => { void retryContexts(); }} />
-        : error ? <p className="extension-message" role="alert">{error}</p>
+      {inventory.status === "loading" || status === "loading" ? <LoadingState label="Loading app" />
+        : inventory.status === "error" ? <FailureState title="Could not load apps" error={inventory.error} domain="local" onRetry={inventory.reload} />
+        : !cluster && status === "failed" ? <FailureState title="Could not load clusters" error={contextError} domain="local" onRetry={() => { void retryContexts(); }} />
+        : error ? <FailureState title="Could not open this screen" error={error} domain="local" />
         : <OperationForm key={route} id={target.id} revision={target.revision} contextKey={target.contextKey} context={cluster!.pinnedId!} operation={operation!} operations={app!.manifest.sidecar!.operations} initial={target.params} />}
     </div>
   </Screen>;

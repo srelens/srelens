@@ -3,6 +3,12 @@ import { cx } from "./cx";
 
 export interface ToolbarProps {
   children: ReactNode;
+  /**
+   * Let the controls run onto further rows when the strip is too narrow for
+   * them, rather than squeezing them. Off by default: Screen's head truncates
+   * its title instead.
+   */
+  wrap?: boolean;
   className?: string;
 }
 
@@ -15,6 +21,6 @@ export interface ToolbarProps {
  * what follows it. Layout of the contents is the caller's, since a toolbar of
  * filters and a toolbar of buttons space themselves differently. (#318)
  */
-export function Toolbar({ children, className }: ToolbarProps) {
-  return <div className={cx("toolbar", className)}>{children}</div>;
+export function Toolbar({ children, wrap = false, className }: ToolbarProps) {
+  return <div className={cx("toolbar", wrap && "flex-wrap gap-y-1.5 py-1", className)}>{children}</div>;
 }

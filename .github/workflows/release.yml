@@ -470,6 +470,12 @@ jobs:
       # moving the pin; the assert below only guards the Wayland case.
       LINUXDEPLOY_RELEASE: "1-alpha-20251107-1"
       LINUXDEPLOY_SHA256: "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
+      # Set for a pre-release version (every dev build, X.Y.Z-<run>), which
+      # then ships no rpm (#1026). '-' separates an RPM's Version from its
+      # Release, and since @tauri-apps/cli 2.12 the bundler refuses such a
+      # Version outright, failing the whole Linux leg. Drop this once a CLI
+      # release carries tauri-apps/tauri#16336. Stable X.Y.Z keeps its rpm.
+      SKIP_RPM: ${{ contains(needs.version.outputs.version, '-') && 'true' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -683,8 +689,9 @@ jobs:
           # `releases/latest`, and the dev-channel manifest published by
           # updater-manifest must point at assets that are live immediately.
           releaseDraft: ${{ github.ref_name == 'main' }}
-          # MAC_SIGNED_CONFIG is set only by the macOS signing step above.
-          args: ${{ matrix.args }} ${{ env.MAC_SIGNED_CONFIG }}
+          # MAC_SIGNED_CONFIG is set only by the macOS signing step above;
+          # SKIP_RPM is explained at the top of this job.
+          args: ${{ matrix.args }} ${{ env.MAC_SIGNED_CONFIG }} ${{ runner.os == 'Linux' && env.SKIP_RPM && '--bundles deb,appimage' || '' }}
           # Each matrix job uploads its own binaries + signatures, but NOT
           # latest.json — parallel jobs would race on that single asset. The
           # updater-manifest job assembles it once, after all builds.
@@ -744,12 +751,12 @@ jobs:
       # (tauri.linux.conf.json). Fail if a bundle lacks it, ships it without its
       # execute bit, or ships something else: on main before the draft is
       # published; on dev the pre-release's assets are already up, and this
-      # flags them.
+      # flags them. A pre-release has no rpm to check (SKIP_RPM).
       - name: Assert the Linux bundles ship the sandbox launcher
         if: runner.os == 'Linux'
         run: |
           sudo apt-get install -y rpm
-          sh packaging/linux/check-launcher.sh target/release/bundle
+          sh packaging/linux/check-launcher.sh target/release/bundle ${SKIP_RPM:+--no-rpm}
 
   # The terminal UI (#443). `apps/tui` shipped in #433 but nothing released it:
   # wanting the TUI meant cloning the repo and building it. It rides the SAME

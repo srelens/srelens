@@ -82,7 +82,14 @@ describe("topologyGraph", () => {
     const invoke = vi.fn().mockResolvedValue({ nodes: [], edges: [] });
     const out = await topologyGraph("c", ["empty"], undefined, false, invoke);
     expect(out.error).toBeUndefined();
-    expect(out.graph).toEqual({ nodes: [], edges: [], probe: null });
+    expect(out.graph).toEqual({ nodes: [], edges: [], probe: null, unread: [] });
+  });
+
+  it("carries the kinds it could not read, so they are not taken for absent (#1089)", async () => {
+    const unread = [{ namespace: "shop", kind: "HTTPRoute", reason: "httproutes is forbidden" }];
+    const invoke = vi.fn().mockResolvedValue({ nodes: [], edges: [], unread });
+    const out = await topologyGraph("c", ["shop"], undefined, false, invoke);
+    expect(out.graph?.unread).toEqual(unread);
   });
 });
 

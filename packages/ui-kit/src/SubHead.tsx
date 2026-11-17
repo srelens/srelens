@@ -5,10 +5,13 @@ import { cx } from "./cx";
  * The two voices the design gives a block's name.
  *
  * `bold` is the detail body's line — the resource pane's mock draws "a small
- * bold section heading" and every call site in that pane wants it.
+ * bold section heading" and every call site in that pane wants it. 13px in
+ * `--ink` (#1001): at 12px it was the size of the keys beneath it, and a run
+ * of closed sections read as more rows.
  *
- * `caps` is the design's structural signpost: 10 px, weight 600, `0.07em`,
- * uppercase, `--ink-faint` — the same recipe `.pane-head` wears (design §C.3).
+ * `caps` is the design's structural signpost: 11px (`--text-meta`), weight
+ * 600, `0.07em`, uppercase, `--ink-soft` — the same recipe `.pane-head`
+ * wears (design §C.3).
  * The cluster overview's bands are headed in it, so a heading and the pane head
  * above it read as one system rather than two.
  */
@@ -44,7 +47,7 @@ export interface SubHeadProps {
  */
 export function SubHead({ children, className, variant = "bold" }: SubHeadProps) {
   return (
-    <h3 className={cx(variant === "caps" ? "subhead-caps" : "text-[0.75rem] font-semibold", className)}>
+    <h3 className={cx(variant === "caps" ? "subhead-caps" : "text-[0.8125rem] font-semibold text-ink", className)}>
       {children}
     </h3>
   );

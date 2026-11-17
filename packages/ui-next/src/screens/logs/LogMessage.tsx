@@ -17,11 +17,15 @@ const GAP = "  ";
  * The text a row's message cell shows: the message, then (for a structured
  * row) its other fields. A user regex's marks are worked out over this in the
  * regex worker, so both build it here.
+ *
+ * A newline in it — a JSON `msg` decodes its "\n" — reads as a space, one for
+ * one so marks still line up: the cell keeps whitespace as written (#1051), and
+ * an unwrapped row must stay the one line high the window counts on.
  */
 export function shownText(row: MessageRow): string {
   const inline = row.structured ? inlineFields(row.fields) : "";
   const gap = row.message !== "" && inline !== "" ? GAP : "";
-  return `${row.message}${gap}${inline}`;
+  return `${row.message}${gap}${inline}`.replace(/[\r\n]/g, " ");
 }
 
 /**
@@ -51,9 +55,7 @@ export function renderMessage(
       {marked(shown.slice(0, split), ranges, 0)}
       {split < shown.length && (
         <span className="text-faint">
-          {/* The row is `white-space: nowrap`, which collapses the gap to one space. Only the gap keeps its
-              spaces: pre-wrap on the whole faint part would let the row break, and the window needs its height. */}
-          {gap !== "" && <span className="whitespace-pre">{marked(gap, ranges, split)}</span>}
+          {marked(gap, ranges, split)}
           {marked(shown.slice(rest), ranges, rest)}
         </span>
       )}

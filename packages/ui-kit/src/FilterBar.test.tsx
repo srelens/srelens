@@ -31,6 +31,20 @@ describe("FilterBar", () => {
     expect(field().getAttribute("placeholder")).toBe("Filter pods…");
   });
 
+  it("does not mark a filter's words as misspelt", () => {
+    // A regex is not English, and a red underline in this field reads as the
+    // invalid-regex state the bar draws for itself.
+    setup({ value: "^live-(web|pay)$" });
+    expect(field().getAttribute("spellcheck")).toBe("false");
+  });
+
+  it("keeps the browser's own clear button out of a field that has one", () => {
+    // jsdom draws no pseudo-elements, so the rule that hides it is what there is
+    // to read. A `type="search"` field draws a second ✕ beside ours while focused.
+    setup({ value: "nginx" });
+    expect(field().className).toContain("[&::-webkit-search-cancel-button]:appearance-none");
+  });
+
   it("is a search field", () => {
     setup();
     expect(field().getAttribute("type")).toBe("search");

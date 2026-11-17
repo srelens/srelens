@@ -496,11 +496,15 @@ fn extract_from_zip(archive: &[u8], asset: &str) -> Result<Vec<u8>, UpdateError>
     let reader = std::io::Cursor::new(archive);
     let mut zip = zip::ZipArchive::new(reader).map_err(|e| UpdateError::Archive(e.to_string()))?;
     for i in 0..zip.len() {
+        // Off by default in the crate, which otherwise believes the central
+        // directory alone (zip cloaking, GHSA-m665-v7pm-7grj).
+        let options = zip::read::ZipReadOptions::new().enforce_header_consistency(true);
         let mut file = zip
-            .by_index(i)
+            .by_index_with_options(i, options)
             .map_err(|e| UpdateError::Archive(e.to_string()))?;
         let name = file
             .name()
+            .map_err(|e| UpdateError::Archive(e.to_string()))?
             .rsplit('/')
             .next()
             .unwrap_or_default()

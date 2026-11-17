@@ -96,6 +96,22 @@ describe("Tabs keyboard behaviour", () => {
   });
 });
 
+describe("Tabs with manual activation", () => {
+  it("moves focus with the arrow keys and changes nothing until a tab is pressed", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<Tabs tabs={tabs} active="pods" onChange={onChange} activation="manual" />);
+
+    screen.getByRole("tab", { name: "Pods" }).focus();
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Services" }));
+    expect(onChange).not.toHaveBeenCalled();
+
+    await user.keyboard("{Enter}");
+    expect(onChange).toHaveBeenCalledWith("services");
+  });
+});
+
 describe("Tabs in a narrow container", () => {
   it("carries its own horizontal overflow", () => {
     // Each tab has a 108px minimum and flex items do not shrink past it, so
@@ -227,5 +243,53 @@ describe("Tabs, underlined", () => {
     // No filled background: that is the window chrome's tab, and a page's
     // tabs sit on the page.
     expect(body).not.toContain("background");
+  });
+});
+
+/**
+ * A choice of one from a few, in the segmented look (#1001, step 7c). Before,
+ * screens drew it four ways: pressed ghost buttons, primary and secondary
+ * buttons, and hidden radios inside `.seg-btn` labels. It is a setting, not a
+ * set of panes, so it says radio rather than tab.
+ */
+describe("Tabs as a radio group", () => {
+  const sizes = [
+    { id: "s", label: "Small" },
+    { id: "m", label: "Medium" },
+    { id: "l", label: "Large" },
+  ];
+
+  it("is a named radio group whose chosen option is checked", () => {
+    render(<Tabs tabs={sizes} active="m" onChange={() => {}} variant="segmented" mode="radio" label="Size" />);
+    expect(screen.getByRole("radiogroup", { name: "Size" })).toBeDefined();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.getAllByRole("radio").map((each) => each.getAttribute("aria-checked"))).toEqual(["false", "true", "false"]);
+    expect(screen.getByRole("radio", { name: "Medium" }).hasAttribute("aria-selected")).toBe(false);
+  });
+
+  it("is one tab stop, landing on the chosen option", () => {
+    render(<Tabs tabs={sizes} active="l" onChange={() => {}} variant="segmented" mode="radio" label="Size" />);
+    expect(screen.getAllByRole("radio").map((each) => each.getAttribute("tabindex"))).toEqual(["-1", "-1", "0"]);
+  });
+
+  it("chooses with all four arrow keys, as a radio group does", async () => {
+    const onChange = vi.fn();
+    render(<Tabs tabs={sizes} active="s" onChange={onChange} variant="segmented" mode="radio" label="Size" />);
+    screen.getByRole("radio", { name: "Small" }).focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(onChange).toHaveBeenLastCalledWith("m");
+    await userEvent.keyboard("{ArrowUp}");
+    expect(onChange).toHaveBeenLastCalledWith("s");
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(onChange).toHaveBeenLastCalledWith("l");
+    await userEvent.keyboard("{ArrowRight}");
+    expect(onChange).toHaveBeenLastCalledWith("s");
+  });
+
+  it("wears the segmented look, marked the way the tabs are", () => {
+    const { container } = render(<Tabs tabs={sizes} active="m" onChange={() => {}} variant="segmented" mode="radio" label="Size" />);
+    expect(container.querySelector(".seg[data-variant='segmented']")).not.toBeNull();
+    expect([...container.querySelectorAll('.seg-btn[data-active="true"]')].map((each) => each.textContent)).toEqual(["Medium"]);
   });
 });

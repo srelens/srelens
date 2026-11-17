@@ -19,6 +19,7 @@ import { Connections } from "../screens/Connections";
 import { Events } from "../screens/Events";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { Overview } from "../screens/Overview";
+import { Problems } from "../screens/Problems";
 import { Forwards } from "../screens/Forwards";
 import { Logs, logsRoute } from "../screens/Logs";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
@@ -280,6 +281,11 @@ suite("screenFor", () => {
     // the tree — the one a reader clicks before anything else — lands on the
     // Placeholder while the screen sits there finished.
     expect(screenFor("/overview")).toBe(Overview);
+  });
+
+  it("resolves /problems to the cluster triage screen", () => {
+    expect(describe("/problems", "prod")).toMatchObject({ title: "Problems", sub: "prod" });
+    expect(screenFor("/problems")).toBe(Problems);
   });
 
   it("resolves both shapes of the logs route to the Logs screen", () => {

@@ -142,6 +142,7 @@ export function FilterBar({
         <input
           ref={setField}
           type="search"
+          spellCheck={false}
           value={value}
           onChange={(e) => onValueChange(e.target.value)}
           onKeyDown={(e) => {
@@ -158,7 +159,7 @@ export function FilterBar({
           aria-invalid={invalid ? true : undefined}
           aria-describedby={invalid ? invalidId : undefined}
           title={invalid ? "Invalid regular expression" : undefined}
-          className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint"
+          className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint [&::-webkit-search-cancel-button]:appearance-none"
         />
         {value !== "" && (
           <button

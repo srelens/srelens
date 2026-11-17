@@ -222,6 +222,22 @@ describe("describeError", () => {
     );
   });
 
+  // #1024: the host refuses an app's read on a cluster without the CRD, and a
+  // CRD's name is free text — cert-manager's contains "certificate", and an
+  // earlier substring test read that as a TLS failure.
+  it.each([
+    ["certificates.cert-manager.io", "v1"],
+    ["helmreleases.helm.toolkit.fluxcd.io", "any of v2, v2beta2"],
+    ["dnsendpoints.externaldns.k8s.io", "v1alpha1"],
+  ])("says a CRD %s the cluster doesn't serve is not on this cluster", (crd, versions) => {
+    const raw = `handler error: No CustomResourceDefinition ${crd} serving ${versions} on this cluster; an app reads only custom resources`;
+    const result = describeError(raw);
+    expect(result.title).toBe("Not on this cluster");
+    expect(result.detail).toContain(crd);
+    expect(result.detail).toContain(versions);
+    expect(result.raw).toContain(crd);
+  });
+
   it("falls back to the cleaned message for unrecognized errors", () => {
     const result = describeError("handler error: something weird happened");
     expect(result.title).toBe("Something went wrong");

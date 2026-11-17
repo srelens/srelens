@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { fireEvent } from "@testing-library/react";
 import type { HostNotice } from "@srelens/core";
 import type { PendingClusterTerminal } from "../lib/clusterTerminal";
-import { extensionClusterRoute, notify, saveUpdateChannel, setNotifier } from "@srelens/core";
+import { extensionClusterRoute, extensionOperationRoute, extensionRoute, notify, saveUpdateChannel, setNotifier } from "@srelens/core";
 
 // `vi.hoisted` because `vi.mock` is hoisted above every declaration in the
 // file, and the tabsPersist factory reads these the moment `./Window` imports
@@ -750,6 +750,112 @@ describe("Window marks", () => {
     const stored = JSON.parse(localStorage.getItem("srelens.contextProfiles")!);
     expect(stored.prod.color).toBe("var(--ok)");
     expect(stored.dev.color).toBe("var(--warn)");
+  });
+
+  it("marks cross-cluster detail tabs with each cluster's colour and follows later mark changes", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    loadTabsState.mockReturnValue(defaultState([ctx("prod"), ctx("stage")]));
+    await booted();
+
+    act(() => {
+      setMark("prod", { ...defaultMark("prod"), color: "var(--mark-teal)" });
+      setMark("stage", { ...defaultMark("stage"), color: "var(--mark-orange)" });
+      store.openTab("/k/prod/Node/-/worker-1", { clusterName: "prod" });
+      store.openTab("/k/stage/Node/-/worker-1", { clusterName: "stage" });
+    });
+
+    const marker = (name: string) =>
+      screen.getByRole("tab", { name }).querySelector<HTMLElement>('[data-slot="tab-cluster-color"]');
+    expect(marker("worker-1 · prod")?.style.background).toBe("var(--mark-teal)");
+    expect(marker("worker-1 · stage")?.style.background).toBe("var(--mark-orange)");
+
+    act(() => setMark("stage", { ...defaultMark("stage"), color: "var(--mark-purple)" }));
+    expect(marker("worker-1 · stage")?.style.background).toBe("var(--mark-purple)");
+    expect(marker("worker-1 · prod")?.style.background).toBe("var(--mark-teal)");
+  });
+
+  it("uses the active context's identity when two contexts have the same name", async () => {
+    const first = ctx("first", "shared");
+    const second = ctx("second", "shared");
+    listContexts.mockResolvedValue({ contexts: [first, second] });
+    const saved = defaultState([first, second]);
+    saved.workspaces[0].activeCluster = second.stableId;
+    loadTabsState.mockReturnValue(saved);
+    await booted();
+
+    act(() => {
+      setMark(first.stableId, { ...defaultMark(first.name), color: "var(--mark-teal)" });
+      setMark(second.stableId, { ...defaultMark(second.name), color: "var(--mark-orange)" });
+      store.openTab("/k/pods", { clusterName: second.name });
+    });
+
+    const tab = screen.getByRole("tab", { name: "Pods · shared (second)" });
+    expect(tab.querySelector<HTMLElement>('[data-slot="tab-cluster-color"]')?.style.background).toBe("var(--mark-orange)");
+    expect(tab.querySelector(".tab-sub")?.textContent).toBe("shared (second)");
+  });
+
+  it("resolves an extension operation's context key instead of borrowing the rail", async () => {
+    const prod = ctx("prod");
+    const stage = { ...ctx("stage"), key: "stage-key" };
+    listContexts.mockResolvedValue({ contexts: [prod, stage] });
+    loadTabsState.mockReturnValue(defaultState([prod, stage]));
+    await booted();
+
+    act(() => {
+      setMark(prod.stableId, { ...defaultMark(prod.name), color: "var(--mark-teal)" });
+      setMark(stage.stableId, { ...defaultMark(stage.name), color: "var(--mark-orange)" });
+      store.openTab(extensionOperationRoute(stage.key, "ext", 1, "scan"));
+    });
+
+    const tab = screen.getByRole("tab", { name: "Scan · stage" });
+    expect(tab.querySelector<HTMLElement>('[data-slot="tab-cluster-color"]')?.style.background).toBe("var(--mark-orange)");
+  });
+
+  it("never colours a legacy extension route by a replaceable display name", async () => {
+    const original = ctx("original-id", "cluster/a");
+    listContexts.mockResolvedValue({ contexts: [original] });
+    loadTabsState.mockReturnValue(defaultState([original]));
+    await booted();
+
+    act(() => {
+      setMark(original.stableId, { ...defaultMark(original.name), color: "var(--mark-teal)" });
+      store.openTab(extensionRoute("cluster/a", "ext", "overview"), { clusterName: original.name });
+    });
+
+    const legacyTab = () => screen.getByRole("tab", { name: "overview · cluster/a" });
+    expect(legacyTab().querySelector('[data-slot="tab-cluster-color"]')).toBeNull();
+
+    // ExtensionPage remembers the original key when this legacy route first
+    // resolves. If a later listing renames that context and gives its old name
+    // to another one, a stateless lookup by name would colour the tab as the
+    // replacement even though the mounted page remains on the original.
+    const renamed = { ...original, name: "first/cluster/a" };
+    const replacement = ctx("replacement-id", "cluster/a");
+    act(() => {
+      setContexts([renamed, replacement]);
+      setMark(replacement.stableId, { ...defaultMark(replacement.name), color: "var(--mark-orange)" });
+    });
+    expect(legacyTab().querySelector('[data-slot="tab-cluster-color"]')).toBeNull();
+  });
+
+  it("writes the context beside colliding custom names so same-title tabs remain distinguishable", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    loadTabsState.mockReturnValue(defaultState([ctx("prod"), ctx("stage")]));
+    await booted();
+
+    act(() => {
+      setMark("prod", { ...defaultMark("prod"), name: "Production", color: "var(--mark-teal)" });
+      setMark("stage", { ...defaultMark("stage"), name: "Production", color: "var(--mark-orange)" });
+      store.openTab("/k/prod/Node/-/worker-1", { clusterName: "prod" });
+      store.openTab("/k/stage/Node/-/worker-1", { clusterName: "stage" });
+    });
+
+    const prod = screen.getByRole("tab", { name: "worker-1 · Production (prod)" });
+    const stage = screen.getByRole("tab", { name: "worker-1 · Production (stage)" });
+    expect(prod.querySelector(".tab-sub")?.textContent).toBe("Production (prod)");
+    expect(stage.querySelector(".tab-sub")?.textContent).toBe("Production (stage)");
+    expect(prod.querySelector<HTMLElement>('[data-slot="tab-cluster-color"]')?.style.background).toBe("var(--mark-teal)");
+    expect(stage.querySelector<HTMLElement>('[data-slot="tab-cluster-color"]')?.style.background).toBe("var(--mark-orange)");
   });
 });
 
@@ -2399,24 +2505,28 @@ it("shows saved display names on tabs while retaining the real context for opera
   localStorage.setItem("srelens.contextProfiles", JSON.stringify({ prod: { displayName: "Production Europe", shortName: "PE" } }));
   await booted();
   act(() => store.openTab("/k/pods", { clusterName: "prod" }));
-  expect(screen.getByRole("tab", { name: /Pods · Production Europe/ })).toBeDefined();
+  expect(screen.getByRole("tab", { name: "Pods · Production Europe, context prod" })).toBeDefined();
   expect(store.currentWorkspace().tabs.find(tab => tab.route === "/k/pods")?.sub).toBe("prod");
-  act(() => { screen.getByRole("tab", { name: /Pods · Production Europe/ }).focus(); });
-  expect((await screen.findByRole("tooltip")).textContent).toContain("PE");
-  expect(screen.getByRole("tooltip").textContent).not.toContain("prod");
+  act(() => { screen.getByRole("tab", { name: "Pods · Production Europe, context prod" }).focus(); });
+  expect((await screen.findByRole("tooltip")).textContent).toContain("prod");
   expect(await screen.findByPlaceholderText("Ask about PE / pods")).toBeDefined();
   act(() => setMark("prod", { ...defaultMark("prod"), name: "Production East" }));
-  expect(screen.getByRole("tab", { name: /Pods · Production East/ })).toBeDefined();
+  expect(screen.getByRole("tab", { name: "Pods · Production East, context prod" })).toBeDefined();
 });
 
 
 it.each(["/forwards", "/terminals", "/helm"])("shows the active context for a status-opened %s tab", async route => {
   loadTabsState.mockReturnValue(defaultState([ctx("prod")]));
   await booted();
-  act(() => { store.openTab(route); });
+  act(() => {
+    setMark("prod", { ...defaultMark("prod"), color: "var(--mark-teal)" });
+    store.openTab(route);
+  });
   const opened = store.getState().workspaces[0].tabs.find(t => t.route === route)!;
   expect(opened.sub).toBeUndefined();
-  act(() => { screen.getByRole("tab", { name: opened.title }).focus(); });
+  const tab = screen.getByRole("tab", { name: `${opened.title} · prod` });
+  expect(tab.querySelector<HTMLElement>('[data-slot="tab-cluster-color"]')?.style.background).toBe("var(--mark-teal)");
+  act(() => { tab.focus(); });
   expect((await screen.findByRole("tooltip")).textContent).toContain("prod");
 });
 

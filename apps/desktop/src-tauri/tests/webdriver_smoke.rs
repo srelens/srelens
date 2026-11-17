@@ -129,6 +129,14 @@ async fn wait_for(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<WebE
 /// for a moment — by a dialog on its way out, or a popover's panel — and one
 /// attempt would fail instantly with ElementClickIntercepted; retrying makes
 /// every click "when actually clickable, within the deadline".
+///
+/// One cover never goes on its own: the "Update available" notice, which the
+/// app raises at launch whenever the stable feed is ahead of the build under
+/// test — every branch of `dev` from a stable release until `dev` takes its
+/// version bump. It waits to be dismissed, over the pod peek's action bar
+/// (#998). It says nothing about the change under test, so a click it
+/// intercepts dismisses it. Any other notice still holds the click until the
+/// deadline fails it.
 async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
@@ -141,10 +149,26 @@ async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
         match attempt {
             Ok(()) => return Ok(()),
             Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(WebDriverError::ElementClickIntercepted(_)) => {
+                if let Ok(close) = driver
+                    .query(By::XPath(UPDATE_NOTICE_DISMISS.to_string()))
+                    .nowait()
+                    .first()
+                    .await
+                {
+                    close.click().await.ok();
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await
+            }
             Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     }
 }
+
+/// The window's notice (`Window.tsx`'s `SurfaceToast`) while it shows the
+/// update offer, and only then: its dismiss button.
+const UPDATE_NOTICE_DISMISS: &str =
+    "//*[@role='status'][.//*[normalize-space()='Update available']]//button[@aria-label='Dismiss notice']";
 
 /// Click the element at `target` (an XPath) until `proof` appears, within
 /// `secs`. A WebDriver click can be accepted and still change nothing — on a
@@ -457,27 +481,26 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     // collapsed, so Workloads must be DISCLOSED before its Pods entry exists
     // in the DOM at all. Clicked only while it says it is collapsed, so a
     // future default-open change can't turn the click into a collapse.
-    // Rows are found by their `title` (the label alone), not their text:
-    // since #961 a row's text is its label plus a count that arrives when the
-    // fold's counts load ("Pods 10"), so a text match raced the count.
+    // Rows are found by their label's own span, not the row's text: since
+    // #961 a row's text is its label plus a count that arrives when the
+    // fold's counts load ("Pods 10"), so a text match raced the count. The
+    // native `title` that used to carry the label gave way to the kit's
+    // tooltip (#1001).
     let tree = "//*[@role='tree' and @aria-label='Cluster resources']";
-    let workloads = format!("{tree}//*[@role='treeitem' and @title='Workloads']");
+    let row = |label: &str| format!("{tree}//*[@role='treeitem' and .//span[normalize-space()='{label}']]");
+    let workloads = row("Workloads");
     let group = wait_for(driver, By::XPath(workloads.clone()), 30).await?;
     if group.attr("aria-expanded").await?.as_deref() == Some("false") {
         click(driver, By::XPath(format!("{workloads}[@aria-expanded='false']")), 15).await?;
     }
-    click(
-        driver,
-        By::XPath(format!("{tree}//*[@role='treeitem' and @title='Pods']")),
-        15,
-    )
-    .await?;
+    click(driver, By::XPath(row("Pods")), 15).await?;
 
     // ---- 5. The fixture pod is in the default namespace, which a fresh
     // profile's "all namespaces" includes. A single click on its row opens
     // the peek beside the list. Rows the table renders aria-hidden — its
-    // row-height sample — are not the row a reader clicks. The peek's action
-    // bar (Logs and Shell on it, the rest in its overflow) is the proof.
+    // row-height sample — are not the row a reader clicks. The peek's quick
+    // tools under its name are the proof. They are icons, so each is found
+    // by its accessible name, not by visible text (#1072).
     let actions = "//*[@role='group' and @aria-label='Pod actions']";
     click_until(
         driver,
@@ -488,22 +511,12 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     .await?;
 
     if full {
-        // ---- 5F. Port-forward: Forward is in the bar's overflow. The dialog
-        // arrives with the pod and its namespace filled in; remote 8080 →
-        // explicit local 18080 are typed (a blank local port would let the
-        // backend pick one this test could not know), then real bytes are
+        // ---- 5F. Port-forward: Forward is one of the peek's tools. The
+        // dialog arrives with the pod and its namespace filled in; remote
+        // 8080 → explicit local 18080 are typed (a blank local port would let
+        // the backend pick one this test could not know), then real bytes are
         // fetched through it from OUTSIDE the app.
-        click(driver, By::XPath(format!("{actions}//button[normalize-space()='More actions']")), 30)
-            .await?;
-        click(
-            driver,
-            By::XPath(
-                "//*[@role='dialog' and @aria-label='More actions']//button[@aria-label='Forward']"
-                    .to_string(),
-            ),
-            15,
-        )
-        .await?;
+        click(driver, By::XPath(format!("{actions}//button[@aria-label='Forward']")), 30).await?;
         let dialog = "//*[@role='dialog'][.//*[normalize-space()='New port forward']]";
         for (label, port) in [("Local port", "18080"), ("Remote port", "8080")] {
             let field = wait_for(
@@ -544,10 +557,10 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
 
-        // ---- 6F. Exec: Shell on the bar starts a session in the pod's one
+        // ---- 6F. Exec: the Shell tool starts a session in the pod's one
         // container and opens the Terminals tab on it. xterm's input is the
         // textarea it names "Terminal input".
-        click(driver, By::XPath(format!("{actions}//button[normalize-space()='Shell']")), 30).await?;
+        click(driver, By::XPath(format!("{actions}//button[@aria-label='Shell']")), 30).await?;
         let input = wait_for(driver, By::Css("textarea[aria-label='Terminal input']"), 30).await?;
         // Prove the keystrokes actually EXECUTE in the pod via a side effect
         // observed from OUTSIDE the app (kubectl), not from the terminal's
@@ -592,14 +605,14 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
         .await?;
     }
 
-    // ---- 7. Logs: the bar's Logs opens the pod's log stream in a tab, and
+    // ---- 7. Logs: the Logs tool opens the pod's log stream in a tab, and
     // the marker must appear INSIDE that stream (`role="log"` named
     // `<pod> logs`, screens/Logs.tsx) — a global text match could be
     // satisfied by the pod SPEC in the peek's YAML, which embeds the
     // fixture's command (also why the command logs the marker via an
     // expansion the spec doesn't contain). Only real log output can put it
     // here.
-    click(driver, By::XPath(format!("{actions}//button[normalize-space()='Logs']")), 30).await?;
+    click(driver, By::XPath(format!("{actions}//button[@aria-label='Logs']")), 30).await?;
     wait_for(
         driver,
         By::XPath(format!(

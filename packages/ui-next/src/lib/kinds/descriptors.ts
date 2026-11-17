@@ -1,5 +1,5 @@
 import { K8S_KIND, WATCHABLE_KINDS, listNamespaces, listNodes, listResource, nodeMetrics, podMetrics, type ResourceKind } from "@srelens/core";
-import { recordUsage } from "../usageHistory";
+import { recordUsage, USAGE_POLL_MS } from "../usageHistory";
 import type { Column } from "@srelens/ui-kit";
 import {
   clusterRoleBindingColumns,
@@ -130,7 +130,7 @@ const TYPED: Partial<Record<ResourceKind, KindDescriptor<ListRow>>> = {
     // Same variance cast the columns above already need (see the comment
     // above this table): `Partial<PodRow>` only widens `Partial<ListRow>`.
     enrich: podEnrich as (context: string, namespace: string) => Promise<Map<RowKey, Partial<ListRow>>>,
-    enrichMs: 10000,
+    enrichMs: USAGE_POLL_MS,
     actions: { logs: true, shell: true, forward: true, evict: true },
     // Same variance cast every function on this table already needs: `flagged`
     // only reads `phase`, a field `ListRow` does not promise.

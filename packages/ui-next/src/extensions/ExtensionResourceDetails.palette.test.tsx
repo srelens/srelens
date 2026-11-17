@@ -1,9 +1,14 @@
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render as bare, screen, fireEvent, waitFor } from "@testing-library/react";
+import type { ReactElement, ReactNode } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn()}));
 import { inspectExtensionResource, actOnExtensionResource, type ActionPredicate, type ExtensionResourceDetail } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 import { requestExtensionAction, takeExtensionAction } from "./actionRequests";
+import { ConsoleProvider } from "../console";
+
+const Wrapper=({children}:{children:ReactNode})=><ConsoleProvider>{children}</ConsoleProvider>;
+const render=(ui:ReactElement)=>bare(ui,{wrapper:Wrapper});
 
 // A palette action command (#544) reaches the write only through this view's
 // own review: the same dialog, the same pinned UID and resourceVersion.

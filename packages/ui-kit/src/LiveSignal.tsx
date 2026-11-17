@@ -12,6 +12,8 @@ export interface LiveSignalProps {
    */
   label?: ReactNode;
   tone?: Tone;
+  /** Holds the dot still: the signal is there to read, but nothing is arriving. */
+  still?: boolean;
   className?: string;
 }
 
@@ -31,13 +33,13 @@ export interface LiveSignalProps {
  * without a live region that is a silent failure. The dot itself is hidden,
  * since it repeats the label and nothing more. (#320)
  */
-export function LiveSignal({ label, tone = "sev", className }: LiveSignalProps) {
+export function LiveSignal({ label, tone = "sev", still = false, className }: LiveSignalProps) {
   return (
     <div role="status" className={cx("flex items-center gap-2", className)}>
       <span
         aria-hidden="true"
         data-tone={tone}
-        className="live-dot inline-block h-[7px] w-[7px] shrink-0 rounded-full"
+        className={cx(!still && "live-dot", "inline-block h-[7px] w-[7px] shrink-0 rounded-full")}
         style={{ background: toneColor(tone) }}
       />
       <Eyebrow>{filled(label) ? label : "Live signal"}</Eyebrow>

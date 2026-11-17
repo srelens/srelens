@@ -294,8 +294,8 @@ describe("ActionBar", () => {
     it("describes a blocked row in the menu the same way", () => {
       setup({ max: 1, actions: [action("Logs"), ...blocked] });
       return openMenu().then(() => {
-        // `No access` is the row's visible tag, and it is a constant. Pointing
-        // the description at those two words would say less than the `title`
+        // `Unavailable` is the row's visible tag, and it is a constant. Pointing
+        // the description at that word would say less than the `title`
         // already carried; the row has to name the reason too.
         expect(description(screen.getByRole("button", { name: "Delete" }))).toBe(
           "You cannot delete pods in kube-system",
@@ -340,7 +340,8 @@ describe("ActionBar", () => {
       // Opacity is not a message.
       setup({ max: 1, actions: [action("Logs"), ...blocked] });
       return openMenu().then((panel) => {
-        expect(panel.textContent).toContain("No access");
+        // Not "No access": most blocks are the resource's state, not a permission.
+        expect(panel.textContent).toContain("Unavailable");
       });
     });
 
@@ -506,5 +507,97 @@ describe("ActionBar — an action that confirms", () => {
     });
     expect(screen.getByRole("button", { name: "Copied" })).toBeDefined();
     expect(screen.getByRole("button", { name: "Restart" })).toBeDefined();
+  });
+});
+
+/**
+ * The quick tools row: every action an icon, as classic's drawer draws them
+ * at the top of a resource. A row of icons is only as good as what tells the
+ * icons apart, so the label has to be the name and has to come up on hover
+ * and on focus. (#1072)
+ */
+describe("ActionBar — drawn as icons", () => {
+  const tools = [
+    action("Logs", { icon: Glyph }),
+    action("Shell", { icon: Glyph }),
+    action("Delete", { icon: Glyph, danger: true }),
+  ];
+
+  it("draws an action that has an icon as an icon button, named by its label", () => {
+    setup({ actions: tools, iconOnly: true, max: tools.length });
+    const logs = screen.getByRole("button", { name: "Logs" });
+    expect(logs.className).toContain("icon-btn");
+    expect(logs.textContent).toBe("");
+  });
+
+  it("puts the label up as a tooltip, for a keyboard user too", async () => {
+    setup({ actions: tools, iconOnly: true, max: tools.length });
+    await userEvent.tab();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Logs" }));
+    expect((await screen.findByRole("tooltip")).textContent).toBe("Logs");
+  });
+
+  it("keeps the word on an action that has no icon to draw", () => {
+    setup({ actions: [...tools, action("Refresh details")], iconOnly: true, max: 4 });
+    expect(screen.getByRole("button", { name: "Refresh details" }).textContent).toBe("Refresh details");
+  });
+
+  it("sets the destructive actions off with a divider, and tints them", () => {
+    const { container } = setup({ actions: tools, iconOnly: true, max: tools.length });
+    const dividers = container.querySelectorAll('[data-slot="action-divider"]');
+    expect(dividers).toHaveLength(1);
+    // Between the last safe action and the first destructive one.
+    expect(dividers[0].previousElementSibling?.querySelector("button")?.getAttribute("aria-label")).toBe("Shell");
+    expect(dividers[0].nextElementSibling?.querySelector("button")?.getAttribute("aria-label")).toBe("Delete");
+    expect(screen.getByRole("button", { name: "Delete" }).style.color).toBe("var(--sev)");
+  });
+
+  it("draws no divider in front of a destructive action that leads", () => {
+    const { container } = setup({ actions: [tools[2], tools[0]], iconOnly: true, max: 2 });
+    expect(container.querySelector('[data-slot="action-divider"]')).toBeNull();
+  });
+
+  it("keeps a blocked action's reason reachable", () => {
+    setup({
+      actions: [action("Delete", { icon: Glyph, danger: true, disabledReason: "Forbidden: delete pods" })],
+      iconOnly: true,
+    });
+    const del = screen.getByRole("button", { name: "Delete" });
+    expect(del.getAttribute("aria-disabled")).toBe("true");
+    expect(description(del)).toContain("Forbidden: delete pods");
+  });
+
+  it("answers in its name when it confirms", async () => {
+    render(
+      <ActionBar
+        label="Pod actions"
+        iconOnly
+        actions={[action("Copy as kubectl", { icon: Glyph, confirmLabel: "Copied", onSelect: () => Promise.resolve(true) })]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
+    });
+    expect(screen.getByRole("button", { name: "Copied" })).toBeDefined();
+  });
+
+  // The worded bar's text says "… failed"; an icon has no text, and a name or
+  // a tooltip the reader has to hover again for is a silent failure. So the
+  // glyph itself changes, and takes the danger tone. (#1073 review)
+  it("shows a failed copy on the icon itself, not only in its name", async () => {
+    render(
+      <ActionBar
+        label="Pod actions"
+        iconOnly
+        actions={[action("Copy as kubectl", { icon: Glyph, confirmLabel: "Copied", onSelect: () => Promise.resolve(false) })]}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy as kubectl" }));
+    });
+    const failed = screen.getByRole("button", { name: "Copy as kubectl failed" });
+    expect(failed.querySelector('[data-glyph="failed"]')).not.toBeNull();
+    expect(screen.queryByTestId("glyph")).toBeNull();
+    expect(failed.style.color).toBe("var(--sev)");
   });
 });

@@ -1,3 +1,4 @@
+import { Button } from "@srelens/ui-kit";
 import { useScreenContext } from "./clusters";
 import { detailRoute } from "./detailRoute";
 import { openTab } from "./tabsStore";
@@ -29,13 +30,12 @@ export function NodeLink({ name }: { name: string }) {
   if (!context) return <>{name}</>;
   const label = `Open node ${name}`;
   return (
-    <button
+    <Button
       type="button"
-      // Dotted at rest, solid under the pointer or the keyboard: a name with
-      // nothing drawn on it reads as text, and nobody clicks text to find out.
-      // Dotted rather than solid because this is one cell in every row of a
-      // column, and a column of solid underlines is a column of rules.
-      className="max-w-full cursor-pointer truncate text-left underline decoration-dotted underline-offset-2 hover:decoration-solid focus-visible:decoration-solid"
+      // The kit's link: underlined at rest, because a name with nothing drawn
+      // on it reads as text, and nobody clicks text to find out.
+      variant="link"
+      className="max-w-full truncate text-left"
       title={label}
       aria-label={label}
       onClick={(e) => {
@@ -48,6 +48,6 @@ export function NodeLink({ name }: { name: string }) {
       }}
     >
       {name}
-    </button>
+    </Button>
   );
 }

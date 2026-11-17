@@ -141,16 +141,20 @@ it("names the app's identity, grants, contributions and registered capabilities 
 it("says a declarative app has no process, no streams, no watches and no errors, and where its failures show", async () => {
   vi.mocked(inspectExtension).mockResolvedValue(declarative());
   await open();
-  expect(region("Process").textContent).toContain(
-    "No process. This is a declarative app: srelens runs nothing of its own for it, so there is no process, memory or request traffic to show.",
-  );
+  const process = region("Process");
+  expect(within(process).getByText("No process")).toBeTruthy();
+  expect(
+    within(process).getByText(
+      "This is a declarative app: srelens runs nothing of its own for it, so there is no process, memory or request traffic to show.",
+    ),
+  ).toBeTruthy();
   const streams = region("Streams and watches");
-  expect(within(streams).getByText("No open streams.")).toBeTruthy();
-  expect(within(streams).getByText("No watches.")).toBeTruthy();
+  expect(within(streams).getByText("No open streams")).toBeTruthy();
+  expect(within(streams).getByText("No watches")).toBeTruthy();
   expect(fact("Streams and watches", "Refused at the cap of 8 open streams")).toBe("0");
-  expect(region("Recent errors").textContent).toContain(
-    "No errors recorded since srelens started. Its pages and cards show their own failures where they happen.",
-  );
+  const errors = region("Recent errors");
+  expect(within(errors).getByText("No errors recorded since srelens started")).toBeTruthy();
+  expect(within(errors).getByText("Its pages and cards show their own failures where they happen.")).toBeTruthy();
 });
 
 it("lists the app's open streams and its watches apart, each with its view and traffic", async () => {
@@ -179,7 +183,7 @@ it("lists the app's open streams and its watches apart, each with its view and t
   expect(within(watches).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
     "org.test.gitops/page:apps#2 watch · revision 3 · 1 message · 300 B",
   ]);
-  expect(within(streams).queryByText("No open streams.")).toBeNull();
+  expect(within(streams).queryByText("No open streams")).toBeNull();
   expect(within(streams).queryByText("No watches.")).toBeNull();
   expect(fact("Streams and watches", "Opened since srelens started")).toBe("9");
   expect(fact("Streams and watches", "Received")).toBe("52 messages, 4.0 KiB");
@@ -287,7 +291,10 @@ it("shows recent errors with their local time, who wrote them and their text", a
   );
   await open();
   const errors = within(region("Recent errors")).getByRole("log", { name: "Recent errors" });
-  expect(Array.from(errors.children).map((row) => row.textContent)).toEqual([
+  // Each line is the kit's LogLine; read its fields in order, one space apart.
+  const fields = (row: Element) =>
+    Array.from(row.querySelectorAll("[data-slot]"), (field) => field.textContent).filter(Boolean).join(" ");
+  expect(Array.from(errors.children).map(fields)).toEqual([
     "14:03:05.042 app panic: index out of range",
     "14:03:05.043 srelens The request timed out after 30 s.",
   ]);
@@ -297,7 +304,7 @@ it("shows recent errors with their local time, who wrote them and their text", a
 it("says a sidecar has recorded no errors without pointing at pages", async () => {
   vi.mocked(inspectExtension).mockResolvedValue(sidecar());
   await open();
-  expect(region("Recent errors").textContent).toBe("Recent errorsNo errors recorded since srelens started.");
+  expect(region("Recent errors").textContent).toBe("Recent errorsNo errors recorded since srelens started");
 });
 
 it("says the app is inactive, and why, when it is off, blocked or quarantined", async () => {
@@ -333,13 +340,13 @@ it("says so when the manifest contributes nothing", async () => {
     ...plugin,
     manifest: { ...plugin.manifest, actions: undefined, contributions: { pages: [], detailTabs: [], detailLinks: [] } },
   });
-  expect(region("Active contributions").textContent).toContain("This app contributes nothing.");
+  expect(within(region("Active contributions")).getByText("This app contributes nothing")).toBeTruthy();
 });
 
 it("says it is loading before the first answer", async () => {
   vi.mocked(inspectExtension).mockImplementation(() => new Promise(() => {}));
   await open();
-  expect(screen.getByRole("status").textContent).toBe("Loading…");
+  expect(screen.getByRole("status", { name: "Inspecting this app" })).toBeTruthy();
   expect(screen.queryByText(/No process/)).toBeNull();
   // The manifest's own facts need no read.
   expect(fact("Identity", "ID")).toBe("org.test.gitops");
@@ -397,7 +404,7 @@ it("says a failed read failed, never that the app has no process or streams, and
   expect(alert.textContent).toContain("Could not inspect this app");
   expect(alert.textContent).toContain("bridge timed out");
   expect(screen.queryByText(/No process/)).toBeNull();
-  expect(screen.queryByText("No open streams.")).toBeNull();
+  expect(screen.queryByText("No open streams")).toBeNull();
   expect(screen.queryByText(/No errors recorded/)).toBeNull();
   await wait(10_000);
   expect(inspectExtension).toHaveBeenCalledTimes(1);
@@ -405,5 +412,24 @@ it("says a failed read failed, never that the app has no process or streams, and
   await wait(0);
   expect(inspectExtension).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole("alert")).toBeNull();
-  expect(screen.getByText("No open streams.")).toBeTruthy();
+  expect(screen.getByText("No open streams")).toBeTruthy();
+});
+
+it("draws its facts as the kit's key/value rows", async () => {
+  // #1001: one way to draw a key and its value.
+  vi.mocked(inspectExtension).mockResolvedValue(sidecar());
+  await open();
+  for (const [section, term] of [["Identity", "ID"], ["Process", "State"], ["Streams and watches", "Ended with their window"]]) {
+    expect(within(region(section)).getByText(term).closest("dl")?.classList.contains("kv"), term).toBe(true);
+  }
+});
+
+it("still tints a process state that needs attention, beside its word", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const css = readFileSync(join(__dirname, "extensions.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const tint = (state: string) => css.match(new RegExp(`\\.extension-inspector-part \\[data-state="${state}"\\][^{]*\\{([^}]*)\\}`))?.[1];
+  expect(tint("disabled")).toContain("--sev");
+  expect(tint("refused")).toContain("--sev");
+  expect(tint("restarting")).toContain("--warn");
 });

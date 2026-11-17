@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { ContextLabel } from "../lib/contextLabel";
 import { selectsNothing, type ClusterContext } from "@srelens/core";
 import { Alert, Button, Combobox, EmptyState, LoadingState, Screen, Spinner, type Column, type TableSort } from "@srelens/ui-kit";
@@ -151,6 +152,20 @@ export function NamespaceChoice({
  * and the rows both keep working — this only says the list behind the picker
  * may be incomplete.
  */
+/**
+ * What a list has selected and what can be done with it, in the list's filter
+ * row. That row owns the padding, so ticking a row does not move the table. One
+ * component for built-in lists and apps, so the two cannot drift apart.
+ */
+export function SelectionBar({ count, children }: { count: number; children: ReactNode }) {
+  return (
+    <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
+      <span data-testid="bulk-count" className="text-muted text-[0.8125rem]">{count.toLocaleString("en-US")} selected</span>
+      {children}
+    </div>
+  );
+}
+
 export function NamespaceErrorAlert({ error }: { error: string }) {
   if (!error) return null;
   // The sentence stays; what sits under it is the classification rather than

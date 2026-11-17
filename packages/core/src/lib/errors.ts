@@ -147,6 +147,18 @@ export function describeError(
   const raw = cleanErrorMessage(input);
   const lower = raw.toLowerCase();
 
+  // The host's refusal of an app's read (#1024) names the CRD, and a CRD's
+  // name is free text the substring tests below would misread:
+  // `certificates.cert-manager.io` as TLS, `dnsendpoints.externaldns.k8s.io` as DNS.
+  const crd = /No CustomResourceDefinition (\S+) serving (.+?) on this cluster/.exec(raw);
+  if (crd) {
+    return {
+      title: "Not on this cluster",
+      detail: `This cluster doesn't serve ${crd[1]} at ${crd[2]}, so the app has nothing to read here. Install the operator that provides it, or use a cluster that has it.`,
+      raw,
+    };
+  }
+
   if (isExecAuthError(raw)) {
     // The right guidance differs by platform: desktop can install and run the
     // plugin locally; the web container can't run exec plugins at all, so an

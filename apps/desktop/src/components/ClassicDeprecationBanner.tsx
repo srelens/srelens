@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { X } from "lucide-react";
 import { Button, IconButton } from "../ui";
 import { switchDesign } from "../design";
@@ -25,9 +25,6 @@ function wasDismissed(): boolean {
  */
 export function ClassicDeprecationBanner({ unsavedDrafts = 0 }: { unsavedDrafts?: number }) {
   const [dismissed, setDismissed] = useState(wasDismissed);
-  const [busy, setBusy] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   if (dismissed) return null;
 
@@ -40,6 +37,36 @@ export function ClassicDeprecationBanner({ unsavedDrafts = 0 }: { unsavedDrafts?
     }
     setDismissed(true);
   }
+
+  return (
+    <div className="fl-design-deprecated" role="status">
+      <p>The classic design is deprecated and will be removed in a future version.</p>
+      <SwitchToNewDesign unsavedDrafts={unsavedDrafts} />
+      <IconButton icon={X} label="Dismiss" onClick={dismiss} />
+    </div>
+  );
+}
+
+/**
+ * What classic draws where an app page or Settings → Apps used to be: apps
+ * are built for the new design only (#1001). Unlike the banner it cannot be
+ * dismissed, because there is nothing else to show in its place.
+ */
+export function ClassicAppsNotice({ unsavedDrafts = 0 }: { unsavedDrafts?: number }) {
+  return (
+    <div className="flex flex-col items-start gap-2 p-4 text-sm">
+      <h2 className="text-base font-semibold">Apps open in the new design</h2>
+      <p>The classic design no longer shows apps, their pages or their settings.</p>
+      <SwitchToNewDesign unsavedDrafts={unsavedDrafts} />
+    </div>
+  );
+}
+
+function SwitchToNewDesign({ unsavedDrafts }: { unsavedDrafts: number }) {
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const warningId = useId();
 
   async function switchToNext() {
     setConfirming(false);
@@ -61,19 +88,23 @@ export function ClassicDeprecationBanner({ unsavedDrafts = 0 }: { unsavedDrafts?
   const drafts = `${unsavedDrafts} unsaved editor draft${unsavedDrafts === 1 ? "" : "s"}`;
 
   return (
-    <div className="fl-design-deprecated" role="status">
-      <p>
-        {confirming
-          ? `Switching reloads the window and discards ${drafts}.`
-          : "The classic design is deprecated and will be removed in a future version."}
-        {error && <span role="alert"> Could not switch design. {error}</span>}
-      </p>
+    <>
+      {confirming && <p id={warningId}>Switching reloads the window and discards {drafts}.</p>}
+      {error && <p role="alert">Could not switch design. {error}</p>}
       {confirming ? (
         <>
           <Button type="button" size="sm" onClick={() => void switchToNext()}>
             Switch anyway
           </Button>
-          <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+          {/* The pressed button is gone; land on the safe choice, which reads the warning. */}
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            autoFocus
+            aria-describedby={warningId}
+            onClick={() => setConfirming(false)}
+          >
             Cancel
           </Button>
         </>
@@ -87,7 +118,6 @@ export function ClassicDeprecationBanner({ unsavedDrafts = 0 }: { unsavedDrafts?
           Switch to the new design
         </Button>
       )}
-      <IconButton icon={X} label="Dismiss" onClick={dismiss} />
-    </div>
+    </>
   );
 }

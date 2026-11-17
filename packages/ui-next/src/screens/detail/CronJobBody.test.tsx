@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { jobStatus, type JobSummary, type K8sObject } from "@srelens/core";
 
 // The "Recent Jobs" section reads live Jobs for the CronJob's namespace via
@@ -89,7 +90,7 @@ describe("CronJobDetailsBody", () => {
 
     it("shows a dash for last schedule on a CronJob that has never run", () => {
       render(<CronJobDetailsBody object={cronjob({})} context="ctx" />);
-      expect(screen.getByText("—")).toBeDefined();
+      expect(screen.getByText("Last schedule").closest("dl")?.textContent).toBe("Last schedule—");
     });
 
     it("shows history retention, defaulting to 3 succeeded / 1 failed", () => {
@@ -182,17 +183,17 @@ describe("CronJobDetailsBody", () => {
 
   describe("composition with GenericBody", () => {
     it("renders the wrapper's facts and Schedule together with no related-pods section", async () => {
-      const cj = cronjob({ schedule: "0 2 * * *" }, {}, { name: "nightly-backup", namespace: "default" });
+      const cj = cronjob({ schedule: "0 2 * * *" }, {}, { name: "nightly-backup", namespace: "default", creationTimestamp: "2026-08-20T00:00:00Z" });
       render(
         <GenericBody kind="CronJob" object={cj} context="ctx">
           <CronJobDetailsBody object={cj} context="ctx" />
         </GenericBody>,
       );
       await waitFor(() => expect(screen.getByText("No jobs yet")).toBeDefined());
-      // The namespace is a fact the SCREEN draws, off the one derivation
-      // both screens read; neither wrapper nor body states it again.
-      expect(detailFacts({ kind: "CronJob", object: cj }).map((f) => f.label)).toContain("Namespace");
-      expect(screen.queryByText("Namespace")).toBeNull();
+      // The lead facts are the SCREEN's to draw, off the one derivation both
+      // screens read; neither wrapper nor body states them again.
+      expect(detailFacts({ kind: "CronJob", object: cj }).map((f) => f.label)).toContain("Created");
+      expect(screen.queryByText("Created")).toBeNull();
       expect(screen.getByRole("heading", { name: "Schedule" })).toBeDefined();
       // CronJob has no `relatedPodSelector` case, so GenericBody fetches nothing.
       expect(screen.queryByRole("heading", { name: "Pods" })).toBeNull();
@@ -210,7 +211,7 @@ describe("CronJobDetailsBody", () => {
     it("keeps the block and says why, rather than vanishing", async () => {
       listJobs.mockResolvedValue({ error: "jobs is forbidden: User cannot list resource jobs" });
       render(<CronJobDetailsBody object={cronjob({ schedule: "0 2 * * *" })} context="ctx" />);
-      await waitFor(() => expect(screen.getByRole("heading", { name: "Recent Jobs" })).toBeDefined());
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Recent jobs" })).toBeDefined());
       expect(document.body.textContent).toContain("cannot list resource jobs");
     });
 
@@ -227,13 +228,23 @@ describe("CronJobDetailsBody", () => {
       // during `loading`, so a `waitFor` on it resolves on the first frame and
       // the case would pass against a section that then vanished.
       await waitFor(() => expect(document.body.textContent).toContain("listing jobs timed out"));
-      expect(screen.getByRole("heading", { name: "Recent Jobs" })).toBeDefined();
+      expect(screen.getByRole("heading", { name: "Recent jobs" })).toBeDefined();
       expect(screen.queryByText("No jobs yet")).toBeNull();
       // And the `.section + .section` adjacency the `return null` was
       // protecting still holds: Schedule, then Recent Jobs.
       const blocks = [...container.children];
       expect(blocks).toHaveLength(2);
       for (const block of blocks) expect(block.matches("section.section")).toBe(true);
+    });
+
+    it("lists them again on Retry", async () => {
+      listJobs.mockResolvedValue({ error: "listing jobs timed out" });
+      render(<CronJobDetailsBody object={cronjob({ schedule: "0 2 * * *" })} context="ctx" />);
+      const retry = await screen.findByRole("button", { name: "Retry" });
+      listJobs.mockResolvedValue({ jobs: [] });
+      await userEvent.click(retry);
+      await waitFor(() => expect(screen.getByText("No jobs yet")).toBeDefined());
+      expect(listJobs).toHaveBeenCalledTimes(2);
     });
   });
 });

@@ -25,7 +25,7 @@ export function ExtensionLogo({ icon, name, size = 20, className }: {
   </svg>;
 }
 export function extensionLogoIcon(name: string, icon?: string): IconComponent {
-  return function Logo(props) { return <ExtensionLogo {...props} size={Math.max(props.size ?? 16, 16)} icon={icon} name={name} />; };
+  return function Logo(props) { return <ExtensionLogo {...props} size={props.size ?? 16} icon={icon} name={name} />; };
 }
 const pageIcons: Record<string, IconComponent> = {
   overview: Icons.overview,
@@ -50,5 +50,6 @@ const pageIcons: Record<string, IconComponent> = {
 };
 export function extensionPageIcon(title: string): IconComponent {
   const key = title.toLowerCase().replace(/[^a-z]/g, "");
-  return Object.hasOwn(pageIcons, key) ? pageIcons[key] : Icons.config;
+  // A neutral app glyph: Config's own icon here read as a Config page.
+  return Object.hasOwn(pageIcons, key) ? pageIcons[key] : Icons.apps;
 }

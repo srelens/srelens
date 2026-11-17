@@ -127,6 +127,7 @@ pub mod auth_resolver;
 pub mod bgp;
 pub mod changed;
 pub mod client_cache;
+mod cluster_distribution;
 pub mod cluster;
 pub mod cluster_synth;
 pub mod configmaps;

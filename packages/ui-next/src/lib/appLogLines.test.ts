@@ -39,15 +39,38 @@ describe("parseAppLog", () => {
     expect(entry.source).toBe("srelens::cluster");
   });
 
-  it("keeps a line the logger did not write, whole", () => {
+  it("keeps a line the logger did not write, whole, indent and all", () => {
     const [entry] = parseAppLog("    at srelens::cluster::connect");
     expect(entry).toEqual({
       ts: "",
       source: "",
       level: "INFO",
-      message: "at srelens::cluster::connect",
+      message: "    at srelens::cluster::connect",
       raw: "    at srelens::cluster::connect",
     });
+  });
+
+  it("drops a line's trailing whitespace, a Windows line ending's \\r included", () => {
+    const parsed = parseAppLog(`${line("INFO", "one")}\r\n    at two\r\n`);
+    expect(parsed.map((e) => e.message)).toEqual(["one", "    at two"]);
+  });
+
+  it("drops only the one space after the level bracket", () => {
+    const [entry] = parseAppLog(line("ERROR", "  two spaces in"));
+    expect(entry.message).toBe("  two spaces in");
+  });
+
+  it("gives a line with no prefix the level of the entry it continues", () => {
+    const parsed = parseAppLog(
+      [
+        line("ERROR", "thread main panicked"),
+        "   0: srelens::cluster::connect",
+        // A timestamp with no level it knows opens an entry of its own.
+        "[2026-08-21][09:12:04] no level here",
+        "   1: srelens::main",
+      ].join("\n"),
+    );
+    expect(parsed.map((e) => e.level)).toEqual(["ERROR", "ERROR", "INFO", "INFO"]);
   });
 
   it("drops blank lines and keeps the rest in order", () => {
@@ -92,6 +115,16 @@ describe("filterLines", () => {
     ]);
     expect(filterLines(lines, "rbac", "all").lines.map((e) => e.message)).toEqual([
       "RBAC denied for Pods",
+    ]);
+  });
+
+  it("keeps an entry's continuation lines under the entry's level", () => {
+    const backtrace = parseAppLog(
+      [line("INFO", "connected"), line("ERROR", "panicked", "09:12:04"), "   0: frame"].join("\n"),
+    );
+    expect(filterLines(backtrace, "", "ERROR").lines.map((e) => e.message)).toEqual([
+      "panicked",
+      "   0: frame",
     ]);
   });
 

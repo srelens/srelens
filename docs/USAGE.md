@@ -188,7 +188,9 @@ The detail drawer has three tabs:
 CPU and memory sparklines with a 5m/10m/30m/1h range picker, when a metrics server
 is installed.
 
-**Secrets.** Secret values are masked; use **Reveal**/**Hide** per key. Secrets and
+**Secrets.** On a Secret's Overview each value is masked until you press its
+**Reveal**, which shows it decoded; **Hide** masks it again. Its annotations, its YAML tab and the
+editor show the Secret as the cluster has it, with nothing redacted. Secrets and
 ConfigMaps can be edited inline — only the keys you changed are sent, and the edit
 respects your RBAC permissions.
 
@@ -568,8 +570,9 @@ also notify, so changes between reading and subscribing are not missed. The
 32-subscription limit and existing resource restrictions still apply; pod log
 resources remain readable but cannot be subscribed to. Over stdio,
 notifications arrive on the server's stdout. Over HTTP, the client first opens
-the push channel — `GET /mcp` with `Accept: text/event-stream`, same bearer
-token — and notifications arrive as SSE events on that stream; subscribing
+the push channel — `GET /mcp` with `Accept: text/event-stream`, the same bearer
+token, and the `Mcp-Session-Id` returned by its successful `initialize` request
+— and notifications arrive as SSE events on that stream; subscribing
 without the stream connected is refused, since the notifications would have
 nowhere to go. Subscriptions live exactly as long as the stream that carries
 them: if the stream drops — client disconnect, a reconnect replacing it, or
@@ -578,6 +581,10 @@ stops being accepted immediately — every watch it carried is released, and the
 client is expected to reconnect (with the new token, after a rotation) and
 subscribe again. That is deliberate: rotation is meant to cut off existing
 clients, and a subscription that silently survived it would be a leak.
+HTTP clients include that server-minted session ID on every request after
+`initialize`; a missing ID is rejected, and an expired or ended ID returns 404
+so the client can initialize again. A client can end its session explicitly
+with `DELETE /mcp` carrying the same bearer token and session ID.
 
 You can also start a server directly:
 

@@ -346,11 +346,27 @@ async fn the_http_stream_tells_its_client_when_the_tools_change() {
 
     let tools = FakeTools::new(&[]);
     let app = crate::http::router(server(tools.clone()));
+    let initialize = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "127.0.0.1:8765")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize"}).to_string(),
+        ))
+        .unwrap();
+    let initialized = app.clone().oneshot(initialize).await.unwrap();
+    let session = initialized
+        .headers()
+        .get("mcp-session-id")
+        .expect("initialize returns a session id")
+        .clone();
     let get = Request::builder()
         .method("GET")
         .uri("/mcp")
         .header("host", "127.0.0.1:8765")
         .header("accept", "text/event-stream")
+        .header("mcp-session-id", session)
         .body(Body::empty())
         .unwrap();
     let stream = app.oneshot(get).await.unwrap();

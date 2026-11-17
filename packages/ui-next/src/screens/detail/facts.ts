@@ -23,11 +23,19 @@ import type { K8sObject, ReplicaSetSummary } from "@srelens/core";
  * width.
  */
 export interface DetailFact {
-  /** The term, as a reader reads it. Unique within one list. */
+  /**
+   * The term, as a reader reads it. Unique within one list, but for an
+   * operator's printer column, which the CRD may name like a generated fact.
+   */
   label: string;
   value: ReactNode;
   /** Set the value in the code face — for identifiers, not for prose. */
   mono?: boolean;
+  /**
+   * The figure that says this too, on a surface that draws one. Named here, not
+   * matched on `label`: a printer column called `Created` reads its own field.
+   */
+  tile?: "age" | "restarts";
 }
 
 /**

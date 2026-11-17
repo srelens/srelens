@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, Download, Eye, EyeOff, Radio, RefreshCw, Trash2 } from "lucide-react";
 import { Button, ConfirmDialog, TextInput } from "../ui";
 import { notify } from "@srelens/core";
@@ -10,14 +10,15 @@ import {
 import {
   startMcpHttp,
   stopMcpHttp,
-  mcpHttpStatus,
   installSrelensCli,
   srelensCliStatus,
   type CliStatus,
+  type McpHttpSnapshot,
 } from "@srelens/core";
 import { getMcpToken, revokeMcpToken, rotateMcpToken } from "@srelens/core";
 import { mcpClientConfig, MCP_TOOLS, type McpTool, type McpTransport } from "@srelens/core";
 import { McpAuditList } from "./McpAuditList";
+import { McpClientsList } from "./McpClientsList";
 import { McpPromptIssues } from "./McpPromptIssues";
 
 /** Masked by default: only the last 4 characters are shown until revealed. */
@@ -41,7 +42,12 @@ async function copy(text: string) {
  */
 export function McpSettingsSection() {
   const [settings, setSettings] = useState<McpSettings>(loadMcpSettings);
-  const [runningUrl, setRunningUrl] = useState<string | null>(null);
+  // undefined = not read yet, null = definitely stopped. The atomic snapshot
+  // below owns this distinction; an unresolved or failed read must not make a
+  // stopped claim.
+  const [runningUrl, setRunningUrl] = useState<string | null | undefined>(undefined);
+  const snapshotActionGenerationRef = useRef(0);
+  const [snapshotActionGeneration, setSnapshotActionGeneration] = useState(0);
   const [serverError, setServerError] = useState("");
   const [cli, setCli] = useState<CliStatus | null>(null);
   const [cliLoading, setCliLoading] = useState(true);
@@ -92,9 +98,12 @@ export function McpSettingsSection() {
   }
 
   useEffect(() => {
-    void mcpHttpStatus().then(setRunningUrl).catch(() => {});
     void refreshCli();
     void refreshToken();
+  }, []);
+
+  const establishHttpSnapshot = useCallback((snapshot: McpHttpSnapshot) => {
+    setRunningUrl(snapshot.url);
   }, []);
 
   function persist(next: McpSettings) {
@@ -102,19 +111,38 @@ export function McpSettingsSection() {
     saveMcpSettings(next);
   }
 
+  function invalidateSnapshotReads() {
+    const next = snapshotActionGenerationRef.current + 1;
+    snapshotActionGenerationRef.current = next;
+    setSnapshotActionGeneration(next);
+  }
+
+  /**
+   * Fence both sides of a server/session mutation. The first bump rejects
+   * reads already in flight; the second rejects any interval/manual read that
+   * began while the backend action itself was still running.
+   */
+  async function runSnapshotAction<T>(action: () => Promise<T>): Promise<T> {
+    invalidateSnapshotReads();
+    try {
+      return await action();
+    } finally {
+      invalidateSnapshotReads();
+    }
+  }
 
   async function toggleServer(enabled: boolean) {
     setServerError("");
     persist({ ...settings, enabled });
     try {
       if (enabled) {
-        setRunningUrl(await startMcpHttp(settings.port));
+        setRunningUrl(await runSnapshotAction(() => startMcpHttp(settings.port)));
         // Starting the server for the first time is also the first place a
         // token can get minted (`mcp_http_start` mints one on first use), so
         // the previously-fetched `null` may now be stale.
         void refreshToken();
       } else {
-        await stopMcpHttp();
+        await runSnapshotAction(() => stopMcpHttp());
         setRunningUrl(null);
       }
     } catch (e) {
@@ -131,7 +159,7 @@ export function McpSettingsSection() {
     if (settings.enabled) {
       setServerError("");
       try {
-        setRunningUrl(await startMcpHttp(port));
+        setRunningUrl(await runSnapshotAction(() => startMcpHttp(port)));
       } catch (e) {
         setServerError(String(e));
       }
@@ -156,7 +184,7 @@ export function McpSettingsSection() {
     setTokenBusy(true);
     setTokenError("");
     try {
-      const next = await rotateMcpToken();
+      const next = await runSnapshotAction(() => rotateMcpToken());
       setToken(next);
       setTokenRevealed(false);
       notify.success("Token rotated — the server restarted and connected clients need the new value.");
@@ -172,15 +200,14 @@ export function McpSettingsSection() {
     setTokenBusy(true);
     setTokenError("");
     try {
-      await revokeMcpToken();
+      await runSnapshotAction(() => revokeMcpToken());
       await refreshToken();
       setTokenRevealed(false);
       notify.success("Token revoked. The MCP HTTP server has stopped.");
       // The server stops as a side effect of revocation; reflect that instead
       // of leaving the toggle showing a server that's no longer listening.
-      const status = await mcpHttpStatus().catch(() => null);
-      setRunningUrl(status);
-      if (!status) persist({ ...settings, enabled: false });
+      setRunningUrl(null);
+      persist({ ...settings, enabled: false });
       setTokenConfirm(null);
     } catch (e) {
       setTokenError(String(e));
@@ -225,7 +252,7 @@ export function McpSettingsSection() {
             />
           </label>
         </div>
-        {settings.enabled && runningUrl && (
+        {runningUrl && (
           <div className="flex items-center gap-2 text-sm">
             <Radio className="size-4 text-green-600 dark:text-green-500" aria-hidden />
             <span>Listening at</span>
@@ -409,6 +436,17 @@ export function McpSettingsSection() {
             Copy
           </Button>
         </div>
+      </section>
+
+      <section className="flex flex-col gap-2">
+        <h4 className="text-sm font-medium">HTTP client sessions</h4>
+        <McpClientsList
+          running={runningUrl === undefined ? null : runningUrl !== null}
+          serverUrl={runningUrl}
+          actionGeneration={snapshotActionGeneration}
+          actionGenerationRef={snapshotActionGenerationRef}
+          onServerSnapshot={establishHttpSnapshot}
+        />
       </section>
     </div>
   );

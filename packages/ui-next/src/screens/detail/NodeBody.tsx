@@ -9,8 +9,9 @@ import {
   taintTimeAddedText,
   type K8sObject,
 } from "@srelens/core";
-import { KV, StatusPill } from "@srelens/ui-kit";
+import { EmptyState, KV, StatusPill } from "@srelens/ui-kit";
 import { Section } from "./Section";
+import { NodePodsSection } from "./sections";
 
 /**
  * A Node's runtime identity — classic's "Info" section, ported fact-for-fact:
@@ -49,7 +50,7 @@ function InfoSection({ object }: { object: K8sObject }) {
           />
         }
       />
-      <KV k="Internal IP" v={internalIps.length > 0 ? internalIps.join(", ") : "—"} mono />
+      <KV k="Internal IP" v={internalIps.join(", ")} mono />
       {externalIps.length > 0 && <KV k="External IP" v={externalIps.join(", ")} mono />}
       {hostnames.length > 0 && <KV k="Hostname" v={hostnames.join(", ")} mono />}
       <KV k="Kubelet" v={str(info.kubeletVersion)} />
@@ -95,46 +96,49 @@ function CapacitySection({ object }: { object: K8sObject }) {
  * `timeAdded` is set by Kubernetes only for `NoExecute` taints; the rest say
  * so in words, which `taintTimeAddedText` explains is not merely a wording
  * choice. (#426)
+ *
+ * Rows and not `KV`s: a taint is data, and the key column clipped a long one at
+ * a third of the pane. (#1001)
  */
 function TaintsSection({ object }: { object: K8sObject }) {
   const taints = orderTaints(parseTaints(object.spec));
   return (
     <Section title="Taints">
       {taints.length === 0 ? (
-        // "Taints" as the key under a section already headed Taints is the
-        // word twice; the count is the fact, and it is the list's zero-state.
-        <KV k="Count" v="0" />
+        <EmptyState compact title="No taints" />
       ) : (
-        taints.map((taint) => (
-          <KV
-            key={`${taint.key}:${taint.effect}`}
-            k={formatTaint(taint)}
-            v={taintTimeAddedText(taint)}
-            mono
-          />
-        ))
+        <ul className="flex flex-col gap-1 text-[0.75rem]">
+          {taints.map((taint) => (
+            <li key={`${taint.key}:${taint.effect}`} className="flex flex-wrap items-baseline gap-x-3">
+              <span className="font-mono [overflow-wrap:anywhere]">{formatTaint(taint)}</span>
+              <span className="text-muted">{taintTimeAddedText(taint)}</span>
+            </li>
+          ))}
+        </ul>
       )}
     </Section>
   );
 }
 
 /**
- * A Node's Details pane: Info and Capacity, in classic's own order
- * (`NodeBody`). `relatedPodSelector` has no case for "Node", so `GenericBody`
+ * A Node's Overview pane: Info and Capacity, in classic's own order
+ * (`NodeBody`), its Taints, then the pods scheduled on it, which only a cluster
+ * can answer. `relatedPodSelector` has no case for "Node", so `GenericBody`
  * fetches no related pods for one; its unheaded identity block and its
  * Conditions, Labels and Annotations blocks still wrap this body, which is
  * why none of them is repeated here.
  *
- * Both blocks are returned as siblings, never wrapped: `.section + .section`
- * is what draws the hairline between two blocks, so an element around either
- * of them would take the rule out on both sides of it.
+ * Every block is returned as a sibling, never wrapped: `.section + .section`
+ * is what draws the hairline between two blocks, so an element around any of
+ * them would take the rule out on both sides of it.
  */
-export function NodeDetailsBody({ object }: { object: K8sObject }) {
+export function NodeDetailsBody({ object, context }: { object: K8sObject; context?: string }) {
   return (
     <>
       <InfoSection object={object} />
       <CapacitySection object={object} />
       <TaintsSection object={object} />
+      {context && <NodePodsSection context={context} node={str(object.metadata?.name)} />}
     </>
   );
 }

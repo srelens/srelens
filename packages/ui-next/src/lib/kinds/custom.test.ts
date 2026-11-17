@@ -86,24 +86,58 @@ describe("custom columns", () => {
 });
 
 describe("customDescriptor", () => {
-  // Whole-branch review (FIX 3): the backend resolves kind→GVR through a
-  // closed match with no CRD path, so Delete on a custom resource always
-  // fails — offering it is worse than not offering it.
-  it("withholds Delete, since the backend has no kind→GVR path for a CRD's kind", () => {
-    expect(customDescriptor(crd()).actions.delete).toBe(false);
+  it("names the kind by its CRD, not by the slug that routed to it", () => {
+    expect(customDescriptor(crd()).k8sKind).toBe("Widget");
   });
 });
 
-describe("customDescriptor", () => {
-  // `customDescriptorFor(slug, crds)` used to live here and wrap this in a
-  // `crds.find`. It was deleted rather than kept as a seam once `Resources`
-  // stopped calling it: that screen needs the `CrdRef` itself, not only the
-  // descriptor built from it, because the "About this kind" rail reads the
-  // kind, the scope and the versions straight off it. Two finds over the same
-  // list — one for the columns and one for the rail — is two chances for the
-  // table and the rail to describe different definitions, and an exported
-  // function whose only caller is its own test is a seam nobody is holding.
-  it("names the kind by its CRD, not by the slug that routed to it", () => {
-    expect(customDescriptor(crd()).k8sKind).toBe("Widget");
+describe("Gateway API kinds (#1089)", () => {
+  const G = "gateway.networking.k8s.io";
+  const route = crd({
+    name: `httproutes.${G}`, group: G, plural: "httproutes", kind: "HTTPRoute",
+    printerColumns: [{ name: "Hostnames", type: "string", jsonPath: ".spec.hostnames" }],
+  });
+  const gateway = crd({
+    name: `gateways.${G}`, group: G, plural: "gateways", kind: "Gateway",
+    printerColumns: [
+      { name: "Class", type: "string", jsonPath: ".spec.gatewayClassName" },
+      { name: "Programmed", type: "string", jsonPath: `.status.conditions[?(@.type=="Programmed")].status` },
+    ],
+  });
+  const row = (columns: string[]) => ({ name: "r", namespace: "d", age: "1d", columns });
+
+  it("asks for whether a route was accepted, which its CRD does not print", () => {
+    const d = customDescriptor(route);
+    expect(d.columns.map((c) => c.header)).toEqual(["Name", "Namespace", "Hostnames", "Accepted", "Age"]);
+  });
+
+  it("flags a route its gateway refused", () => {
+    const d = customDescriptor(route);
+    expect(d.flagged!(row(["a.example", "False"]))).toBe(true);
+    expect(d.flagged!(row(["a.example", "True"]))).toBe(false);
+  });
+
+  it("does not flag a route no controller has answered yet", () => {
+    const d = customDescriptor(route);
+    expect(d.flagged!(row(["a.example", ""]))).toBe(false);
+    expect(d.flagged!({ name: "r", namespace: "d", age: "1d" })).toBe(false);
+  });
+
+  it("flags a gateway that is not programmed, by the column its CRD prints", () => {
+    const d = customDescriptor(gateway);
+    expect(d.columns.map((c) => c.header)).toEqual(["Name", "Namespace", "Class", "Programmed", "Age"]);
+    expect(d.flagged!(row(["nginx", "False"]))).toBe(true);
+    expect(d.flagged!(row(["nginx", "True"]))).toBe(false);
+  });
+
+  it("has nothing to flag on a kind with no verdict of its own", () => {
+    const grant = crd({ name: `referencegrants.${G}`, group: G, plural: "referencegrants", kind: "ReferenceGrant", printerColumns: [] });
+    expect(customDescriptor(grant).flagged).toBeUndefined();
+  });
+
+  it("leaves every other custom resource exactly as it was", () => {
+    const d = customDescriptor(crd({ kind: "HTTPRoute" }));
+    expect(d.columns.map((c) => c.header)).toEqual(["Name", "Namespace", "Phase", "Since", "Age"]);
+    expect(d.flagged).toBeUndefined();
   });
 });

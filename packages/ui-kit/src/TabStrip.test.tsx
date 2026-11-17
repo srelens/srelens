@@ -80,6 +80,51 @@ describe("TabStrip", () => {
     expect(tab("Pods").hasAttribute("title")).toBe(false);
   });
 
+  it("shows a cluster colour beside its written identity without changing the accessible name", () => {
+    setup({
+      tabs: [
+        { id: "prod", title: "Pods", sub: "prod-eu", clusterColor: "var(--mark-teal)" },
+        // A colour without a written cluster identity would make colour the
+        // only signal, so it deliberately earns no marker.
+        { id: "app", title: "Settings", clusterColor: "var(--mark-pink)" },
+      ],
+      activeId: "prod",
+    });
+
+    const prod = screen.getByRole("tab", { name: "Pods · prod-eu" });
+    const marker = prod.querySelector<HTMLElement>('[data-slot="tab-cluster-color"]');
+    expect(marker?.style.background).toBe("var(--mark-teal)");
+    expect(marker?.getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Settings" }).querySelector('[data-slot="tab-cluster-color"]')).toBeNull();
+  });
+
+  it("clips the marker only after the written cluster identity in a narrow tab", () => {
+    setup({
+      tabs: [{ id: "prod", title: "A deliberately long resource title", sub: "production", clusterColor: "var(--mark-teal)" }],
+      activeId: "prod",
+    });
+
+    const prod = screen.getByRole("tab", { name: "A deliberately long resource title · production" });
+    const identity = prod.querySelector<HTMLElement>('[data-slot="tab-cluster-identity"]');
+    const label = identity?.querySelector(".tab-sub");
+    const marker = identity?.querySelector('[data-slot="tab-cluster-color"]');
+    expect(identity).not.toBeNull();
+    // The strip clips on the inline end. Keeping the word first means the dot
+    // cannot remain after the available cluster space has lost all text.
+    expect(identity?.firstElementChild).toBe(label);
+    expect(identity?.lastElementChild).toBe(marker);
+    expect(label?.className).not.toContain("truncate");
+  });
+
+  it("keeps the real context in the accessible name when the visible name is customised", () => {
+    setup({
+      tabs: [{ id: "prod", title: "Pods", sub: "Production", context: "prod", clusterColor: "var(--mark-teal)" }],
+      activeId: "prod",
+    });
+
+    expect(screen.getByRole("tab", { name: "Pods · Production, context prod" })).toBeDefined();
+  });
+
   it("omits the sub element on a tab without one", () => {
     setup();
     expect(tab("nginx-7d4b").querySelector(".tab-sub")).toBeNull();
@@ -265,6 +310,51 @@ describe("TabStrip closing", () => {
     expect(onClose).toHaveBeenCalledWith("logs");
   });
 
+  it("gives same-title close buttons their written context identity", () => {
+    setup({
+      tabs: [
+        { id: "prod", title: "worker-1", sub: "prod" },
+        { id: "stage", title: "worker-1", sub: "stage" },
+      ],
+      activeId: "prod",
+      onClose: () => {},
+    });
+
+    expect(screen.getByRole("button", { name: "Close worker-1 · prod" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Close worker-1 · stage" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Close worker-1" })).toBeNull();
+  });
+
+  it("adds resource detail when same-title close buttons share one context", () => {
+    setup({
+      tabs: [
+        { id: "payments", title: "worker-1", sub: "prod", detail: "Pod · payments" },
+        { id: "queues", title: "worker-1", sub: "prod", detail: "Pod · queues" },
+      ],
+      activeId: "payments",
+      onClose: () => {},
+    });
+
+    expect(screen.getByRole("tab", { name: "worker-1 · prod · Pod · payments" })).toBeDefined();
+    expect(screen.getByRole("tab", { name: "worker-1 · prod · Pod · queues" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Close worker-1 · prod · Pod · payments" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Close worker-1 · prod · Pod · queues" })).toBeDefined();
+  });
+
+  it("numbers same-title controls when all available identity is identical", () => {
+    setup({
+      tabs: [
+        { id: "first", title: "worker-1", sub: "prod", detail: "Pod · payments" },
+        { id: "second", title: "worker-1", sub: "prod", detail: "Pod · payments" },
+      ],
+      activeId: "first",
+      onClose: () => {},
+    });
+
+    expect(screen.getByRole("button", { name: "Close worker-1 · prod · Pod · payments, tab 1 of 2" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Close worker-1 · prod · Pod · payments, tab 2 of 2" })).toBeDefined();
+  });
+
   it("does not select the tab it closes", async () => {
     // The close button sits inside the tab, so its click reaches the tab's own
     // handler unless stopped — and closing the tab you were not on should not
@@ -385,6 +475,20 @@ describe("TabStrip controls", () => {
     await screen.findByRole("dialog");
     expect(screen.getByRole("button", { name: /^checkout-api/ }).getAttribute("aria-current")).toBe("true");
   });
+
+  it("bounds a long visible cluster identity in the overflow list while keeping its full accessible name", async () => {
+    const context = "Production (/home/operator/.kube/very-long-config#prod-eu)";
+    setup({
+      tabs: [{ id: "prod", title: "Pods", sub: context, context: "prod-eu", clusterColor: "var(--mark-teal)" }],
+      activeId: "prod",
+    });
+    await userEvent.click(screen.getByRole("button", { name: "All open tabs" }));
+    const row = await screen.findByRole("button", { name: `Pods · ${context}, context prod-eu` });
+    const identity = row.querySelector<HTMLElement>('[data-slot="tab-overflow-context"]');
+    expect(identity?.textContent).toBe(context);
+    expect(identity?.querySelector(".tab-overflow-label")).not.toBeNull();
+    expect(row.querySelector<HTMLElement>('[data-slot="tab-cluster-color"]')?.style.background).toBe("var(--mark-teal)");
+  });
 });
 
 /** Per-tab actions, supplied by the caller rather than known here. */
@@ -410,6 +514,34 @@ describe("TabStrip context menu", () => {
     setup({ menuFor: () => [{ label: "Close", onPick: () => {} }] });
     expect(tab("Pods").getAttribute("role")).toBe("tab");
     expect(tab("Pods").getAttribute("tabindex")).toBe("0");
+  });
+
+  it("names same-title context menus by their written context identity", async () => {
+    setup({
+      tabs: [
+        { id: "prod", title: "worker-1", sub: "prod" },
+        { id: "stage", title: "worker-1", sub: "stage" },
+      ],
+      activeId: "prod",
+      menuFor: () => [{ label: "Close", onPick: () => {} }],
+    });
+
+    fireEvent.contextMenu(screen.getByRole("tab", { name: "worker-1 · stage" }));
+    expect(await screen.findByRole("menu", { name: "worker-1 · stage actions" })).toBeDefined();
+  });
+
+  it("adds resource detail when same-title context menus share one context", async () => {
+    setup({
+      tabs: [
+        { id: "payments", title: "worker-1", sub: "prod", detail: "Pod · payments" },
+        { id: "queues", title: "worker-1", sub: "prod", detail: "Pod · queues" },
+      ],
+      activeId: "payments",
+      menuFor: () => [{ label: "Close", onPick: () => {} }],
+    });
+
+    fireEvent.contextMenu(screen.getByRole("tab", { name: "worker-1 · prod · Pod · queues" }));
+    expect(await screen.findByRole("menu", { name: "worker-1 · prod · Pod · queues actions" })).toBeDefined();
   });
 });
 
@@ -555,24 +687,46 @@ describe("a narrow tab", () => {
     const title = tab("Pods").querySelector(".tab-title");
     expect(title?.textContent).toBe("Pods");
     expect(tab("Pods").querySelector(".tab-sub")?.textContent).toBe("prod-eu");
-    // Still truncating, both of them: neither may push the tab past its width.
+    // Both still clip: neither may push the tab past its width. The cluster
+    // deliberately does not use the ellipsis utility, because an ellipsis can
+    // consume its 1ch floor while leaving the following colour dot visible.
     expect(title?.className).toContain("truncate");
-    expect(tab("Pods").querySelector(".tab-sub")?.className).toContain("truncate");
+    expect(tab("Pods").querySelector(".tab-sub")?.className).not.toContain("truncate");
   });
 
-  it("gives the cluster only what the title leaves, so the cluster is what goes first", () => {
+  it("gives the cluster only what the title leaves, in one clipping unit", () => {
     // The title sizes to its own text and shrinks only when it alone will not
     // fit. The cluster starts from nothing and takes the leftover — the
     // opposite of two items shrinking in proportion, where the longer cluster
     // name kept the row and the title lost it.
     expect(rule(".tab-title")).toMatch(/flex:\s*0 1 auto/);
     expect(rule(".tab-title")).toMatch(/min-width:\s*0/);
-    expect(rule(".tab-sub")).toMatch(/flex:\s*1 1 0/);
-    expect(rule(".tab-sub")).toMatch(/min-width:\s*0/);
+    expect(rule(".tab-cluster-identity")).toMatch(/flex:\s*1 1 0/);
+    expect(rule(".tab-cluster-identity")).toMatch(/min-width:\s*0/);
+    expect(rule(".tab-cluster-identity")).toMatch(/overflow:\s*hidden/);
+    expect(rule(".tab-sub")).toMatch(/flex:\s*0 1 auto/);
+    expect(rule(".tab-sub")).toMatch(/min-width:\s*1ch/);
+    expect(rule(".tab-sub")).toMatch(/overflow:\s*hidden/);
+    expect(rule(".tab-sub")).toMatch(/text-overflow:\s*clip/);
+    expect(rule(".tab-sub")).toMatch(/white-space:\s*nowrap/);
   });
 
   it("keeps the 108px floor that makes a full strip overflow and scroll", () => {
     expect(rule(".tab")).toMatch(/min-width:\s*108px/);
+  });
+
+  it("keeps the colour marker fixed inside the clipping identity unit", () => {
+    expect(rule(".tab-cluster-color")).toMatch(/width:\s*6px/);
+    expect(rule(".tab-cluster-color")).toMatch(/height:\s*6px/);
+    expect(rule(".tab-cluster-color")).toMatch(/flex-shrink:\s*0/);
+  });
+
+  it("bounds and truncates the overflow identity instead of sacrificing the title", () => {
+    expect(rule(".tab-overflow-context")).toMatch(/max-width:\s*50%/);
+    expect(rule(".tab-overflow-context")).toMatch(/min-width:\s*0/);
+    expect(rule(".tab-overflow-label")).toMatch(/overflow:\s*hidden/);
+    expect(rule(".tab-overflow-label")).toMatch(/text-overflow:\s*ellipsis/);
+    expect(rule(".tab-overflow-label")).toMatch(/white-space:\s*nowrap/);
   });
 });
 

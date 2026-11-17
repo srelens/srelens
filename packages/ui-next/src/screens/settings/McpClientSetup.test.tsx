@@ -140,13 +140,13 @@ it("shows a failed prerequisite while the sibling read is still loading", async 
   await user.selectOptions(screen.getByLabelText("Transport"), "http");
   expect(screen.getByText(/status denied/)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Retry server status" })).toBeTruthy();
-  expect(screen.getByRole("status").textContent).toMatch(/Checking/);
+  expect(screen.getByRole("status", { name: "Checking the remaining MCP server details" })).toBeTruthy();
 
   view.rerender(<McpClientSetup url={null} token={null} tokenError={new Error("token denied")} statusLoading
     onRetryToken={retryToken} />);
   expect(screen.getByText(/token denied/)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Retry bearer token" })).toBeTruthy();
-  expect(screen.getByRole("status").textContent).toMatch(/Checking/);
+  expect(screen.getByRole("status", { name: "Checking the remaining MCP server details" })).toBeTruthy();
 });
 it("reveals the usable HTTP configuration when clipboard copying fails", async () => {
   vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("clipboard denied"));

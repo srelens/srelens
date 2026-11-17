@@ -420,12 +420,6 @@ function openDetailTab(route: string) {
 const listCount = () =>
   document.querySelector('[data-slot="list-count"] [aria-hidden="true"]')?.textContent ?? null;
 
-/** One row of the "About this kind" rail, by its key. */
-const railRow = (rail: HTMLElement, key: string) =>
-  Array.from(rail.querySelectorAll("dl.kv"))
-    .find((kv) => kv.querySelector(".kv-k")?.textContent === key)
-    ?.querySelector(".kv-v")?.textContent;
-
 /** Open the column picker and hand back its panel. */
 async function openColumns() {
   await userEvent.click(screen.getByRole("button", { name: /Columns/ }));
@@ -684,7 +678,9 @@ describe("Resources", () => {
     expect(screen.queryByText(/Showing the first/i)).toBeNull();
   });
 
-  it("tells the reader what a custom kind is, in a rail beside its list", async () => {
+  it("gives a custom kind's list the whole width, with no rail beside it", async () => {
+    // The "About this kind" rail took a column down the side of the list to
+    // repeat what the title (`widgets.example.com`) and the table already say.
     listCrds.mockResolvedValue({
       crds: [{ ...WIDGETS, versions: ["v1", "v1beta1"], storageVersion: "v1" }],
     });
@@ -695,15 +691,34 @@ describe("Resources", () => {
     open("/k/widgets.example.com");
 
     await waitFor(() => expect(rowNames()).toEqual(["left"]));
-    const rail = screen.getByRole("complementary", { name: "About this kind" });
-    expect(railRow(rail, "Kind")).toBe("Widget");
-    expect(railRow(rail, "Scope")).toBe("Namespaced");
-    expect(railRow(rail, "Served versions")).toBe("v1, v1beta1");
-    expect(railRow(rail, "Storage version")).toBe("v1");
-    // The count is the header's, not the rail's (#402): one figure, one place.
-    expect(rail.textContent).not.toContain("Objects");
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(document.querySelector("[data-slot='rail-main']")).toBeNull();
+    expect(document.body.textContent).not.toContain("custom resource");
     expect(listCount()).toBe("1 item");
-    expect(within(rail).getByText(/kubectl --context prod-eu get widgets.example.com -A -o wide/)).toBeDefined();
+  });
+
+  it("deletes the ticked custom resources from their list, telling the backend their CRD", async () => {
+    listCrds.mockResolvedValue({ crds: [WIDGETS] });
+    listCustomResource.mockResolvedValue({
+      items: [
+        { name: "left", namespace: "default", age: "1d", columns: ["Ready"] },
+        { name: "right", namespace: "default", age: "1d", columns: ["Ready"] },
+      ],
+    });
+
+    open("/k/widgets.example.com");
+    await waitFor(() => expect(rowNames()).toEqual(["left", "right"]));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select default/left" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select default/right" }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Delete 2 widgets.example.com?" }));
+    await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
+
+    const crd = { group: "example.com", version: "v1", plural: "widgets" };
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(2));
+    expect(deleteResource).toHaveBeenCalledWith("prod-eu", "Widget", "default", "left", undefined, crd);
+    expect(deleteResource).toHaveBeenCalledWith("prod-eu", "Widget", "default", "right", undefined, crd);
   });
 
   it("counts no objects until the list has answered, rather than saying nought", async () => {
@@ -714,33 +729,14 @@ describe("Resources", () => {
 
     open("/k/widgets.example.com");
 
-    const rail = await screen.findByRole("complementary", { name: "About this kind" });
-    expect(railRow(rail, "Kind")).toBe("Widget");
+    await waitFor(() => expect(listCustomResource).toHaveBeenCalled());
     expect(listCount()).toBeNull();
   });
 
-  it("heads the custom list's own pane with the kind, not the slug", async () => {
-    listCrds.mockResolvedValue({ crds: [WIDGETS] });
-    listCustomResource.mockResolvedValue({
-      items: [{ name: "left", namespace: "default", age: "1d", columns: ["Ready"] }],
-    });
-
-    open("/k/widgets.example.com");
-
-    await waitFor(() => expect(rowNames()).toEqual(["left"]));
-    expect(document.querySelector("[data-slot='rail-main'] .pane-head")?.textContent).toBe(
-      "Widget \u00b7 custom resource",
-    );
-  });
-
-  it("gives a built-in kind no rail — there is no CRD behind one", async () => {
+  it("never pays for CRD discovery on a built-in kind's list", async () => {
     open("/k/pods");
 
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
-    expect(screen.queryByRole("complementary", { name: "About this kind" })).toBeNull();
-    expect(document.body.textContent).not.toContain("custom resource");
-    // Discovery is what a rail would have to be built from, and a built-in
-    // kind must never pay for it.
     expect(listCrds).not.toHaveBeenCalled();
   });
 
@@ -1607,7 +1603,7 @@ describe("Resources", () => {
     await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
 
     await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(1));
-    expect(deleteResource).toHaveBeenCalledWith("prod-eu", "Pod", "billing", "web-0");
+    expect(deleteResource).toHaveBeenCalledWith("prod-eu", "Pod", "billing", "web-0", undefined, undefined);
   });
 });
 
@@ -2019,18 +2015,16 @@ describe("the detail pane's two hosts", () => {
     expect(screen.queryByRole("button", { name: "Open tab" })).toBeNull();
   });
 
-  it("offers the same data panes in both hosts, under the names each screen gives them", async () => {
-    // Not the same STRIP any more: the design's full tab heads its first pane
-    // Overview and folds the containers table into it, where the peek calls it
-    // Details and gives Containers a tab of its own. What must still hold is
-    // that neither host offers a pane the other cannot reach — the panes are
-    // the kind's, and only their labels and their grouping are the screen's.
+  it("offers the same data panes in both hosts, under one set of names", async () => {
+    // Not the same STRIP: the design's full tab folds the containers table into
+    // Overview, where the peek gives Containers a tab of its own. What must
+    // still hold is that neither host offers a pane the other cannot reach.
     const list = open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
     fireEvent.click(row("web-1"));
     await paneReadyFor("web-1");
     const peekTabs = paneTabs();
-    expect(peekTabs).toContain("Details");
+    expect(peekTabs).toContain("Overview");
     expect(peekTabs).toContain("YAML");
     expect(peekTabs).toContain("Events");
     list.unmount();
@@ -2039,13 +2033,8 @@ describe("the detail pane's two hosts", () => {
     await paneReadyFor("web-1");
 
     const tabTabs = paneTabs();
-    expect(tabTabs).toContain("Overview");
-    expect(tabTabs).not.toContain("Details");
-    // Every pane the peek offers beyond its first is offered here too, by the
-    // same name.
-    for (const label of peekTabs.filter((t) => t !== "Details" && t !== "Containers")) {
-      expect(tabTabs).toContain(label);
-    }
+    // Every pane the peek offers is offered here too, by the same name.
+    expect(tabTabs).toEqual(peekTabs.filter((t) => t !== "Containers"));
   });
 });
 

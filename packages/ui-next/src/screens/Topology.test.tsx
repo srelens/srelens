@@ -141,6 +141,18 @@ beforeEach(() => {
 });
 
 describe("Topology", () => {
+  it("says which Gateway API kinds it could not read, and reads again on Retry (#1089)", async () => {
+    core.topologyGraph.mockResolvedValue({
+      graph: { ...graph(), unread: [{ namespace: "checkout", kind: "HTTPRoute", reason: "httproutes is forbidden" }] },
+    });
+    render(<Topology />);
+    const alert = await screen.findByText(/Could not read HTTPRoute in checkout/);
+    expect(alert).toBeDefined();
+    const calls = core.topologyGraph.mock.calls.length;
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(core.topologyGraph.mock.calls.length).toBeGreaterThan(calls));
+  });
+
   it("draws every node the namespace returned", async () => {
     render(<Topology />);
     // Each node is a control, because selecting one is an action and the graph
@@ -695,6 +707,18 @@ describe("Topology", () => {
     // The Service and the Deployment behind it, not just the Service.
     expect(panel.textContent).toContain("2 nodes");
     expect(panel.textContent).toContain("0 nodes");
+  });
+
+  it("lays the node's facts out as the kit's key/value rows", async () => {
+    // #1001: one way to draw a key and its value.
+    render(<Topology />);
+    await userEvent.click(await screen.findByRole("button", { name: "Ingress web" }));
+
+    const panel = within(screen.getByRole("complementary", { name: "Selected node" }));
+    const facts = Object.fromEntries(
+      panel.getAllByRole("term").map((term) => [term.textContent, term.closest("dl.kv")?.querySelector("dd")?.textContent]),
+    );
+    expect(facts).toMatchObject({ Depth: "Entry point", Downstream: "2 nodes", Upstream: "0 nodes" });
   });
 
   it("lays a call chain out left to right, by hops rather than by kind", async () => {

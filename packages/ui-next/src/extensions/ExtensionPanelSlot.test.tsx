@@ -20,9 +20,17 @@ it("renders a declared cert-manager panel with missing fields and native conditi
   }} onRetry={() => {}} />);
   expect(screen.getByRole("heading", { name: "Certificate" })).toBeTruthy();
   expect(screen.getByRole("heading", { name: "Certificate" }).closest("section")?.classList.contains("section")).toBe(true);
+  expect(document.querySelector(".extension-detail-heading")).toBeNull();
   expect(screen.getByText("letsencrypt")).toBeTruthy();
   expect(screen.getByText("Renewal time").parentElement?.textContent).toContain("—");
   expect(screen.getByText("Issued")).toBeTruthy();
+});
+
+it("keeps a panel's rows inside the section's inset, under its heading", () => {
+  render(<ResolvedPanelView panel={{
+    id:"application", title:"Application", sections:[{type:"fields",fields:[{label:"Name",value:"app"}]}],
+  }} onRetry={() => {}}/>);
+  expect(screen.getByRole("region", { name:"Application" }).hasAttribute("data-padded")).toBe(false);
 });
 
 it("preserves readable fields and offers Retry for a failed joined field", async () => {

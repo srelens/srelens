@@ -234,7 +234,7 @@ describe("IngressDetailsBody", () => {
 
       expect(screen.queryByRole("button", { name: /^https?:\/\// })).toBeNull();
       expect(screen.queryByRole("button", { name: /^Copy / })).toBeNull();
-      expect(screen.getByText("—")).toBeDefined();
+      expect(within(screen.getByRole("table")).getByText("—")).toBeDefined();
     });
 
     it("keeps a long address whole on one line, for the table's own scroll to carry", () => {

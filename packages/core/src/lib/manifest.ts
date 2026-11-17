@@ -92,7 +92,7 @@ const REDACTION_FAILED = "This Secret's manifest is not shown, because it could 
  * The backend blanks Secret values on every ungated read, `k8s.getManifest`
  * included since #661 (see `crates/kube/src/manifest.rs`). This is the
  * frontend's second pass on top of that, run on arrival rather than trusting
- * the host alone: the new design's Secret Details pane gates its values
+ * the host alone: the new design's Secret Overview pane gates its values
  * behind an explicit reveal, so the YAML pane beside it runs the manifest
  * through here first — otherwise the gate would be worth nothing to anyone
  * who clicks one tab over — and classic's drawer YAML view does the same
@@ -119,7 +119,7 @@ const REDACTION_FAILED = "This Secret's manifest is not shown, because it could 
  * - So the annotation's KEY is printed and its VALUE never is. The reader
  *   still sees which controllers touched the Secret, which is what the key is
  *   for; the value can be read on the object's own YAML for a kind where an
- *   annotation is not the material. This mirrors the Details pane, which gates
+ *   annotation is not the material. This mirrors the Overview pane, which gates
  *   a Secret's whole annotation map behind a reveal rather than one key of it.
  *
  * WHAT THIS DOES NOT COVER, and must not be read as covering:
@@ -272,25 +272,31 @@ export async function getObject(
   }
 }
 
+/** What `k8s.getSecret` answers with: the whole Secret, nothing blanked. */
+export interface SecretRead {
+  /** Base64 values by key, as stored in `Secret.data`. */
+  data: Record<string, string>;
+  /** Annotation values as the cluster has them. */
+  annotations: Record<string, string>;
+  /** The manifest as YAML, in the server's key order. */
+  yaml: string;
+}
+
 /**
- * Read a Secret's values via the dedicated, consent-gateable `k8s.getSecret`.
- * `k8s.getObject` redacts Secret data, so this is the only structured path to
- * the (base64-encoded) values — fetched lazily, only when the user reveals a
- * key.
+ * Read a Secret whole via the dedicated, consent-gateable `k8s.getSecret`: its
+ * values, its annotations and its manifest. `k8s.getObject`, `k8s.getManifest`
+ * and `k8s.diffManifest` blank a Secret for every caller, MCP clients included,
+ * so this audited read is what the app draws every Secret screen from (#1085).
  */
 export async function getSecret(
   context: string,
   namespace: string,
   name: string,
   invoke: Invoker = invokeCapability,
-): Promise<{ data?: Record<string, string>; error?: string }> {
+): Promise<Partial<SecretRead> & { error?: string }> {
   try {
-    const out = await invoke<{ data: Record<string, string> }>("k8s.getSecret", {
-      context,
-      namespace,
-      name,
-    });
-    return { data: out.data };
+    const out = await invoke<SecretRead>("k8s.getSecret", { context, namespace, name });
+    return { data: out.data, annotations: out.annotations, yaml: out.yaml };
   } catch (e) {
     return { error: String(e) };
   }
@@ -359,6 +365,28 @@ export async function diffManifest(
 ): Promise<{ documents?: DiffDoc[]; error?: string }> {
   try {
     const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffManifest", { context, yaml, namespace });
+    return { documents: out.documents };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+/**
+ * Diff a Secret manifest against the cluster via `k8s.diffSecret`: the dry-run
+ * diff of {@link diffManifest} with the values left in (#1085). It is the
+ * audited, consent-gated read, so call it only when the reader is looking at
+ * the diff. It takes one Secret, named by `namespace`/`name` so its confirm
+ * and audit record name it, and `yaml` must be that Secret alone.
+ */
+export async function diffSecret(
+  context: string,
+  namespace: string,
+  name: string,
+  yaml: string,
+  invoke: Invoker = invokeCapability,
+): Promise<{ documents?: DiffDoc[]; error?: string }> {
+  try {
+    const out = await invoke<{ documents: DiffDoc[] }>("k8s.diffSecret", { context, namespace, name, yaml });
     return { documents: out.documents };
   } catch (e) {
     return { error: String(e) };

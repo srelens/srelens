@@ -130,7 +130,7 @@ describe("NeedsAttention", () => {
 
   it("is checking, not empty, before any cluster answers", () => {
     show([PROD], {});
-    expect(screen.getByText("Checking 1 cluster…")).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Checking 1 cluster" })).toBeTruthy();
     expect(screen.queryByText("Nothing needs attention")).toBeNull();
   });
 

@@ -5,10 +5,12 @@ import {
   listNodes,
   applyManifest,
   diffManifest,
+  diffSecret,
   validateManifest,
   parseResourceVersion,
   listEvents,
   listResource,
+  getSecret,
   redactSecretManifest,
 } from "./manifest";
 
@@ -207,6 +209,24 @@ describe("diffManifest", () => {
   });
 });
 
+describe("diffSecret", () => {
+  it("calls the gated k8s.diffSecret for the one Secret it names, and returns its documents", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      documents: [{ kind: "Secret", name: "db", exists: true, changed: true, rows: [], currentResourceVersion: "3" }],
+    });
+    const out = await diffSecret("ctx", "team-a", "db", "kind: Secret", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.diffSecret", { context: "ctx", namespace: "team-a", name: "db", yaml: "kind: Secret" });
+    expect(out.documents?.[0].changed).toBe(true);
+  });
+
+  it("returns a refusal as an error, not as no changes", async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error("consent denied for k8s.diffSecret"));
+    const out = await diffSecret("ctx", "team-a", "db", "kind: Secret", invoke);
+    expect(out.documents).toBeUndefined();
+    expect(out.error).toContain("consent denied");
+  });
+});
+
 describe("validateManifest", () => {
   it("passes the editor's fallback namespace to server-side validation", async () => {
     const invoke = vi.fn().mockResolvedValue({ valid: true, errors: [] });
@@ -400,5 +420,28 @@ describe("redactSecretManifest", () => {
       expect(out.yaml).toBeUndefined();
       expect(out.error).not.toContain(FIXTURE_VALUE);
     });
+  });
+});
+
+describe("getSecret", () => {
+  it("returns the values, the annotations and the manifest k8s.getSecret answered with", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      data: { token: FIXTURE_VALUE },
+      annotations: { note: "annotation-fixture" },
+      yaml: "apiVersion: v1\nkind: Secret\n",
+    });
+    const out = await getSecret("kind-dev", "default", "s-1", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.getSecret", { context: "kind-dev", namespace: "default", name: "s-1" });
+    expect(out).toEqual({
+      data: { token: FIXTURE_VALUE },
+      annotations: { note: "annotation-fixture" },
+      yaml: "apiVersion: v1\nkind: Secret\n",
+    });
+  });
+
+  it("normalises errors", async () => {
+    const out = await getSecret("c", "ns", "x", () => Promise.reject(new Error("forbidden")));
+    expect(out.error).toContain("forbidden");
+    expect(out.data).toBeUndefined();
   });
 });

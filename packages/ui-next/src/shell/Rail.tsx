@@ -39,6 +39,27 @@ export interface RailProps {
 /** An image mark is inlined into the settings file, so it has to stay small. */
 const MAX_IMAGE_BYTES = 64 * 1024;
 
+const DISTRIBUTION_LABELS: Record<string, string> = {
+  gke: "GKE",
+  eks: "EKS",
+  aks: "AKS",
+  kind: "kind",
+  k3d: "k3d",
+  minikube: "minikube",
+  microk8s: "MicroK8s",
+  "docker-desktop": "Docker Desktop",
+  "rancher-desktop": "Rancher Desktop",
+  colima: "Colima",
+  orbstack: "OrbStack",
+  kiac: "Kubernetes in Apple Containers",
+  vind: "vCluster in Docker",
+};
+
+function distributionLabel(distribution: string | undefined): string | undefined {
+  if (!distribution) return undefined;
+  return `${DISTRIBUTION_LABELS[distribution] ?? distribution} distribution`;
+}
+
 /**
  * The strip of cluster marks down the edge of the window, the menu each one
  * answers, and the dialog that edits how it looks.
@@ -109,6 +130,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     const info = infos[id];
     const link = links[id];
     const paused = workspace.pausedClusters?.includes(id) === true;
+    const distribution = ctx.distribution ?? ctx.provider;
     items.push({
       id,
       name: mark.name,
@@ -151,8 +173,14 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
           : link?.state === "disconnected"
             ? "Disconnected"
             : undefined,
+      paused,
       markers: !paused && link?.state === "connecting" ? [{ label: "Connecting", tone: "info" }] : [],
       color: mark.color,
+      // ClusterRail already owns the dynamic rules. Preserve the reader's
+      // explicit ordering and only identify adjacent runs; an unclassified
+      // cluster is honestly `other`, never guessed from its display name.
+      group: distribution ?? "other",
+      groupLabel: distributionLabel(distribution),
     });
   }
 

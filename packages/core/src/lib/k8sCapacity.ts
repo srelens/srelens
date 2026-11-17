@@ -1,5 +1,7 @@
-import type { NodeSummary, NodeMetric } from "./manifest";
+import type { K8sObject, NodeSummary, NodeMetric } from "./manifest";
 import type { PodSummary } from "./workloads";
+import { asArray, asRecord, str } from "./k8sRaw";
+import { parseQuantity } from "./k8sQuantity";
 
 /**
  * A node's usage against its allocatable capacity, computed once so the
@@ -101,6 +103,40 @@ function against(
     limitIsWhole === true && (limit ?? 0) > 0 ? [limit!, "limit"] : [request ?? 0, "request"];
   const percent = percentOf(used, bound);
   return percent === null ? null : { percent, of, bound };
+}
+
+/**
+ * A pod's bounds read off its own spec, for a screen that has the object
+ * rather than a list row: the detail. The backend's `PodSummary` sums the
+ * same containers the same way (`crates/kube/src/workloads.rs`), so the list
+ * and the detail measure one pod against one ceiling.
+ *
+ * The containers that count are the ones metrics-server's figure adds up: the
+ * app containers, and the init containers that restart always (native
+ * sidecars). Each is truncated to whole millicores and MiB before summing, as
+ * the backend does.
+ */
+export function podBounds(pod: K8sObject): Required<PodBounds> {
+  const spec = asRecord(pod.spec);
+  const running = [
+    ...asArray(spec.containers),
+    ...asArray(spec.initContainers).filter((c) => asRecord(c).restartPolicy === "Always"),
+  ].map((c) => asRecord(asRecord(c).resources));
+  const sum = (side: "requests" | "limits", resource: string, scale: number) =>
+    running.reduce((total, r) => {
+      const q = parseQuantity(str(asRecord(r[side])[resource]));
+      return total + (q === null ? 0 : Math.trunc(q * scale));
+    }, 0);
+  // `every` over nothing is true; a pod with nothing in it has no ceiling.
+  const limited = (resource: string) => running.length > 0 && running.every((r) => resource in asRecord(r.limits));
+  return {
+    cpuReqMillicores: sum("requests", "cpu", 1000),
+    cpuLimMillicores: sum("limits", "cpu", 1000),
+    memReqMiB: sum("requests", "memory", 1 / 2 ** 20),
+    memLimMiB: sum("limits", "memory", 1 / 2 ** 20),
+    cpuLimAll: limited("cpu"),
+    memLimAll: limited("memory"),
+  };
 }
 
 /**

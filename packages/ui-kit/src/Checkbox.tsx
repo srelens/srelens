@@ -13,6 +13,10 @@ export interface CheckboxProps {
   disabled?: boolean;
   /** Names the box when there is no visible label to name it. */
   ariaLabel?: string;
+  /** Marks the box as failing validation. */
+  invalid?: boolean;
+  /** Points at the text that explains the box, such as its problem. */
+  "aria-describedby"?: string;
   /** Lands on the row when there is a label, on the box itself when there is not. */
   className?: string;
 }
@@ -42,6 +46,8 @@ export function Checkbox({
   indeterminate,
   disabled,
   ariaLabel,
+  invalid,
+  "aria-describedby": ariaDescribedBy,
   className,
 }: CheckboxProps) {
   const ref = useRef<HTMLInputElement>(null);
@@ -68,6 +74,8 @@ export function Checkbox({
       checked={checked}
       disabled={disabled}
       aria-label={labelled ? undefined : ariaLabel}
+      aria-invalid={invalid ? true : undefined}
+      aria-describedby={ariaDescribedBy}
       onChange={(e) => onChange?.(e.target.checked)}
     />
   );

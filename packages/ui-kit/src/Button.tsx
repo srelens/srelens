@@ -1,7 +1,7 @@
 import type { ButtonHTMLAttributes } from "react";
 import { cx } from "./cx";
 
-export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "outline";
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "outline" | "text" | "link";
 
 export type ButtonSize =
   | "xs"
@@ -33,6 +33,10 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
  *
  * The size is an attribute rather than a set of utility classes because the
  * kit's stylesheet owns the appearance; see `tokens-only.test.ts`.
+ *
+ * `text` and `link` are not boxes, so they leave `.btn` and its sizes out:
+ * `text` is the borderless action inside a sentence or a toolbar row
+ * (`.text-btn`), and `link` is a word that goes somewhere (`.link-btn`). (#1001)
  */
 export function Button({ variant = "primary", size = "default", className, ...rest }: ButtonProps) {
   return (
@@ -40,7 +44,7 @@ export function Button({ variant = "primary", size = "default", className, ...re
       data-variant={variant}
       data-size={size}
       className={cx(
-        "btn",
+        variant === "text" ? "text-btn" : variant === "link" ? "link-btn" : "btn",
         variant === "primary" && "btn-accent",
         variant === "danger" && "btn-danger",
         variant === "ghost" && "btn-ghost",

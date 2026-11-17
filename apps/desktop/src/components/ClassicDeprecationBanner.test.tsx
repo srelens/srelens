@@ -8,7 +8,7 @@ vi.mock("../design", async (importOriginal) => ({
   switchDesign: switchDesignMock,
 }));
 
-import { ClassicDeprecationBanner } from "./ClassicDeprecationBanner";
+import { ClassicAppsNotice, ClassicDeprecationBanner } from "./ClassicDeprecationBanner";
 
 beforeEach(() => {
   switchDesignMock.mockReset().mockResolvedValue({ ok: true });
@@ -75,5 +75,50 @@ describe("ClassicDeprecationBanner", () => {
     // A remount in the same session — a reload of the window — keeps it gone.
     render(<ClassicDeprecationBanner />);
     expect(screen.queryByRole("status")).toBeNull();
+  });
+});
+
+describe("ClassicAppsNotice", () => {
+  it("says apps open in the new design and switches there", async () => {
+    render(<ClassicAppsNotice />);
+    expect(screen.getByRole("heading", { name: "Apps open in the new design" })).toBeTruthy();
+    expect(
+      screen.getByText("The classic design no longer shows apps, their pages or their settings."),
+    ).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
+    expect(switchDesignMock).toHaveBeenCalledWith("next");
+  });
+
+  it("asks before a switch that would throw away unsaved editor drafts", async () => {
+    render(<ClassicAppsNotice unsavedDrafts={1} />);
+    await userEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
+    expect(switchDesignMock).not.toHaveBeenCalled();
+    expect(screen.getByText(/discards 1 unsaved editor draft\./)).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Switch anyway" }));
+    expect(switchDesignMock).toHaveBeenCalledWith("next");
+  });
+
+  it("moves focus to Cancel, described by what the switch would discard", async () => {
+    // The pressed button gives way to the confirm step; without this, focus
+    // falls to the body and a screen reader hears nothing of the warning.
+    render(<ClassicAppsNotice unsavedDrafts={1} />);
+    await userEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Cancel", description: /discards 1 unsaved editor draft\./ }),
+    );
+  });
+
+  it("says why when the switch is refused", async () => {
+    switchDesignMock.mockResolvedValue({ ok: false, reason: "storage refused it" });
+    render(<ClassicAppsNotice />);
+    await userEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
+    expect(screen.getByRole("alert").textContent).toContain("storage refused it");
+  });
+
+  it("still offers the switch after the banner was dismissed", () => {
+    // The banner's dismissal is for the nag; an app page has nothing else to show.
+    sessionStorage.setItem("srelens.design.classicNoticeDismissed", "1");
+    render(<ClassicAppsNotice />);
+    expect(screen.getByRole("button", { name: "Switch to the new design" })).toBeTruthy();
   });
 });

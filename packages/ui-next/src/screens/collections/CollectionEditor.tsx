@@ -10,7 +10,8 @@ import {
   type CollectionProblem,
   type NamespaceResolution,
 } from "@srelens/core";
-import { Button, Checkbox, Dialog, Field, MultiSelect, Switch, TextInput } from "@srelens/ui-kit";
+import { Button, Checkbox, Dialog, Field, LoadingState, MultiSelect, Switch, TextArea, TextInput } from "@srelens/ui-kit";
+import { FailureAlert } from "../../lib/errorCopy";
 import { useCollections, saveCollection } from "../../lib/collections";
 import { friendly } from "../../lib/errorCopy";
 import { useListing } from "../../lib/collectionScope";
@@ -19,9 +20,6 @@ import { useListing } from "../../lib/collectionScope";
 const SETTLE_MS = 200;
 /** How many matched namespaces the preview lists before it counts the rest. */
 const PREVIEW_SHOWN = 40;
-
-const TEXTAREA =
-  "scroll w-full rounded-md border border-[var(--control-line)] bg-transparent px-2 py-1.5 font-mono text-[0.75rem] outline-none focus:border-[var(--accent)]";
 
 /** What a draft says, as a collection; empty fields left out. */
 function draftCollection(fields: Draft): Collection {
@@ -194,13 +192,12 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
           hint="Always included. One per line, or paste a comma-separated list."
           error={problemText(shown, "members")}
         >
-          <textarea
+          <TextArea
             id={ids.members}
             aria-label="Members"
             value={draft.members}
-            onChange={(e) => set("members")(e.target.value)}
+            onValueChange={set("members")}
             rows={3}
-            className={TEXTAREA}
             placeholder={"payments\ncheckout"}
           />
         </Field>
@@ -209,13 +206,12 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
           hint="One per line; * matches any characters, e.g. prod-*, *-canary."
           error={problemText(shown, "patterns")}
         >
-          <textarea
+          <TextArea
             id={ids.patterns}
             aria-label="Patterns"
             value={draft.patterns}
-            onChange={(e) => set("patterns")(e.target.value)}
+            onValueChange={set("patterns")}
             rows={2}
-            className={TEXTAREA}
             placeholder="prod-*"
           />
         </Field>
@@ -270,9 +266,7 @@ export function CollectionDialog({ editing, members, clusterId, clusterName, onC
           </>
         )}
         {checkError !== null && (
-          <p role="alert" style={{ color: "var(--sev)" }}>
-            The collection could not be checked: {checkError}
-          </p>
+          <FailureAlert tone="sev" title="Could not check the collection" error={checkError} domain="local" />
         )}
         <Preview
           collection={collection}
@@ -349,11 +343,11 @@ function Preview({
   } else if (empty) {
     body = <p className="text-muted">Add members, a pattern or a label selector to see what it matches on {where}.</p>;
   } else if (error !== null) {
-    body = <p style={{ color: "var(--sev)" }}>The preview could not be worked out: {error}</p>;
+    body = <FailureAlert tone="sev" title="Could not work out the preview" error={error} />;
   } else if (!valid) {
     body = <p className="text-muted">Correct the members, patterns or label selector above to see what they match.</p>;
   } else if (result === null) {
-    body = <p className="text-muted">Working out what this matches on {where}…</p>;
+    body = <LoadingState compact label={`Working out what this matches on ${where}`} />;
   } else {
     const match = result.collections[0];
     const matched = match?.matched ?? [];
@@ -454,9 +448,9 @@ function KindsPicker({
       ? (
           <>
             {`Could not read the kinds ${clusterName} serves. ${friendly(error).detail} `}
-            <button type="button" className="btn !py-0" onClick={() => setAttempt((n) => n + 1)}>
+            <Button type="button" variant="text" onClick={() => setAttempt((n) => n + 1)}>
               Try again
-            </button>
+            </Button>
           </>
         )
       : served === null

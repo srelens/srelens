@@ -7,10 +7,11 @@ import userEvent from "@testing-library/user-event";
 // — the partial-failure report is the whole point of one of these tests.
 type ActionResult = { ok?: boolean; error?: string };
 
-const { deleteResource, evictPod, rolloutRestart } = vi.hoisted(() => ({
+const { deleteResource, evictPod, rolloutRestart, listCrds } = vi.hoisted(() => ({
   deleteResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
   evictPod: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
   rolloutRestart: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+  listCrds: vi.fn(async (): Promise<{ crds?: CrdRef[]; error?: string }> => ({ crds: [] })),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => ({
@@ -18,11 +19,12 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   deleteResource,
   evictPod,
   rolloutRestart,
+  listCrds,
 }));
 
 import { ResourceBulk } from "./ResourceBulk";
 import type { KindDescriptor, ListRow } from "../lib/kinds/types";
-import type { ClusterContext } from "@srelens/core";
+import type { ClusterContext, CrdRef } from "@srelens/core";
 import { resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import { getState, setState, setWorkspaceProtected } from "../lib/tabsStore";
@@ -47,6 +49,25 @@ const DEPLOY_DESCRIPTOR: KindDescriptor = {
   source: "watch",
   scope: "namespaced",
   actions: { restart: true },
+};
+
+/** What `customDescriptor` builds for {@link WIDGETS_CRD}, as far as this bar reads it. */
+const WIDGET_DESCRIPTOR: KindDescriptor = {
+  k8sKind: "Widget",
+  group: "example.com",
+  columns: [],
+  source: "poll",
+  scope: "namespaced",
+  actions: {},
+};
+
+const WIDGETS_CRD: CrdRef = {
+  name: "widgets.example.com",
+  group: "example.com",
+  version: "v1",
+  kind: "Widget",
+  plural: "widgets",
+  namespaced: true,
 };
 
 function keyOf(row: ListRow): string {
@@ -165,10 +186,10 @@ describe("ResourceBulk", () => {
     await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
 
     await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(3));
-    expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "kube-system", "web-0");
+    expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "kube-system", "web-0", undefined, undefined);
     // The other same-named pod, in a different namespace, is a distinct call.
-    expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "prod", "web-0");
-    expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "prod", "api-1");
+    expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "prod", "web-0", undefined, undefined);
+    expect(deleteResource).toHaveBeenCalledWith("prod", "Pod", "prod", "api-1", undefined, undefined);
   });
 
   it("says which succeeded and which did not, rather than 'some failed'", async () => {
@@ -224,28 +245,51 @@ describe("ResourceBulk", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
-  // Whole-branch review (FIX 3): same reason as the row menu's own gate — a
-  // custom resource's Delete always fails against the backend's kind→GVR
-  // resolution, so the bulk bar must not offer it either.
-  it("withholds Delete when the kind's actions say so", () => {
-    const noDeleteDescriptor: KindDescriptor = {
-      k8sKind: "Widget",
-      columns: [],
-      source: "poll",
-      scope: "namespaced",
-      actions: { delete: false },
-    };
+  it("deletes a custom resource's rows through its CRD, looked up once for the batch", async () => {
+    // `k8s.deleteResource` finds a built-in kind by name; a custom one it has
+    // to be told the group, version and plural of, or the delete never lands.
+    listCrds.mockResolvedValue({ crds: [WIDGETS_CRD] });
     render(
       <ResourceBulk
         selected={ALL_SELECTED}
-        kind="widgets"
-        descriptor={noDeleteDescriptor}
+        kind="widgets.example.com"
+        descriptor={WIDGET_DESCRIPTOR}
         context="prod"
         rows={PODS}
         onDone={() => {}}
       />,
     );
-    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Delete 3 widgets.example.com?" }));
+    await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
+
+    const crd = { group: "example.com", version: "v1", plural: "widgets" };
+    await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(3));
+    expect(deleteResource).toHaveBeenCalledWith("prod", "Widget", "kube-system", "web-0", undefined, crd);
+    expect(deleteResource).toHaveBeenCalledWith("prod", "Widget", "prod", "web-0", undefined, crd);
+    expect(deleteResource).toHaveBeenCalledWith("prod", "Widget", "prod", "api-1", undefined, crd);
+    expect(listCrds).toHaveBeenCalledTimes(1);
+    expect(listCrds).toHaveBeenCalledWith("prod");
+  });
+
+  it("deletes nothing, and says why, when the custom kind's CRD cannot be found", async () => {
+    listCrds.mockResolvedValue({ crds: [] });
+    render(
+      <ResourceBulk
+        selected={ALL_SELECTED}
+        kind="widgets.example.com"
+        descriptor={WIDGET_DESCRIPTOR}
+        context="prod"
+        rows={PODS}
+        onDone={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = within(screen.getByRole("dialog"));
+    await userEvent.click(dialog.getByRole("button", { name: "Delete" }));
+
+    expect(await dialog.findByText(/no matching CustomResourceDefinition/)).toBeDefined();
+    expect(deleteResource).not.toHaveBeenCalled();
   });
 
   it("offers evict only where the kind has it", () => {
@@ -407,7 +451,7 @@ describe("ResourceBulk — the cluster the batch was opened on", () => {
 
     await waitFor(() => expect(deleteResource).toHaveBeenCalledTimes(2));
     for (const row of ROWS) {
-      expect(deleteResource).toHaveBeenCalledWith(PINNED, "Pod", row.namespace, row.name);
+      expect(deleteResource).toHaveBeenCalledWith(PINNED, "Pod", row.namespace, row.name, undefined, undefined);
     }
     expect(targetsOf(deleteResource.mock.calls)).toEqual([PINNED, PINNED]);
   });

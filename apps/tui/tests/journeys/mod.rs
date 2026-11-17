@@ -1,3 +1,7 @@
+pub mod ai_settings;
+pub mod assistant_selection;
 pub mod command_bar;
-pub mod resource_tree;
 pub mod daemonset_triage;
+pub mod mux;
+pub mod resource_tree;
+pub mod topology_gateway_api;

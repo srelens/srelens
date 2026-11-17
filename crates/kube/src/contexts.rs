@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::client_cache::ClientCache;
+use crate::cluster_distribution::classify_distribution;
 use crate::context_resolve::{resolve_context, resolve_from, ResolvedContext, SourceConfig};
 use crate::local_cluster::classify;
 
@@ -55,6 +56,11 @@ pub struct ContextDto {
     /// The detected local provider (e.g. `"kind"`, `"vind"`), when `isLocal`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// The Kubernetes distribution when the kubeconfig carries a strong,
+    /// provider-generated signature (for example `gke`, `eks`, `aks`, or a
+    /// precise local provider). Absent rather than guessed for everything else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
     /// The kubeconfig this context was declared in. Taken from
     /// `ResolvedContext.source` directly — the same field `stable_id` reads —
     /// rather than parsed back out of an identity string, which is fragile
@@ -230,6 +236,14 @@ fn build_context_dto(rc: ResolvedContext) -> ContextDto {
         rc.exec_command.as_deref(),
         rc.auth_provider.as_deref(),
     );
+    let distribution = classify_distribution(
+        class.provider,
+        &rc.original_name,
+        &rc.cluster,
+        &rc.server,
+        rc.exec_command.as_deref(),
+        rc.auth_provider.as_deref(),
+    );
     ContextDto {
         is_current: rc.is_current,
         stable_id: rc.stable_id(),
@@ -242,6 +256,7 @@ fn build_context_dto(rc: ResolvedContext) -> ContextDto {
         namespace: rc.namespace,
         is_local: class.is_local,
         provider: class.provider.map(|provider| provider.as_str().to_string()),
+        distribution,
         auth_kind: rc.auth_kind,
     }
 }
@@ -552,15 +567,16 @@ mod tests {
         assert!(!unplaceable.as_object().unwrap().contains_key("pinnedId"));
     }
 
-    /// `provider` is the one optional field — `skip_serializing_if` means it is
-    /// ABSENT rather than `null` for a remote cluster, and present under that
-    /// exact name for a local one. Pinned separately so the set above stays a
-    /// set of the fields that are always there.
+    /// The classification fields are optional — `skip_serializing_if` means
+    /// they are ABSENT rather than `null` for a cluster the classifier cannot
+    /// name, and present under their exact wire names for a local one. Pinned
+    /// separately so the set above stays a set of fields that are always there.
     #[test]
     fn a_local_cluster_names_its_provider_and_a_remote_one_omits_the_key() {
         let remote = dto_for("prod-eu", "/home/dana/.kube/config", "token");
         let json = serde_json::to_value(&remote).expect("serializes");
         assert!(!json.as_object().unwrap().contains_key("provider"));
+        assert!(!json.as_object().unwrap().contains_key("distribution"));
 
         let local = build_context_dto(ResolvedContext {
             display_name: "kind-lab".to_string(),
@@ -578,7 +594,75 @@ mod tests {
         let json = serde_json::to_value(&local).expect("serializes");
         assert_eq!(json["isLocal"], true);
         assert_eq!(json["provider"], "kind");
+        assert_eq!(json["distribution"], "kind");
         assert_eq!(json["authKind"], "client certificate");
+    }
+
+    /// Distribution is deliberately narrower than a context-name guess. A
+    /// generated provider signature may group a managed cluster; a human name
+    /// that merely contains the same letters must not.
+    #[test]
+    fn managed_cluster_distributions_use_provider_signatures_not_loose_names() {
+        let dto = |name: &str, server: &str, exec: Option<&str>, auth_provider: Option<&str>| {
+            build_context_dto(ResolvedContext {
+                display_name: name.to_string(),
+                original_name: name.to_string(),
+                source: PathBuf::from("/home/dana/.kube/config"),
+                cluster: name.to_string(),
+                server: server.to_string(),
+                user: name.to_string(),
+                namespace: String::new(),
+                is_current: false,
+                exec_command: exec.map(str::to_string),
+                auth_provider: auth_provider.map(str::to_string),
+                auth_kind: "exec plugin".to_string(),
+            })
+        };
+
+        assert_eq!(
+            dto(
+                "gke_acme_europe-west4_prod",
+                "https://34.1.2.3",
+                Some("/usr/local/bin/gke-gcloud-auth-plugin"),
+                None,
+            )
+            .distribution
+            .as_deref(),
+            Some("gke"),
+        );
+        assert_eq!(
+            dto(
+                "prod",
+                "https://abc.gr7.us-east-1.eks.amazonaws.com",
+                Some("aws"),
+                None,
+            )
+            .distribution
+            .as_deref(),
+            Some("eks"),
+        );
+        assert_eq!(
+            dto(
+                "prod",
+                "https://prod-abcd.hcp.westeurope.azmk8s.io:443",
+                Some("kubelogin"),
+                None,
+            )
+            .distribution
+            .as_deref(),
+            Some("aks"),
+        );
+
+        assert_eq!(
+            dto("my-eks-lab", "https://cluster.example", None, None).distribution,
+            None,
+            "a human label is not provider evidence",
+        );
+        assert_eq!(
+            dto("prod", "https://cluster.example", None, Some("oidc")).distribution,
+            None,
+            "generic OIDC is not a distribution",
+        );
     }
 
     #[test]
@@ -767,10 +851,12 @@ users:
         assert_eq!(kind["isLocal"], true);
         assert_eq!(kind["provider"], "kind");
 
-        // Managed EKS: remote despite reachability, and `provider` is omitted.
+        // Managed EKS: remote despite reachability. The local-provider field is
+        // omitted while the independent distribution field names EKS.
         let eks = contexts.iter().find(|c| c["name"] == "eks-prod").unwrap();
         assert_eq!(eks["isLocal"], false);
         assert!(eks["provider"].is_null());
+        assert_eq!(eks["distribution"], "eks");
 
         let _ = tokio::fs::remove_file(&path).await;
     }

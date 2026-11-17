@@ -4,11 +4,11 @@ import {
   deleteResource,
   describeError,
   diffManifest,
+  diffSecret,
   getManifest,
   getSecret,
   notify,
   parseResourceVersion,
-  redactSecretManifest,
   validateManifest,
   type ApplyDoc,
   type ClusterContext,
@@ -23,6 +23,7 @@ import {
   ConfirmDialog,
   DiffLines,
   EmptyState,
+  LoadingState,
   Screen,
   type EditorDiagnostic,
 } from "@srelens/ui-kit";
@@ -30,13 +31,11 @@ import { useAsk } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useClusterGate } from "../lib/clusterMoved";
 import { useProtection } from "../lib/protection";
-import { SLUG_BY_K8S_KIND, isCustomKind, resolveCrdGvk } from "../lib/crdGvk";
+import { deleteTarget, isCustomKind, resolveCrdGvk } from "../lib/crdGvk";
 import { parseEditRoute, parseNewRoute, type EditRouteParts } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
 import { collapseDiff, diffCounts } from "../lib/diffCollapse";
 import { keysAt, schemaCompletions, useManifestSchema } from "../lib/manifestSchema";
-import { CUSTOM_RESOURCE_ACTIONS } from "../lib/kinds/custom";
-import { descriptorFor } from "../lib/kinds/descriptors";
 import { useResource } from "../lib/useResource";
 import { EditAnalysis, ProblemsDot, type DryRunState } from "./EditAnalysis";
 import { NamespaceChoice, NoClusterScreen } from "./resourceShell";
@@ -434,8 +433,8 @@ function Changes({ docs, computing, error }: { docs: DiffDoc[] | null; computing
       </div>
     );
   }
-  if (computing && !docs) return <p className="p-3 text-sm text-muted">Comparing with the cluster…</p>;
-  if (!docs || docs.length === 0) return <p className="p-3 text-sm text-muted">No changes.</p>;
+  if (computing && !docs) return <LoadingState compact label="Comparing with the cluster" className="p-3" />;
+  if (!docs || docs.length === 0) return <EmptyState compact title="No changes" />;
   return (
     <div className="flex flex-col gap-4 p-3">
       {docs.map((d, i) => (
@@ -459,36 +458,23 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
   // table.
   const custom = isCustomKind(kind, parts.group);
 
-  // Whether Delete is offered at all: the same verdict the list menu and the
-  // detail footer reach from the kind's descriptor. `k8s.deleteResource`
-  // resolves kinds from a closed table with no CRD path — the manifest read
-  // below is told a custom kind's group, delete cannot be — so for a custom
-  // resource it fails every time, after a confirm that read as real; and for
-  // a custom kind that shares a built-in's name it would delete the built-in.
-  // See `KindActions.delete`.
-  const actions = custom ? CUSTOM_RESOURCE_ACTIONS : descriptorFor(SLUG_BY_K8S_KIND[kind])?.actions;
-  const canDelete = actions?.delete !== false;
-
   /**
-   * A Secret's values stay out of the DOM until the reader reveals them.
-   *
-   * `k8s.getManifest` returns them in the clear, so the manifest is redacted
-   * on arrival — the same redactor the detail pane's YAML view uses, failing
-   * closed on any shape it does not understand — and the editor shows that,
-   * read-only, until Reveal. Reveal goes through `k8s.getSecret`, the
-   * consent-gated read, and only after it answers is the real manifest put
-   * in the editor. The real text is held here in the meantime, in state, and
-   * never rendered; and Apply is off while the editor shows placeholders,
-   * because applying a redacted manifest would write the placeholders over
-   * the values.
+   * A Secret opens with its values, editable (#1085). `k8s.getManifest` is
+   * an ungated read whose Secret the host blanks for every caller (#661), so
+   * it cannot be what the editor holds: Apply would write the blanks over the
+   * values. The manifest comes from `k8s.getSecret`, the audited read,
+   * instead, in the server's key order with nothing blanked. If that read
+   * refuses, the screen says so and opens nothing to edit.
    */
-  const isSecret = kind === "Secret";
-  const [revealed, setRevealed] = useState(!isSecret);
-  const [revealBusy, setRevealBusy] = useState(false);
-  const [revealError, setRevealError] = useState("");
+  const isSecret = !custom && kind === "Secret";
 
   const manifest = useResource(
     async () => {
+      if (isSecret) {
+        const secret = await getSecret(pinned, namespace ?? "", name);
+        if (secret.error) throw new Error(secret.error);
+        return secret.yaml ?? "";
+      }
       // A kind outside the built-in table has to be resolved to its group
       // first, or the read fails for every custom resource.
       let crd: DynamicGvk | undefined;
@@ -499,29 +485,13 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
       }
       const out = await getManifest(pinned, kind, namespace, name, undefined, crd);
       if (out.error) throw new Error(out.error);
-      const raw = out.yaml ?? "";
-      if (!isSecret) return { raw, shown: raw };
-      const redacted = redactSecretManifest(raw);
-      if (redacted.error !== undefined) throw new Error(redacted.error);
-      return { raw, shown: redacted.yaml ?? "" };
+      return out.yaml ?? "";
     },
     [pinned, kind, namespace, name],
     // An empty manifest is still a manifest that loaded.
     () => false,
   );
-  const live = revealed ? manifest.data?.raw : manifest.data?.shown;
-
-  async function reveal() {
-    setRevealBusy(true);
-    setRevealError("");
-    const out = await getSecret(pinned, namespace ?? "", name);
-    setRevealBusy(false);
-    if (out.error) {
-      setRevealError(describeError(out.error).detail);
-      return;
-    }
-    setRevealed(true);
-  }
+  const live = manifest.data;
 
   // `null` is "the reader has not typed": the editor shows the live manifest,
   // Apply is off, and a reload from the cluster is not a lost draft.
@@ -529,7 +499,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
   const yaml = draft ?? live ?? "";
   const dirty = draft !== null && draft !== live;
   const analysis = useAnalysis(pinned, yaml);
-  const loadedRv = useMemo(() => parseResourceVersion(manifest.data?.raw ?? ""), [manifest.data]);
+  const loadedRv = useMemo(() => parseResourceVersion(manifest.data ?? ""), [manifest.data]);
 
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -560,7 +530,13 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
    * open, because its side product — the live resourceVersion — is what says
    * the object changed under the reader, and that is worth knowing before
    * they open anything.
+   *
+   * A Secret's diff comes from `k8s.diffManifest` blanked on both sides, so
+   * while the panel is open it comes from `k8s.diffSecret` instead, which
+   * leaves the values in (#1085). That read is audited, so it runs only while
+   * the reader is looking at the diff, not on every pause in typing.
    */
+  const revealDiff = isSecret && showChanges;
   const [diff, setDiff] = useState<DiffDoc[] | null>(null);
   const [diffing, setDiffing] = useState(false);
   // Kept apart from `diff` rather than folded into an empty list: an empty
@@ -568,6 +544,12 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
   // shown as that answer was false reassurance right before Apply — and
   // silently switched off the "changed elsewhere" check with it.
   const [diffError, setDiffError] = useState("");
+  // Which comparison `diff` and `diffError` came from. Opening the panel on a
+  // Secret switches to the gated one; until it answers, the blanked
+  // background result reads a changed value as unchanged, so the panel shows
+  // only a result from the comparison it asked for.
+  const [diffRevealed, setDiffRevealed] = useState(false);
+  const panelCurrent = diffRevealed === revealDiff;
   useEffect(() => {
     if (!dirty) {
       setDiff(null);
@@ -577,10 +559,12 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
     let active = true;
     setDiffing(true);
     const t = setTimeout(() => {
-      void diffManifest(pinned, yaml).then((out) => {
+      const compare = revealDiff ? diffSecret(pinned, namespace ?? "", name, yaml) : diffManifest(pinned, yaml);
+      void compare.then((out) => {
         if (!active) return;
         setDiff(out.error ? null : (out.documents ?? []));
         setDiffError(out.error ? describeError(out.error).detail : "");
+        setDiffRevealed(revealDiff);
         setDiffing(false);
       });
     }, 600);
@@ -588,7 +572,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
       active = false;
       clearTimeout(t);
     };
-  }, [pinned, yaml, dirty]);
+  }, [pinned, yaml, dirty, revealDiff, namespace, name]);
   const stale = useMemo(
     () =>
       diff?.some(
@@ -604,7 +588,8 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
     }
     setDeleteBusy(true);
     setDeleteError("");
-    const out = await deleteResource(pinned, kind, namespace, name);
+    const { crd, error } = await deleteTarget(pinned, kind, parts.group);
+    const out = error ? { error } : await deleteResource(pinned, kind, namespace, name, undefined, crd);
     setDeleteBusy(false);
     if (out.error) {
       setDeleteError(describeError(out.error).detail);
@@ -653,16 +638,6 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               Changed elsewhere
             </span>
           )}
-          {isSecret && !revealed && (
-            <Button
-              variant="secondary"
-              onClick={() => void reveal()}
-              disabled={revealBusy || manifest.status !== "ready"}
-              title="Reads the Secret's values through the consent-gated read, then shows the real manifest"
-            >
-              {revealBusy ? "Revealing…" : "Reveal values"}
-            </Button>
-          )}
           <Button
             variant="ghost"
             onClick={() => {
@@ -680,7 +655,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
             <Button
               variant="ghost"
               onClick={() => analysis.review?.(`${kind} ${name}`)}
-              disabled={!revealed || !yaml.trim() || manifest.status !== "ready"}
+              disabled={!yaml.trim() || manifest.status !== "ready"}
               title="Hand the manifest to the assistant to look over before you apply it"
             >
               Review
@@ -689,27 +664,25 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
           <Button
             variant="ghost"
             onClick={() => void analysis.runDryRun()}
-            disabled={!revealed || !yaml.trim() || analysis.dryRun.status === "running" || manifest.status !== "ready"}
+            disabled={!yaml.trim() || analysis.dryRun.status === "running" || manifest.status !== "ready"}
             title="Send the manifest to the API server as a dry run — admission included, nothing written"
           >
             {analysis.dryRun.status === "running" ? "Dry run…" : "Dry run"}
           </Button>
-          {canDelete && (
-            <Button
-              variant="danger"
-              onClick={() => {
-                setDeleteError("");
-                editor.gate.reset();
-                setDeleting(true);
-              }}
-            >
-              Delete
-            </Button>
-          )}
+          <Button
+            variant="danger"
+            onClick={() => {
+              setDeleteError("");
+              editor.gate.reset();
+              setDeleting(true);
+            }}
+          >
+            Delete
+          </Button>
           <Button
             variant="primary"
             disabled={
-              !revealed || !dirty || !yaml.trim() || editor.busy || manifest.status !== "ready"
+              !dirty || !yaml.trim() || editor.busy || manifest.status !== "ready"
             }
             onClick={() => {
               editor.setError("");
@@ -728,12 +701,6 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
           {manifest.status === "error" && (
             <FailureAlert title={`Could not load ${kind} ${name}`} error={manifest.error} />
           )}
-          {isSecret && !revealed && manifest.status === "ready" && (
-            <p className="text-sm text-muted" data-testid="secret-redacted">
-              Values are redacted. Reveal them to edit this Secret; applying is off until then.
-            </p>
-          )}
-          {revealError && <FailureAlert title={`Could not reveal ${name}`} error={revealError} />}
           <Conflicts
             conflicts={editor.conflicts}
             busy={editor.busy}
@@ -756,7 +723,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               gutter; a document does not. */}
           <div className="min-h-0 min-w-0 flex-1">
             {manifest.status === "loading" ? (
-              <p className="p-3 text-sm text-muted">Loading the manifest…</p>
+              <LoadingState label="Loading the manifest" />
             ) : manifest.status === "error" ? null : (
               <CodeEditor
                 value={yaml}
@@ -765,7 +732,6 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
                 fill
                 flush
                 copy
-                readOnly={!revealed}
                 ariaLabel={`${name} manifest`}
                 schemaValidate={analysis.schemaValidator}
                 completions={analysis.completions}
@@ -778,7 +744,11 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
               a manifest diff is wide, and 360px of it was unreadable. */}
           {showChanges && dirty && (
             <aside className="rule-l scroll w-[30rem] shrink-0" aria-label="Diff">
-              <Changes docs={diff} computing={diffing} error={diffError} />
+              <Changes
+                docs={panelCurrent ? diff : null}
+                computing={diffing || !panelCurrent}
+                error={panelCurrent ? diffError : ""}
+              />
             </aside>
           )}
           {manifest.status === "ready" && (

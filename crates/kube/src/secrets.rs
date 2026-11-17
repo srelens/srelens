@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::collections::BTreeMap;
 
 use srelens_capability::{Annotations, Capability, CapabilityError};
-use base64::Engine;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::ListParams;
 use kube::Api;
@@ -165,33 +164,68 @@ pub struct GetSecretIn {
 pub struct GetSecretOut {
     /// Base64-encoded values, keyed by name (as stored in `Secret.data`).
     pub data: BTreeMap<String, String>,
+    /// The Secret's annotations as the cluster has them. The ungated readers
+    /// blank these (see [`redact_secret_data`]), so this is the only way to
+    /// their values.
+    pub annotations: BTreeMap<String, String>,
+    /// The whole manifest as YAML, in the server's key order, nothing blanked:
+    /// what `k8s.getManifest` returns for any other kind.
+    pub yaml: String,
 }
 
-/// `k8s.getSecret` — read a Secret's values. This is the **only** capability
-/// that returns Secret material through the structured API (the generic
-/// `k8s.getObject` redacts it), and it is annotated `sensitive` so a consent
-/// policy can gate it separately from ordinary reads.
+/// A string map under `key`, with anything that is not a string left out.
+fn string_map(parent: Option<&serde_yaml::Value>, key: &str) -> BTreeMap<String, String> {
+    parent
+        .and_then(|p| p.get(key))
+        .and_then(|m| m.as_mapping())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What `k8s.getSecret` answers with, from a Secret as the API server sent it.
+/// `data` values are already base64 on the wire, so they pass through as read.
+fn secret_out(object: serde_yaml::Mapping) -> Result<GetSecretOut, CapabilityError> {
+    let object = crate::manifest::readable_manifest(object);
+    let root = serde_yaml::Value::Mapping(object);
+    Ok(GetSecretOut {
+        data: string_map(Some(&root), "data"),
+        annotations: string_map(root.get("metadata"), "annotations"),
+        yaml: serde_yaml::to_string(&root).map_err(|e| CapabilityError::Handler(e.to_string()))?,
+    })
+}
+
+/// `k8s.getSecret` — read a Secret whole: its values, its annotations and its
+/// manifest. This is the **only** capability that returns Secret material
+/// (the generic `k8s.getObject`, `k8s.getManifest` and `k8s.diffManifest`
+/// redact it), and it is annotated `sensitive` so a consent policy can gate
+/// it separately from ordinary reads. The desktop app draws every Secret
+/// screen from this one read (#1085); an MCP client reaches it only through
+/// that gate.
 pub fn get_secret_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<GetSecretIn, GetSecretOut, _, _>(
         "k8s.getSecret",
-        "read a Secret's values (sensitive; returns base64-encoded data)",
+        "read a Secret's values, annotations and manifest (sensitive; data is base64-encoded)",
         Annotations::SENSITIVE_READ,
         move |input: GetSecretIn| {
             let cache = cache.clone();
             async move {
                 let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
                 let api: Api<Secret> = crate::scoped_api(client, &input.namespace);
-                let secret = tokio::time::timeout(request_timeout(), api.get(&input.name))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("get secret timed out".into()))?
+                let request = kube::core::Request::new(api.resource_url())
+                    .get(&input.name, &kube::api::GetParams::default())
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                let data = secret
-                    .data
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(k, v)| (k, base64::engine::general_purpose::STANDARD.encode(v.0)))
-                    .collect();
-                Ok(GetSecretOut { data })
+                // As the map the server sent, in its key order: `api.get`
+                // decodes into a `Secret` and loses it (#1046).
+                let object: serde_yaml::Mapping =
+                    tokio::time::timeout(request_timeout(), api.into_client().request(request))
+                        .await
+                        .map_err(|_| CapabilityError::Handler("get secret timed out".into()))?
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                secret_out(object)
             }
         },
     )
@@ -215,6 +249,59 @@ mod tests {
         assert_eq!(cap.id, "k8s.getSecret");
         assert!(cap.annotations.read_only);
         assert!(cap.annotations.sensitive, "getSecret must be annotated sensitive for consent gating");
+    }
+
+    /// What the desktop draws a Secret from (#1085): the values, the
+    /// annotations as the cluster has them, and the manifest in the server's
+    /// own key order with nothing blanked.
+    #[test]
+    fn get_secret_returns_values_annotations_and_the_manifest_in_server_order() {
+        let served: serde_yaml::Mapping = serde_yaml::from_str(
+            r#"
+kind: Secret
+apiVersion: v1
+metadata:
+  name: db
+  namespace: team
+  uid: 1234
+  managedFields:
+    - manager: kubectl
+  annotations:
+    note: annotation-fixture
+data:
+  password: aHVudGVyMg==
+  apple: YQ==
+type: Opaque
+"#,
+        )
+        .unwrap();
+        let out = secret_out(served).expect("a Secret as the server sends one");
+
+        assert_eq!(out.data["password"], "aHVudGVyMg==");
+        assert_eq!(out.data["apple"], "YQ==");
+        assert_eq!(out.annotations["note"], "annotation-fixture");
+
+        assert!(out.yaml.contains("password: aHVudGVyMg=="), "the manifest lost a value or kept managedFields");
+        assert!(out.yaml.contains("note: annotation-fixture"), "the manifest lost a value or kept managedFields");
+        assert!(!out.yaml.contains("managedFields"), "the manifest lost a value or kept managedFields");
+        // The server's order, with `apiVersion` and `kind` on top as kubectl
+        // prints them: not the alphabetical order a JSON round trip gives.
+        let at = |needle: &str| out.yaml.find(needle).unwrap_or_else(|| panic!("the manifest has no {needle}"));
+        assert!(at("apiVersion:") < at("kind:"));
+        assert!(at("kind:") < at("metadata:"));
+        assert!(at("metadata:") < at("data:"));
+        assert!(at("name: db") < at("annotations:"));
+        assert!(at("password:") < at("apple:"));
+        assert!(at("data:") < at("type:"));
+    }
+
+    #[test]
+    fn get_secret_reads_a_secret_with_no_data_or_annotations_as_empty() {
+        let served: serde_yaml::Mapping =
+            serde_yaml::from_str("kind: Secret\napiVersion: v1\nmetadata:\n  name: empty\n").unwrap();
+        let out = secret_out(served).unwrap();
+        assert!(out.data.is_empty());
+        assert!(out.annotations.is_empty());
     }
 
     #[test]

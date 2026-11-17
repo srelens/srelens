@@ -16,6 +16,7 @@ const core = vi.hoisted(() => ({
   getManifest: vi.fn(),
   applyManifest: vi.fn(),
   diffManifest: vi.fn(),
+  diffSecret: vi.fn(),
   validateManifest: vi.fn(),
   deleteResource: vi.fn(),
   getSecret: vi.fn(),
@@ -152,9 +153,10 @@ beforeEach(() => {
     applied: true,
   });
   core.diffManifest.mockReset().mockResolvedValue({ documents: [] });
+  core.diffSecret.mockReset().mockResolvedValue({ documents: [] });
   core.validateManifest.mockReset().mockResolvedValue({ valid: true, errors: [] });
   core.deleteResource.mockReset().mockResolvedValue({ ok: true });
-  core.getSecret.mockReset().mockResolvedValue({ data: { password: "s3cret" } });
+  core.getSecret.mockReset().mockResolvedValue({ data: { password: "czNjcmV0" }, annotations: {}, yaml: SECRET });
   core.listCrds.mockReset().mockResolvedValue({ crds: [] });
   core.openApiSchema.mockReset().mockResolvedValue(SCHEMA);
   ask.mockReset();
@@ -205,6 +207,12 @@ describe("EditResource", () => {
     expect(latestEditor().ariaLabel).toBe("web manifest");
     // Nothing typed yet, so there is nothing to apply.
     expect(screen.getByRole("button", { name: "Apply" })).toHaveProperty("disabled", true);
+  });
+
+  it("says it is loading the manifest until the cluster answers", async () => {
+    core.getManifest.mockReturnValue(new Promise(() => {}));
+    render(<EditResource route={ROUTE} />);
+    expect(await screen.findByRole("status", { name: "Loading the manifest" })).toBeTruthy();
   });
 
   it("offers a Copy control over the manifest", async () => {
@@ -276,7 +284,7 @@ describe("EditResource", () => {
 
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() =>
-      expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web"),
+      expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web", undefined, undefined),
     );
     // The tab says what happened rather than showing an editor over nothing.
     expect(await screen.findByText(/ConfigMap web was deleted/)).toBeDefined();
@@ -301,24 +309,69 @@ describe("EditResource", () => {
     expect(core.getManifest).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps a Secret's values out of the editor until they are revealed through the gated read", async () => {
-    // `k8s.getManifest` returns a Secret in the clear; the detail pane
-    // redacts it and the editor has to, or one tab over undoes the gate.
-    core.getManifest.mockResolvedValue({ yaml: SECRET });
+  it("opens a Secret with its values, editable, read through k8s.getSecret (#1085)", async () => {
+    // What the host sends on the ungated read: every value blanked. The
+    // editor must not show that, least of all with Apply live beside it.
+    core.getManifest.mockResolvedValue({ yaml: 'kind: Secret\ndata:\n  password: ""\n' });
     render(<EditResource route="/edit/prod-eu/Secret/checkout/db" />);
-    await waitFor(() => expect(latestEditor()?.value).toBeDefined());
-    const shown = latestEditor().value as string;
-    expect(shown).not.toContain("czNjcmV0");
-    expect(shown).toContain("REDACTED");
-    expect(latestEditor().readOnly).toBe(true);
-    expect(screen.getByTestId("secret-redacted")).toBeDefined();
-    expect(core.getSecret).not.toHaveBeenCalled();
-
-    await userEvent.click(screen.getByRole("button", { name: "Reveal values" }));
-    await waitFor(() => expect(core.getSecret).toHaveBeenCalledWith("prod-eu", "checkout", "db"));
-    await waitFor(() => expect(latestEditor().value).toBe(SECRET));
-    expect(latestEditor().readOnly).toBe(false);
+    await waitFor(() => expect(latestEditor()?.value).toBe(SECRET));
+    expect(core.getSecret).toHaveBeenCalledWith("prod-eu", "checkout", "db");
+    expect(latestEditor().readOnly).not.toBe(true);
+    expect(screen.queryByRole("button", { name: "Reveal values" })).toBeNull();
     expect(screen.queryByTestId("secret-redacted")).toBeNull();
+  });
+
+  it("diffs a Secret through the gated k8s.diffSecret while the panel is open, so a changed value shows (#1085)", async () => {
+    // `k8s.diffManifest` blanks a Secret on both sides, so a changed value
+    // came back as an unchanged blank line. It still runs in the background
+    // for the "changed elsewhere" check; the audited read runs only while the
+    // reader is looking at the diff.
+    core.diffManifest.mockResolvedValue({
+      documents: [{ kind: "Secret", name: "db", exists: true, changed: false, currentResourceVersion: "1", rows: [{ tag: "same", left: '  password: ""', right: '  password: ""' }] }],
+    });
+    core.diffSecret.mockResolvedValue({
+      documents: [{ kind: "Secret", name: "db", exists: true, changed: true, currentResourceVersion: "1", rows: [{ tag: "replace", left: "  password: czNjcmV0", right: "  password: bmV3LXMzY3JldA==" }] }],
+    });
+    render(<EditResource route="/edit/prod-eu/Secret/checkout/db" />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(SECRET));
+    act(() => latestEditor().onChange(SECRET.replace("czNjcmV0", "bmV3LXMzY3JldA==")));
+    await waitFor(() => expect(core.diffManifest).toHaveBeenCalled(), { timeout: 3000 });
+    expect(core.diffSecret).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Diff" }));
+    const panel = await screen.findByRole("complementary", { name: "Diff" });
+    await waitFor(() => expect(panel.textContent).toContain("bmV3LXMzY3JldA=="), { timeout: 3000 });
+    expect(core.diffSecret).toHaveBeenCalledWith("prod-eu", "checkout", "db", expect.stringContaining("bmV3LXMzY3JldA=="));
+  });
+
+  it("says it is comparing while a Secret's gated diff is on its way, not the blanked 'unchanged' (#1085)", async () => {
+    // The background diff blanks the values, so a changed value reads as an
+    // unchanged line. Shown under the open panel until the gated diff came
+    // back, it told the reader nothing would change.
+    core.diffManifest.mockResolvedValue({
+      documents: [{ kind: "Secret", name: "db", exists: true, changed: false, currentResourceVersion: "1", rows: [{ tag: "same", left: '  password: ""', right: '  password: ""' }] }],
+    });
+    core.diffSecret.mockImplementation(() => new Promise(() => {}));
+    render(<EditResource route="/edit/prod-eu/Secret/checkout/db" />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(SECRET));
+    act(() => latestEditor().onChange(SECRET.replace("czNjcmV0", "bmV3LXMzY3JldA==")));
+    await waitFor(() => expect(core.diffManifest).toHaveBeenCalled(), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByText("Not compared")).toBeNull());
+
+    await userEvent.click(screen.getByRole("button", { name: "Diff" }));
+    const panel = await screen.findByRole("complementary", { name: "Diff" });
+    expect(panel.textContent).not.toContain('password: ""');
+    expect(within(panel).getByText("Comparing with the cluster")).toBeDefined();
+    await waitFor(() => expect(core.diffSecret).toHaveBeenCalled(), { timeout: 3000 });
+    expect(panel.textContent).not.toContain('password: ""');
+  });
+
+  it("says a Secret could not be read, rather than opening a blanked manifest to edit", async () => {
+    core.getManifest.mockResolvedValue({ yaml: 'kind: Secret\ndata:\n  password: ""\n' });
+    core.getSecret.mockResolvedValue({ error: "secrets \"db\" is forbidden" });
+    render(<EditResource route="/edit/prod-eu/Secret/checkout/db" />);
+    await waitFor(() => expect(document.body.textContent).toContain("forbidden"));
+    expect(latestEditor()?.value ?? "").not.toContain("password");
   });
 
   it("resolves a custom kind's group before reading its manifest", async () => {
@@ -335,9 +388,16 @@ describe("EditResource", () => {
       version: "v1",
       plural: "widgets",
     });
-    // `k8s.deleteResource` has no CRD path, so Delete on a custom resource
-    // would fail every time; it is withheld, as the list menu withholds it.
-    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    // And Delete is told the same group, version and plural.
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "Widget", "checkout", "w1", undefined, {
+        group: "acme.io",
+        version: "v1",
+        plural: "widgets",
+      }),
+    );
   });
 
   it("keeps the cluster it opened on when the rail moves, and asks before writing there", async () => {
@@ -429,7 +489,7 @@ describe("EditResource", () => {
     act(() => latestEditor().onChange(EDITED));
     await userEvent.click(screen.getByRole("button", { name: "Diff" }));
     expect(await screen.findByText("Could not compare with the cluster", {}, { timeout: 3000 })).toBeDefined();
-    expect(screen.queryByText("No changes.")).toBeNull();
+    expect(screen.queryByText("No changes")).toBeNull();
     // And the header says so, whether or not the panel is open.
     expect(screen.getByText("Not compared")).toBeDefined();
   });
@@ -602,9 +662,17 @@ describe("EditResource", () => {
       version: "v1",
       plural: "deployments",
     });
-    // And no Delete: `k8s.deleteResource` resolves by kind alone, which here
-    // would be the built-in Deployment of the same name.
-    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+    // And Delete reaches this group's object, not the built-in Deployment of
+    // the same name.
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "Deployment", "checkout", "api", undefined, {
+        group: "acme.io",
+        version: "v1",
+        plural: "deployments",
+      }),
+    );
   });
 
   it("says when the manifest could not be read, instead of an empty editor", async () => {
@@ -716,7 +784,7 @@ describe("EditResource on a protected cluster (#101)", () => {
 
     await userEvent.type(typedIn(dialog), "prod-eu");
     await userEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web"));
+    await waitFor(() => expect(core.deleteResource).toHaveBeenCalledWith("prod-eu", "ConfigMap", "checkout", "web", undefined, undefined));
   });
 
   it("puts Force apply behind its own confirm, asking for the name afresh", async () => {

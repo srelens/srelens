@@ -195,7 +195,8 @@ fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), Capab
 }
 
 /// The one resolver `getObject`, `getManifest` and `listResource` share, so a
-/// kind one of them can reach the others can too (#932).
+/// kind one of them can reach the others can too (#932). `deleteResource`
+/// resolves through it as well (#1025), so what can be listed can be deleted.
 ///
 /// With group, version and plural all given it is a custom resource, built
 /// from them; its scope is not known here, so a namespace given means
@@ -203,7 +204,7 @@ fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), Capab
 /// namespace". Otherwise the kind must be in the built-in table, and the
 /// refusal says what to pass for one that is not: an agent that is told only
 /// "unsupported kind" does not learn that the tool can read it.
-fn resolve_kind(
+pub(crate) fn resolve_kind(
     kind: &str,
     namespace: Option<&str>,
     group: Option<&str>,
@@ -211,6 +212,19 @@ fn resolve_kind(
     plural: Option<&str>,
 ) -> Result<(ApiResource, bool), CapabilityError> {
     if let (Some(g), Some(v), Some(p)) = (group, version, plural) {
+        // Each becomes a path segment of the request, so each must be a name
+        // Kubernetes could have given it; the core group is the empty one.
+        use crate::collections::{check_name, NameRule};
+        for (what, value, rule) in [
+            ("group", g, NameRule::Subdomain),
+            ("version", v, NameRule::Label),
+            ("plural", p, NameRule::Label),
+        ] {
+            if !(what == "group" && value.is_empty()) {
+                check_name(value, rule)
+                    .map_err(|why| CapabilityError::Handler(format!("{what} {value:?} is not valid: {why}")))?;
+            }
+        }
         let namespaced = namespace.is_some_and(|s| !s.is_empty());
         // The plural decides what the request reaches; the caller's kind is
         // only a label. Where the group and plural are a built-in kind's, that
@@ -598,18 +612,50 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
 /// Secret's `data`, `stringData` and annotations reached any MCP client
 /// outside the consent-gated `k8s.getSecret`.
 ///
-/// Only a Secret takes the JSON round trip. `serde_json::Value` sorts a map's
-/// keys, so routing every kind through it would reorder every manifest the
-/// editor and the detail pane show, for no gain on a resource that carries
-/// nothing to redact.
-fn manifest_yaml(obj: &DynamicObject, ar: &ApiResource) -> Result<String, CapabilityError> {
+/// The object comes in as [`get_in_server_order`] read it and leaves through
+/// [`readable_manifest`], so the YAML reads in the server's order. Only a
+/// Secret takes the JSON round trip, which sorts its keys:
+/// `serde_json::Value`'s maps are `BTreeMap`s.
+fn manifest_yaml(object: serde_yaml::Mapping, ar: &ApiResource) -> Result<String, CapabilityError> {
+    let ordered = readable_manifest(object);
     if is_core_secret(ar) {
         let mut object =
-            serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
+            serde_json::to_value(&ordered).map_err(|e| CapabilityError::Handler(e.to_string()))?;
         crate::secrets::redact_secret_data(&mut object);
         return serde_yaml::to_string(&object).map_err(|e| CapabilityError::Handler(e.to_string()));
     }
-    serde_yaml::to_string(obj).map_err(|e| CapabilityError::Handler(e.to_string()))
+    serde_yaml::to_string(&ordered).map_err(|e| CapabilityError::Handler(e.to_string()))
+}
+
+/// GET `name` through `api` as the map the API server sent, in its key order,
+/// as Freelens and Lens show a manifest (#1046). `api.get` decodes into a
+/// `DynamicObject` and loses that order: `ObjectMeta` serializes its fields
+/// alphabetically and the rest is a `serde_json::Value`, whose maps are
+/// `BTreeMap`s.
+pub async fn get_in_server_order(
+    api: Api<DynamicObject>,
+    name: &str,
+) -> kube::Result<serde_yaml::Mapping> {
+    let request = kube::core::Request::new(api.resource_url())
+        .get(name, &kube::api::GetParams::default())
+        .map_err(kube::Error::BuildRequest)?;
+    api.into_client().request(request).await
+}
+
+/// `object` as a reader wants it: `managedFields` dropped, `apiVersion` and
+/// `kind` on top as kubectl prints them, every other key where it was.
+pub fn readable_manifest(mut object: serde_yaml::Mapping) -> serde_yaml::Mapping {
+    if let Some(metadata) = object.get_mut("metadata").and_then(|m| m.as_mapping_mut()) {
+        metadata.shift_remove("managedFields");
+    }
+    let mut ordered = serde_yaml::Mapping::new();
+    for key in ["apiVersion", "kind"] {
+        if let Some(value) = object.shift_remove(key) {
+            ordered.insert(key.into(), value);
+        }
+    }
+    ordered.extend(object);
+    ordered
 }
 
 /// `k8s.getManifest` — return a resource's manifest as YAML.
@@ -636,14 +682,13 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Api::all_with(client, &ar)
                 };
-                let mut obj = tokio::time::timeout(request_timeout(), api.get(&input.name))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("get manifest timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                // Drop noisy server-managed fields for a readable manifest.
-                obj.metadata.managed_fields = None;
+                let object =
+                    tokio::time::timeout(request_timeout(), get_in_server_order(api, &input.name))
+                        .await
+                        .map_err(|_| CapabilityError::Handler("get manifest timed out".into()))?
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 Ok(ManifestOut {
-                    yaml: manifest_yaml(&obj, &ar)?,
+                    yaml: manifest_yaml(object, &ar)?,
                 })
             }
         },
@@ -1393,6 +1438,18 @@ pub struct DiffIn {
     pub namespace: Option<String>,
 }
 
+/// `k8s.diffSecret`'s input: the one Secret the confirm names, and its draft.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiffSecretIn {
+    pub context: String,
+    /// The Secret's namespace. Named in the confirm and the audit record.
+    pub namespace: String,
+    /// The Secret's name. Named in the confirm and the audit record.
+    pub name: String,
+    /// The draft: exactly one document, the Secret named above.
+    pub yaml: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffDoc {
@@ -1493,8 +1550,96 @@ fn diff_document(
     })
 }
 
+/// Diff every document in `input` against the cluster: the live object
+/// (current) against a server dry-run apply (proposed), as aligned rows. A
+/// Secret is blanked on both sides unless `reveal`, which only the gated
+/// `k8s.diffSecret` passes, and which takes Secrets only.
+async fn diff_documents(
+    cache: Arc<ClientCache>,
+    input: DiffIn,
+    reveal: bool,
+) -> Result<DiffOut, CapabilityError> {
+    let docs = split_documents(&input.yaml)?;
+    let client = cache
+        .get(&input.context)
+        .await
+        .map_err(CapabilityError::Handler)?;
+    let mut documents = Vec::with_capacity(docs.len());
+    for value in docs {
+        let r = match resource_ref(&value) {
+            Some(r) => r,
+            // Incomplete document (e.g. still being typed) — skip
+            // it rather than aborting the whole diff.
+            None => continue,
+        };
+        let (group, _) = parse_api_version(&r.api_version);
+        // Refused before any request, so a non-Secret never reaches the
+        // cluster through the gated read.
+        let is_secret = r.kind == "Secret" && group.is_empty();
+        if reveal && !is_secret {
+            return Err(CapabilityError::Handler(format!(
+                "k8s.diffSecret compares Secrets only; {} {} is not a core Secret — use k8s.diffManifest",
+                r.kind, r.name
+            )));
+        }
+        let (ar, namespaced) = resolve_manifest_resource(&client, &r).await?;
+        let (api, effective_namespace) = manifest_api(
+            client.clone(),
+            &ar,
+            namespaced,
+            r.namespace.as_deref(),
+            input.namespace.as_deref(),
+        );
+
+        // Current live object (may not exist).
+        let current = tokio::time::timeout(request_timeout(), api.get_opt(&r.name))
+            .await
+            .map_err(|_| CapabilityError::Handler("diff get timed out".into()))?
+            .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+        let current_resource_version = current
+            .as_ref()
+            .and_then(|o| o.metadata.resource_version.clone());
+        let exists = current.is_some();
+        let current_json = match current {
+            Some(o) => serde_json::to_value(o)
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?,
+            None => serde_json::json!({}),
+        };
+
+        // Proposed = server dry-run apply (force to compute merged end-state).
+        let params = PatchParams {
+            field_manager: Some("srelens".into()),
+            dry_run: true,
+            force: true,
+            field_validation: None,
+        };
+        let proposed = tokio::time::timeout(
+            request_timeout(),
+            api.patch(&r.name, &params, &Patch::Apply(&value)),
+        )
+        .await
+        .map_err(|_| CapabilityError::Handler("diff dry-run timed out".into()))?
+        .map_err(|e| CapabilityError::Handler(clean_kube_error(e)))?;
+        let proposed_json = serde_json::to_value(proposed)
+            .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+
+        documents.push(diff_document(
+            r.kind,
+            r.name,
+            effective_namespace,
+            exists,
+            current_resource_version,
+            current_json,
+            proposed_json,
+            is_secret && !reveal,
+        )?);
+    }
+    Ok(DiffOut { documents })
+}
+
 /// `k8s.diffManifest` — for each document, diff the live object against the
-/// server dry-run apply result (current | proposed) as aligned rows.
+/// server dry-run apply result (current | proposed) as aligned rows. A Secret's
+/// values are blanked on both sides, for every caller.
 pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<DiffIn, DiffOut, _, _>(
         "k8s.diffManifest",
@@ -1506,80 +1651,60 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
             sensitive: true,
             ..Annotations::READ_ONLY
         },
-        move |input: DiffIn| {
+        move |input: DiffIn| diff_documents(cache.clone(), input, false),
+    )
+}
+
+/// `k8s.diffSecret` — `k8s.diffManifest` for Secrets, with the values left
+/// in (#1085). The desktop's Edit screen uses it while its diff panel is open
+/// on a Secret, so a changed value shows as changed. `SENSITIVE_READ`, like
+/// `k8s.getSecret`: audited, and over MCP behind
+/// `--mcp-allow-sensitive-reads` and a confirm.
+pub fn diff_secret_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<DiffSecretIn, DiffOut, _, _>(
+        "k8s.diffSecret",
+        "diff one Secret's draft against the cluster via server dry-run apply, values included (sensitive)",
+        Annotations::SENSITIVE_READ,
+        move |input: DiffSecretIn| {
             let cache = cache.clone();
             async move {
-                let docs = split_documents(&input.yaml)?;
-                let client = cache
-                    .get(&input.context)
-                    .await
-                    .map_err(CapabilityError::Handler)?;
-                let mut documents = Vec::with_capacity(docs.len());
-                for value in docs {
-                    let r = match resource_ref(&value) {
-                        Some(r) => r,
-                        // Incomplete document (e.g. still being typed) — skip
-                        // it rather than aborting the whole diff.
-                        None => continue,
-                    };
-                    let (group, _) = parse_api_version(&r.api_version);
-                    let (ar, namespaced) = resolve_manifest_resource(&client, &r).await?;
-                    let (api, effective_namespace) = manifest_api(
-                        client.clone(),
-                        &ar,
-                        namespaced,
-                        r.namespace.as_deref(),
-                        input.namespace.as_deref(),
-                    );
-                    let is_secret = r.kind == "Secret" && group.is_empty();
-
-                    // Current live object (may not exist).
-                    let current = tokio::time::timeout(request_timeout(), api.get_opt(&r.name))
-                        .await
-                        .map_err(|_| CapabilityError::Handler("diff get timed out".into()))?
-                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                    let current_resource_version = current
-                        .as_ref()
-                        .and_then(|o| o.metadata.resource_version.clone());
-                    let exists = current.is_some();
-                    let current_json = match current {
-                        Some(o) => serde_json::to_value(o)
-                            .map_err(|e| CapabilityError::Handler(e.to_string()))?,
-                        None => serde_json::json!({}),
-                    };
-
-                    // Proposed = server dry-run apply (force to compute merged end-state).
-                    let params = PatchParams {
-                        field_manager: Some("srelens".into()),
-                        dry_run: true,
-                        force: true,
-                        field_validation: None,
-                    };
-                    let proposed = tokio::time::timeout(
-                        request_timeout(),
-                        api.patch(&r.name, &params, &Patch::Apply(&value)),
-                    )
-                    .await
-                    .map_err(|_| CapabilityError::Handler("diff dry-run timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(clean_kube_error(e)))?;
-                    let proposed_json = serde_json::to_value(proposed)
-                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-
-                    documents.push(diff_document(
-                        r.kind,
-                        r.name,
-                        effective_namespace,
-                        exists,
-                        current_resource_version,
-                        current_json,
-                        proposed_json,
-                        is_secret,
-                    )?);
-                }
-                Ok(DiffOut { documents })
+                one_named_secret(&input)?;
+                let input = DiffIn {
+                    context: input.context,
+                    yaml: input.yaml,
+                    namespace: Some(input.namespace),
+                };
+                diff_documents(cache, input, true).await
             }
         },
     )
+}
+
+/// Hold a `k8s.diffSecret` call to the Secret its confirm names: the prompt is
+/// built from `namespace`/`name`, so the YAML must be exactly one document,
+/// and that document that Secret. A second document would be revealed under a
+/// prompt that never named it.
+fn one_named_secret(input: &DiffSecretIn) -> Result<(), CapabilityError> {
+    let wanted = format!("{}/{}", input.namespace, input.name);
+    let docs = split_documents(&input.yaml)?;
+    if docs.len() > 1 {
+        return Err(CapabilityError::Handler(format!(
+            "k8s.diffSecret compares one Secret per call ({wanted}); the YAML has {} documents",
+            docs.len()
+        )));
+    }
+    // An empty or half-typed document reveals nothing; diff_documents skips it.
+    let Some(r) = docs.first().and_then(resource_ref) else {
+        return Ok(());
+    };
+    let namespace = r.namespace.as_deref().unwrap_or(&input.namespace);
+    if r.name != input.name || namespace != input.namespace {
+        return Err(CapabilityError::Handler(format!(
+            "k8s.diffSecret was asked for {wanted}, but the YAML is {namespace}/{}",
+            r.name
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1725,6 +1850,11 @@ mod tests {
         assert!(cap.annotations.read_only);
     }
 
+    /// `obj` as the map `get_manifest_capability` decodes the response into.
+    fn fetched(obj: &DynamicObject) -> serde_yaml::Mapping {
+        serde_yaml::from_value(serde_yaml::to_value(obj).unwrap()).unwrap()
+    }
+
     /// Build a fetched Secret as the API server hands one back: base64 `data`,
     /// plaintext `stringData`, and the whole applied manifest echoed into the
     /// annotation `kubectl` writes.
@@ -1754,7 +1884,7 @@ mod tests {
     #[test]
     fn get_manifest_redacts_a_secrets_values_and_annotations() {
         let (ar, obj) = fetched_secret();
-        let yaml = manifest_yaml(&obj, &ar).expect("serializes");
+        let yaml = manifest_yaml(fetched(&obj), &ar).expect("serializes");
         assert!(
             !yaml.contains("aHVudGVyMg=="),
             "the base64 `data` value leaked: {yaml}"
@@ -1821,6 +1951,38 @@ mod tests {
         );
     }
 
+    /// #1046: the YAML keeps the order the API server sent, as Freelens and
+    /// Lens show it, with `apiVersion` and `kind` on top as kubectl puts them.
+    /// The body is raw text because `mock_slow_pages` serves a
+    /// `serde_json::Value`, which has sorted its keys already.
+    #[tokio::test]
+    async fn the_get_manifest_handler_keeps_the_servers_key_order() {
+        let served = r#"{"kind":"ConfigMap","apiVersion":"v1","metadata":{"name":"web","namespace":"team","uid":"u1","resourceVersion":"7","labels":{"tier":"web","app":"shop"},"managedFields":[{"manager":"kubectl"}]},"data":{"zeta":"1","alpha":"2"}}"#;
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(
+                http::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(served.as_bytes().to_vec()))
+                    .unwrap(),
+            )
+        });
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache
+            .preload("fake", kube::Client::new(service, "default"))
+            .await;
+
+        let out = (get_manifest_capability(cache).handler)(serde_json::json!({
+            "context": "fake", "kind": "ConfigMap", "namespace": "team", "name": "web"
+        }))
+        .await
+        .expect("the fake API server answers");
+
+        assert_eq!(
+            out["yaml"].as_str().expect("the capability returns YAML"),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: web\n  namespace: team\n  uid: u1\n  resourceVersion: '7'\n  labels:\n    tier: web\n    app: shop\ndata:\n  zeta: '1'\n  alpha: '2'\n",
+        );
+    }
+
     /// #980 review: a custom kind read by its hints, whose scope the cluster
     /// cannot give (discovery refused, or not listing it), is read where the
     /// namespace asked for says, as before discovery was consulted. Assuming
@@ -1873,7 +2035,7 @@ mod tests {
         let mut obj = DynamicObject::new("app", &ar).within("team");
         obj.data = serde_json::json!({ "data": { "greeting": "hello" } });
         assert_eq!(
-            manifest_yaml(&obj, &ar).expect("serializes"),
+            manifest_yaml(fetched(&obj), &ar).expect("serializes"),
             serde_yaml::to_string(&obj).expect("serializes"),
         );
     }
@@ -2078,6 +2240,143 @@ metadata:
         // And align_rows over the two now shows no changes.
         let rows = align_rows(&cy, &sy);
         assert!(rows.iter().all(|r| matches!(r.tag, DiffTag::Same)));
+    }
+
+    /// A stand-in API server for a diff: a GET answers with the live object, a
+    /// PATCH (the dry-run apply) with the merged one.
+    async fn diff_server(current: serde_json::Value, proposed: serde_json::Value) -> kube::Client {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let (current, proposed) = (current.clone(), proposed.clone());
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let body = if req.starts_with("PATCH") { proposed } else { current }.to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let config = kube::Config::new(format!("http://{addr}").parse().unwrap());
+        kube::Client::try_from(config).unwrap()
+    }
+
+    fn secret_with(token_b64: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "db", "namespace": "team", "resourceVersion": "7" },
+            "type": "Opaque",
+            "data": { "token": token_b64 },
+        })
+    }
+
+    const OLD_TOKEN: &str = "b2xkLWZpeHR1cmUtdmFsdWU="; // old-fixture-value
+    const NEW_TOKEN: &str = "bmV3LWZpeHR1cmUtdmFsdWU="; // new-fixture-value
+    const SECRET_DRAFT: &str =
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: db\n  namespace: team\ndata:\n  token: bmV3LWZpeHR1cmUtdmFsdWU=\n";
+
+    async fn diff_with(capability: Capability, yaml: &str) -> Result<serde_json::Value, CapabilityError> {
+        (capability.handler)(serde_json::json!({ "context": "fake", "namespace": "team", "name": "db", "yaml": yaml })).await
+    }
+
+    async fn cache_for_secret_diff() -> Arc<ClientCache> {
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache
+            .preload("fake", diff_server(secret_with(OLD_TOKEN), secret_with(NEW_TOKEN)).await)
+            .await;
+        cache
+    }
+
+    /// The desktop's Edit screen compares a Secret's draft with the cluster
+    /// through this read (#1085), so a changed value shows as changed. It is
+    /// the audited, consent-gated twin of `k8s.diffManifest`.
+    #[test]
+    fn diff_secret_capability_is_a_sensitive_read() {
+        let cap = diff_secret_capability(ClientCache::new(PathBuf::from("/x")));
+        assert_eq!(cap.id, "k8s.diffSecret");
+        assert_eq!(cap.annotations, Annotations::SENSITIVE_READ);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_diff_secret_handler_shows_a_changed_value_on_both_sides() {
+        let out = diff_with(diff_secret_capability(cache_for_secret_diff().await), SECRET_DRAFT)
+            .await
+            .expect("the fake API server answers");
+        let doc = &out["documents"][0];
+        assert_eq!(doc["changed"], true, "a changed value is a change");
+        let text = doc["rows"].to_string();
+        assert!(text.contains(OLD_TOKEN), "the live value is on the left");
+        assert!(text.contains(NEW_TOKEN), "the draft's value is on the right");
+        assert_eq!(doc["currentResourceVersion"], "7");
+    }
+
+    /// The ungated diff is unchanged by the gated one: still blanked, so what
+    /// an MCP client can read without the gate is what it was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_ungated_diff_still_blanks_the_same_secret() {
+        let out = diff_with(diff_manifest_capability(cache_for_secret_diff().await), SECRET_DRAFT)
+            .await
+            .expect("the fake API server answers");
+        let text = out.to_string();
+        assert!(!text.contains(OLD_TOKEN), "the live value left the ungated diff");
+        assert!(!text.contains(NEW_TOKEN), "the draft's value left the ungated diff");
+    }
+
+    /// The confirm names one Secret, from the arguments, so the call is held to
+    /// it: one document, that Secret. A second Secret in the same YAML would be
+    /// revealed under a prompt that never named it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn diff_secret_refuses_more_than_one_document() {
+        let two = format!("{SECRET_DRAFT}---
+{}", SECRET_DRAFT.replace("name: db", "name: other"));
+        let err = diff_with(diff_secret_capability(cache_for_secret_diff().await), &two)
+            .await
+            .expect_err("two documents under one confirm");
+        assert!(err.to_string().contains("one"), "says why: {err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn diff_secret_refuses_a_document_that_names_another_secret() {
+        for draft in [
+            SECRET_DRAFT.replace("name: db", "name: other"),
+            SECRET_DRAFT.replace("namespace: team", "namespace: elsewhere"),
+        ] {
+            let err = diff_with(diff_secret_capability(cache_for_secret_diff().await), &draft)
+                .await
+                .expect_err("the document must be the Secret the confirm names");
+            assert!(err.to_string().contains("team/db"), "says which Secret it was asked for: {err}");
+        }
+    }
+
+    #[test]
+    fn diff_secrets_confirm_names_the_secret() {
+        let cap = diff_secret_capability(ClientCache::new(PathBuf::from("/x")));
+        let fields = srelens_capability::confirm_fields(
+            &serde_json::json!({ "context": "prod", "namespace": "team", "name": "db", "yaml": SECRET_DRAFT }),
+        );
+        let text = srelens_capability::render_confirm(cap.annotations.confirm.unwrap(), &fields).unwrap();
+        assert!(text.contains("team/db"), "{text}");
+        assert!(text.contains("prod"), "{text}");
+    }
+
+    /// Its confirm says it reveals secret material, so it takes Secrets only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn diff_secret_refuses_a_document_that_is_not_a_secret() {
+        let err = diff_with(
+            diff_secret_capability(cache_for_secret_diff().await),
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: db\n  namespace: team\n",
+        )
+        .await
+        .expect_err("a ConfigMap is not a Secret");
+        assert!(err.to_string().contains("Secret"), "says why: {err}");
     }
 
     #[test]
@@ -3092,7 +3391,7 @@ metadata:
             !readable.contains("aHVudGVyMg==") && !readable.contains("hunter2"),
             "{readable}"
         );
-        let yaml = manifest_yaml(&object, &ar).unwrap();
+        let yaml = manifest_yaml(fetched(&object), &ar).unwrap();
         assert!(
             !yaml.contains("aHVudGVyMg==") && !yaml.contains("hunter2"),
             "{yaml}"

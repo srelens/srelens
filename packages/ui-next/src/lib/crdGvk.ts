@@ -75,3 +75,18 @@ export async function resolveCrdGvk(
   const match = matches[0];
   return { crd: { group: match.group, version: match.version, plural: match.plural }, ref: match };
 }
+
+/**
+ * What `deleteResource` has to be told about a kind: a custom one's group,
+ * version and plural, which `k8s.deleteResource` — like `k8s.getManifest` —
+ * cannot find from the kind's name, and nothing for a built-in, which it
+ * resolves itself. The row menu, the bulk bar and the editor all ask here, so
+ * none of them can send a custom kind by name alone.
+ */
+export function deleteTarget(
+  context: string,
+  kind: string,
+  group?: string,
+): Promise<{ crd?: DynamicGvk; error?: string }> {
+  return isCustomKind(kind, group) ? resolveCrdGvk(context, kind, group) : Promise.resolve({});
+}

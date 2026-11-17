@@ -9,6 +9,7 @@ import {
 import type { Column } from "@srelens/ui-kit";
 import type { KindActions, KindDescriptor } from "./types";
 import { AgeCell } from "../ageCell";
+import { gatewayFlagged, withGatewayColumns } from "../gatewayApi";
 
 /**
  * Matches `MAX_COLUMNS` in `crates/kube/src/crds.rs` / `MAX_PRINTER_COLUMNS`
@@ -50,22 +51,20 @@ export function customColumns(crd: CrdRef): Column<CustomRow>[] {
 }
 
 /**
- * What a custom resource offers, which is everything a kind offers by default
- * minus Delete.
+ * What a custom resource offers: what every kind offers by default — Edit,
+ * Copy as kubectl and Delete — and none of the kind-specific actions.
  *
- * The backend resolves kind→GVR through a closed match with no CRD path, so
- * Delete on a custom resource always fails — see `KindActions.delete`. Named
- * rather than written inline because a second surface has to reach the same
- * verdict: the resource detail pane's footer builds its actions from the
- * descriptor too, and a kind outside `K8S_KIND` has no descriptor to read
- * (`descriptorFor` answers `undefined` for exactly the custom-resource case).
- * Re-deriving "and custom resources cannot be deleted" there would be a second
- * place to remember the day the backend grows a CRD path.
+ * Named because the resource detail pane reaches it too: a kind outside
+ * `K8S_KIND` has no descriptor to read (`descriptorFor` answers `undefined`
+ * for exactly the custom-resource case).
  */
-export const CUSTOM_RESOURCE_ACTIONS: KindActions = { delete: false };
+export const CUSTOM_RESOURCE_ACTIONS: KindActions = {};
 
 /** The descriptor for one discovered CRD. */
-export function customDescriptor(crd: CrdRef): KindDescriptor<CustomRow> {
+export function customDescriptor(discovered: CrdRef): KindDescriptor<CustomRow> {
+  // A Gateway API kind lists one column more than its CRD prints, and flags by it (#1089).
+  const crd = withGatewayColumns(discovered);
+  const flagged = gatewayFlagged(crd);
   return {
     k8sKind: crd.kind,
     group: crd.group,
@@ -79,5 +78,6 @@ export function customDescriptor(crd: CrdRef): KindDescriptor<CustomRow> {
         error: o.error,
       })),
     actions: CUSTOM_RESOURCE_ACTIONS,
+    ...(flagged ? { flagged } : {}),
   };
 }

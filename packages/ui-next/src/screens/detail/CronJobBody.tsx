@@ -45,7 +45,7 @@ function ScheduleSection({ object }: { object: K8sObject }) {
       <KV k="Schedule" v={str(spec.schedule)} mono />
       <KV k="Suspend" v={spec.suspend === true ? "Yes" : "No"} />
       <KV k="Concurrency policy" v={str(spec.concurrencyPolicy)} />
-      <KV k="Last schedule" v={lastSchedule ? timestampWithAge(lastSchedule, Date.now()) : "—"} />
+      <KV k="Last schedule" v={lastSchedule && timestampWithAge(lastSchedule, Date.now())} />
       <KV k="History (kept)" v={`${successKept} succeeded, ${failedKept} failed`} />
       <KV
         k="Active jobs"
@@ -108,8 +108,8 @@ function RecentJobsSection({
 
   if (state.status === "loading") {
     return (
-      <Section title="Recent Jobs">
-        <LoadingState label="Loading jobs" />
+      <Section title="Recent jobs">
+        <LoadingState compact label="Loading jobs" />
       </Section>
     );
   }
@@ -118,14 +118,14 @@ function RecentJobsSection({
   // jobs" drew the identical screen — see {@link useSectionList}.
   if (state.status === "error") {
     return (
-      <Section title="Recent Jobs">
-        <SectionFailure error={state.error} />
+      <Section title="Recent jobs">
+        <SectionFailure what="jobs" error={state.error} onRetry={state.retry} />
       </Section>
     );
   }
 
   return (
-    <Section title="Recent Jobs">
+    <Section title="Recent jobs">
       <Table
         columns={RECENT_JOB_COLUMNS}
         data={state.data ?? []}
@@ -137,7 +137,7 @@ function RecentJobsSection({
 }
 
 /**
- * A CronJob's Details pane: Schedule, then its recent Jobs (classic's
+ * A CronJob's Overview pane: Schedule, then its recent Jobs (classic's
  * `CronJobBody`). `relatedPodSelector` has no case for "CronJob", so
  * `GenericBody` fetches no related pods for one; its unheaded identity block
  * and its Conditions, Labels and Annotations blocks still wrap this body.

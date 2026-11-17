@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listReplicaSets, type ReplicaSetSummary } from "@srelens/core";
-import { Button, Combobox } from "@srelens/ui-kit";
+import { Button, Combobox, LoadingState } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 
 /** One revision as a reader tells it from the others (#389): its number, the
@@ -75,7 +75,7 @@ export function RevisionPicker({
     };
   }, [context, namespace, name, onChange, attempt]);
 
-  if (revisions.status === "loading") return <p className="text-faint">Reading revisions…</p>;
+  if (revisions.status === "loading") return <LoadingState compact label="Reading revisions" />;
   if (revisions.status === "error") {
     return (
       <>

@@ -2796,15 +2796,13 @@ describe("structured lines and the query (#898)", () => {
   });
 
   it("keeps the two-space gap before the fields from collapsing, without changing the text or its marks", async () => {
-    // The row is `white-space: nowrap`, which collapses two spaces to one. The gap is its own pre-spaced span rather
-    // than a pre-wrap faint span, which would let the row break and lose the fixed height the window depends on.
+    // The kit's message cell keeps whitespace as written and leaves wrapping to the body (#1051), so the
+    // gap needs no span of its own, and an unwrapped row keeps the fixed height the window depends on.
     const region = await (draw(), body());
     push(...JSON_LINES);
     const cell = () => region.querySelector("[data-slot=message]") as HTMLElement;
-    const gap = cell().querySelector(".whitespace-pre");
-    expect(gap?.textContent).toBe("  ");
-    expect(gap?.parentElement?.classList.contains("text-faint")).toBe(true);
-    expect(cell().querySelector(".text-faint")?.classList.contains("whitespace-pre")).toBe(false);
+    expect(cell().className).toContain("[white-space-collapse:preserve]");
+    expect(cell().querySelector(".whitespace-pre, .whitespace-pre-wrap")).toBeNull();
     expect(cell().textContent).toBe("Wrote batch  system=camlog internal_use=true");
     await userEvent.type(filterField(), "system:camlog");
     expect(Array.from(cell().querySelectorAll("mark")).map((m) => m.textContent)).toEqual(["system=camlog"]);
@@ -2817,7 +2815,9 @@ describe("structured lines and the query (#898)", () => {
       line("api-7/api", "14:07:41.208000000", "info a plain line"),
       line("api-7/api", "14:07:42.208000000", '{"level":"warn","system":"camlog"}'),
     );
-    expect(region.querySelectorAll(".whitespace-pre")).toHaveLength(0);
+    const messages = Array.from(region.querySelectorAll("[data-slot=message]"), (cell) => cell.textContent);
+    expect(messages).toHaveLength(2);
+    for (const message of messages) expect(message).not.toContain("  ");
   });
 
   it("filters on a field, and ORs two values of one field", async () => {

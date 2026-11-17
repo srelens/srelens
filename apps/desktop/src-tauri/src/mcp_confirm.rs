@@ -1066,6 +1066,38 @@ mod tests {
             srelens_mcp::auth::Token::generate(),
         ));
 
+        // Establish the Streamable HTTP session before sending a request on it.
+        let init_body = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "desktop-test", "version": "1.0"}
+        }})
+        .to_string();
+        let mut init_conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        init_conn
+            .write_all(
+                format!(
+                    "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\n\
+                     Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{init_body}",
+                    turn.token(),
+                    init_body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut init_reply = String::new();
+        init_conn.read_to_string(&mut init_reply).await.unwrap();
+        assert!(init_reply.starts_with("HTTP/1.1 200"), "{init_reply}");
+        let session = init_reply
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("mcp-session-id")
+                    .then(|| value.trim().to_owned())
+            })
+            .expect("initialize returns an MCP session ID");
+
         // The turn's agent asks for the write, on a connection that stays open.
         let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "k8s.deletePod", "arguments": {"name": "api-0"}}})
@@ -1074,7 +1106,8 @@ mod tests {
         conn.write_all(
             format!(
                 "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\n\
-                 Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                 Content-Type: application/json\r\nMcp-Session-Id: {session}\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 turn.token(),
                 body.len()
             )

@@ -76,16 +76,14 @@ export interface Condition {
  * CertificateSigningRequest says the request was refused.
  *
  * **A substring is a claim about every type that contains it**, which is the
- * cost of the family form and the reason one candidate is deliberately NOT
- * here. kstatus's (and Flux's) `Stalled` is exactly this shape — `True` means
- * reconciliation has given up — but "Installed" CONTAINS "stalled"
- * (i-n-**s-t-a-l-l-e-d**), so adding it would paint every operator's
- * `Installed: True` red: the same inversion this constant keeps being fixed
- * for, pointed the other way. Landing `Stalled` needs a whole-type match
- * rather than a substring one, and no type in srelens's reach needs it yet.
- * The test file's `POLARITY` table holds `Installed` as a live guard.
+ * cost of the family form and the reason `Stalled` alone is anchored. kstatus's
+ * (and Flux's) `Stalled` is exactly this shape — `True` means reconciliation
+ * has given up — but "Installed" CONTAINS "stalled" (i-n-**s-t-a-l-l-e-d**), so
+ * the bare word would paint every operator's `Installed: True` red: the same
+ * inversion this constant keeps being fixed for, pointed the other way. The
+ * test file's `POLARITY` table holds `Installed` as a live guard.
  */
-const NEGATIVE_CONDITION = /Pressure|Unavailable|Fail|Dangling|Error|Remaining|Degraded|DisruptionTarget|Denied/i;
+const NEGATIVE_CONDITION = /Pressure|Unavailable|Fail|Dangling|Error|Remaining|Degraded|DisruptionTarget|Denied|^Stalled$/i;
 
 /**
  * A condition's tone from its type and status alone. The rule both designs
@@ -100,8 +98,8 @@ const NEGATIVE_CONDITION = /Pressure|Unavailable|Fail|Dangling|Error|Remaining|D
  * `ReplicaFailure`; `Fail` does), and a PVC's `ControllerResizeError: True`,
  * `NodeResizeError: True` and `ModifyVolumeError: True`, a Namespace's
  * `NamespaceContentRemaining`/`NamespaceFinalizersRemaining`, `Degraded: True`,
- * `DisruptionTarget: True` and a CSR's `Denied: True` were success and are now
- * danger. All of them are the polarity being read correctly for the first time,
+ * `DisruptionTarget: True`, a CSR's `Denied: True` and kstatus's `Stalled: True`
+ * were success and are now danger. All of them are the polarity being read correctly for the first time,
  * which is why they are kept for both designs — but they ARE changes, and the
  * sentence here used to claim classic was untouched.
  *
@@ -163,8 +161,12 @@ const COMPLETION_REASON: Record<string, string> = {
  * A reason may only ever soften a green to amber. It may not repaint a
  * condition the status has already condemned — that is the polarity trap, and
  * it is how a stalled `Progressing: False` would talk its way back to healthy.
+ *
+ * kstatus's `Reconciling`, which Flux follows, is the same rule with no reason
+ * to wait for: `True` while the controller works, `False` once it is done.
  */
 export function conditionKindWithReason(c: Condition): HealthKind {
+  if (c.type === "Reconciling" && c.status !== "Unknown") return c.status === "True" ? "warning" : "success";
   const base = conditionKind(c);
   if (base !== "success") return base;
   const landed = COMPLETION_REASON[c.type];

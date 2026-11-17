@@ -23,10 +23,10 @@ function printerText(type: string, value: unknown): string | undefined {
 }
 
 /**
- * A custom resource's lead facts (#919): what its own operator chose to show
- * in `kubectl get` — the CRD's printer columns — then its phase and a lagging
- * generation where the columns do not already say so, then the identity
- * facts every kind ends on.
+ * A custom resource's lead facts (#919): the identity every kind leads with,
+ * then what its own operator chose to show in `kubectl get` — the CRD's printer
+ * columns — then its phase and a lagging generation where the columns do not
+ * already say so. The usual `Age` column is the Created fact, so it is left out.
  *
  * Evaluated here with core's `resolvePath`, the bounded JSONPath subset the
  * host's printer columns also read, over the object already fetched — so no
@@ -37,6 +37,7 @@ function printerText(type: string, value: unknown): string | undefined {
 export function customResourceFacts(object: K8sObject, printerColumns: PrinterColumn[] = []): DetailFact[] {
   const facts: DetailFact[] = [];
   for (const column of printerColumns) {
+    if (column.jsonPath === ".metadata.creationTimestamp") continue;
     const text = printerText(column.type, resolvePath(object, column.jsonPath));
     if (text !== undefined) facts.push({ label: column.name, value: text });
   }
@@ -55,17 +56,16 @@ export function customResourceFacts(object: K8sObject, printerColumns: PrinterCo
   if (typeof generation === "number" && typeof observed === "number" && observed < generation) {
     facts.push({ label: "Observed generation", value: `${observed} of ${generation}` });
   }
-  return [...facts, ...identityFacts({ kind: object.kind ?? "", object })];
+  return [...identityFacts({ kind: object.kind ?? "", object }), ...facts];
 }
 
 /**
- * The Status pane's blocks for a custom resource: its conditions, then its
+ * The Overview pane's blocks for a custom resource: its conditions, then its
  * whole `.status` — the only generic way to show what an operator reports
  * outside conditions (an Argo CD Application's sync and health, a release's
  * history). Read-only; Edit in the action bar is where a change is made.
  *
- * Titled "Raw status" rather than "Status" because the pane it sits in is
- * already called that. Like every titled block it opens shut on a first visit.
+ * Like every titled block it opens shut on a first visit.
  */
 export function CustomResourceBody({ object, name }: { object: K8sObject; name: string }) {
   const status = asRecord(object.status);
@@ -74,7 +74,7 @@ export function CustomResourceBody({ object, name }: { object: K8sObject; name: 
     <>
       <ConditionsSection conditions={conditions} />
       {Object.keys(status).length > 0 && (
-        <Section title="Raw status">
+        <Section title="Status">
           <CodeEditor
             value={formatResourceManifest(status)}
             readOnly

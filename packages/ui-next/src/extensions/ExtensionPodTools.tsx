@@ -34,7 +34,7 @@ import {
   type InstalledExtension,
   type LogTarget,
 } from "@srelens/core";
-import { Button, Combobox, usePortalShowing } from "@srelens/ui-kit";
+import { Button, Combobox, EmptyState, LoadingState, Section, usePortalShowing } from "@srelens/ui-kit";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useProtectedConfirm } from "../lib/protectedConfirm";
 import { useConfirmationApp } from "../confirm/confirmationApp";
@@ -44,7 +44,7 @@ import { useLogStream, type LogSourceOpener } from "../lib/logStream";
 import { useResource } from "../lib/useResource";
 import { refreshContextIds, useContextLookup } from "./contextIds";
 import { commandArgument, plainText } from "./displayText";
-import { ErrorNotice } from "./ExtensionResults";
+import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { extensionLabel, useExtensions } from "./inventoryStore";
 
 type PodBinding = ExtensionManifest["capabilities"][number];
@@ -115,10 +115,9 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
   // A failed listing is said, with a retry, and never drawn as no app having pod tools here.
   if (inventory.status === "error")
     return (
-      <section className="section extension-pod-tools" aria-label="App pod tools">
-        <h4 className="extension-detail-heading">App pod tools</h4>
-        <ErrorNotice title="Could not list the installed apps" message={inventory.error} retry={inventory.reload} />
-      </section>
+      <Section title="App pod tools" className="extension-pod-tools" aria-label="App pod tools">
+        <FailureState title="Could not list the installed apps" error={inventory.error} domain="local" onRetry={inventory.reload} />
+      </Section>
     );
   const group = resource.apiVersion.includes("/") ? resource.apiVersion.split("/")[0] : "";
   const kind = contributionKind(resource.kind, group);
@@ -134,17 +133,18 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
   return (
     <>
       {limited && lookup.status === "failed" && (
-        <section className="section extension-pod-tools" aria-label="App pod tools">
-          <h4 className="extension-detail-heading">App pod tools</h4>
-          <ErrorNotice
+        <Section title="App pod tools" className="extension-pod-tools" aria-label="App pod tools">
+          <FailureAlert
+            tone="sev"
             title="Could not list the clusters, so pod tools from apps limited to some clusters are not shown"
-            message={lookup.error}
-            retry={() => void refreshContextIds()}
+            error={lookup.error}
+            domain="local"
+            onRetry={() => void refreshContextIds()}
           />
-        </section>
+        </Section>
       )}
       {limited && lookup.status === "loading" && (
-        <p className="extension-message">Checking which clusters app pod tools are enabled for…</p>
+        <LoadingState compact label="Checking which clusters app pod tools are enabled for" />
       )}
       {offered.map(({ plugin, bindings }) => (
         <ExtensionPodTools
@@ -209,17 +209,15 @@ export function ExtensionPodTools({
   }, [bindings]);
   if (!isTauri()) {
     return (
-      <section className="section extension-pod-tools" aria-label={`${plainText(app)} pod tools`}>
-        <h4 className="extension-detail-heading">{plainText(app)} · pods</h4>
+      <Section title={`${plainText(app)} · pods`} className="extension-pod-tools" aria-label={`${plainText(app)} pod tools`}>
         <p className="extension-message">
           Logs, commands and port-forwards from apps run in the desktop app. The web app does not run app streams yet.
         </p>
-      </section>
+      </Section>
     );
   }
   return (
-    <section className="section extension-pod-tools" aria-label={`${plainText(app)} pod tools`}>
-      <h4 className="extension-detail-heading">{plainText(app)} · pods</h4>
+    <Section title={`${plainText(app)} · pods`} className="extension-pod-tools" aria-label={`${plainText(app)} pod tools`}>
       {groups.map((group) => (
         <PodGroup
           key={scopeKey(group[0])}
@@ -264,7 +262,7 @@ export function ExtensionPodTools({
           ))}
         </div>
       )}
-    </section>
+    </Section>
   );
 }
 
@@ -306,9 +304,9 @@ function PodGroup({
     () => false,
   );
   const [containers, setContainers] = useState<Record<string, string>>({});
-  if (pods.status === "loading") return <p className="extension-message">Listing the pods {plainText(first.title)} may reach…</p>;
+  if (pods.status === "loading") return <LoadingState compact label={`Listing the pods ${plainText(first.title)} may reach`} />;
   if (pods.status === "error" || !pods.data)
-    return <ErrorNotice title="Could not list the pods this app may reach" message={pods.error} retry={pods.reload} cluster />;
+    return <FailureState title="Could not list the pods this app may reach" error={pods.error} onRetry={pods.reload} />;
   const shown = place.kind === "pod" ? pods.data.pods.filter((pod) => pod.name === place.pod) : pods.data.pods;
   const podBindings = bindings.filter((binding) => !(binding.target === POD_FORWARD && binding.arguments.service === true));
   const serviceBindings = bindings.filter((binding) => binding.target === POD_FORWARD && binding.arguments.service === true);
@@ -320,9 +318,10 @@ function PodGroup({
         {pods.data.truncated ? " (more than the host lists)" : ""}.
       </p>
       {shown.length === 0 ? (
-        <p className="extension-message">
-          {place.kind === "pod" ? "This pod is not one the app may reach." : `The cluster reports no such pods right now.`}
-        </p>
+        <EmptyState
+          compact
+          title={place.kind === "pod" ? "This pod is not one the app may reach" : "The cluster reports no such pods right now"}
+        />
       ) : (
         // One block per pod, not a table: the Inspector is narrow, and a row of a pod's
         // name, state, container and every binding's control does not fit across it.
@@ -604,7 +603,7 @@ function LogsSession({
       {/* Focusable: it scrolls both ways, and a keyboard must be able to reach the rest. */}
       <div className="extension-pod-log" role="log" aria-label={`Logs of ${label}`} tabIndex={0}>
         {stream.lines.length === 0 ? (
-          <p className="extension-message">{end || stream.status === "error" ? "No lines." : "Nothing logged yet."}</p>
+          <EmptyState compact title={end || stream.status === "error" ? "No lines" : "Nothing logged yet"} />
         ) : (
           // Compact rows rather than the Logs screen's four-column line: the pod and
           // container are the session's, named in its header, and the Inspector is narrow.
@@ -742,7 +741,7 @@ function ForwardSession({
   );
   if (refused) return <p className="extension-message" role="status">The host refused the forward: {refused}</p>;
   if (end) return <p className="extension-message" role="status">{describeStreamEnd(end)}</p>;
-  if (!ready) return <p className="extension-message" role="status">Opening a local port…</p>;
+  if (!ready) return <LoadingState compact label="Opening a local port" />;
   return (
     <>
       <p className="extension-message" role="status">
@@ -751,10 +750,10 @@ function ForwardSession({
       </p>
       {failed && (
         // The cluster refused connections through it; the forward itself still listens.
-        <p className="extension-message extension-stale-notice" role="alert">
-          {failed.count === 1 ? "1 connection through it failed" : `${failed.count.toLocaleString("en-US")} connections through it failed`}
-          , the last because: {plainText(failed.message)}
-        </p>
+        <FailureAlert
+          title={failed.count === 1 ? "1 connection through it failed" : `${failed.count.toLocaleString("en-US")} connections through it failed`}
+          error={plainText(failed.message)}
+        />
       )}
     </>
   );

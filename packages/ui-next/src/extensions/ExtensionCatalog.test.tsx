@@ -15,12 +15,25 @@ it("browses on demand, searches, and reviews exact verified bytes before any ins
   expect(await screen.findByText("Flux")).toBeTruthy();
   expect(screen.getByText(/Preview/)).toBeTruthy();
   expect(screen.getByText(/Host API 0.1.0, 0.2.0/)).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("Find an app"), { target: { value: "argo" } });
-  expect(screen.getByText("No matching apps.")).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("Find an app"), { target: { value: "flux" } });
+  fireEvent.change(screen.getByRole("searchbox", { name: "Filter apps" }), { target: { value: "argo" } });
+  expect(screen.getByText("No matching apps")).toBeTruthy();
+  fireEvent.change(screen.getByRole("searchbox", { name: "Filter apps" }), { target: { value: "flux" } });
   fireEvent.click(screen.getByText("Review installation"));
   await waitFor(() => expect(review).toHaveBeenCalledWith({ manifest: '{"name":"Flux","permissions":[]}' }, { id: entry.id, sha256: "abc" }));
   expect(reviewCatalogExtension).toHaveBeenCalledWith(entry.id, "abc");
+});
+it("filters the catalog with the standard filter row, field by field", async () => {
+  render(<ExtensionCatalog onReview={vi.fn()} installed={[]} autoLoad />);
+  await screen.findByText("Flux");
+  expect(screen.getByRole("search", { name: "Filter apps" })).toBeTruthy();
+  const filter = screen.getByRole("searchbox", { name: "Filter apps" });
+  fireEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+  fireEvent.change(filter, { target: { value: "^flux$" } });
+  expect(screen.getByText("Flux")).toBeTruthy();
+  fireEvent.change(filter, { target: { value: "^lux" } });
+  expect(screen.getByText("No matching apps")).toBeTruthy();
+  fireEvent.keyDown(filter, { key: "Escape" });
+  expect(screen.getByText("Flux")).toBeTruthy();
 });
 it("shows cached refresh failures and keeps incompatible releases disabled", async () => {
   vi.mocked(listExtensionCatalog).mockResolvedValue({ ...snapshot, stale: true, error: "offline", incompatible: [entry.id] } as any);
@@ -39,16 +52,19 @@ it("surfaces download and browser errors without a developer-mode gate", async (
   vi.mocked(reviewCatalogExtension).mockRejectedValue(new Error("checksum mismatch"));
   fireEvent.click(screen.getByText("Review installation"));
   expect(await screen.findByText("checksum mismatch")).toBeTruthy();
+  // The catalog itself loaded: the headline names the action that failed (#1030 review).
+  expect(screen.getByRole("alert").textContent).toMatch(/^Could not review Flux/);
   vi.mocked(openExternal).mockRejectedValue(new Error("browser unavailable"));
   fireEvent.click(screen.getByText("Repository"));
   expect(await screen.findByText("browser unavailable")).toBeTruthy();
+  expect(screen.getByRole("alert").textContent).toMatch(/^Could not open Flux's repository/);
 });
 it("reports a first-load failure with retry, not an empty catalog", async () => {
   vi.mocked(listExtensionCatalog).mockRejectedValueOnce(new Error("offline"));
   render(<ExtensionCatalog onReview={vi.fn()} installed={[]} />);
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("offline")).toBeTruthy();
-  expect(screen.queryByText("No matching apps.")).toBeNull();
+  expect(screen.queryByText("No matching apps")).toBeNull();
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("Flux")).toBeTruthy();
 });
@@ -61,7 +77,7 @@ it("does not open a review that a newer one replaced while the release downloade
   render(<ExtensionCatalog onReview={review} onReviewStart={onReviewStart} installed={[]} autoLoad />);
   fireEvent.click(await screen.findByText("Review installation"));
   await waitFor(() => expect(reviewCatalogExtension).toHaveBeenCalledTimes(1));
-  await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   expect(onReviewStart).toHaveBeenCalledTimes(1);
   expect(review).not.toHaveBeenCalled();
   latest = true;

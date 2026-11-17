@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type RefObject } from "react";
-import type { Column } from "@srelens/ui-kit";
+import { Button, type Column } from "@srelens/ui-kit";
 import type { ListRow } from "./types";
 
 /** The column this decorates — every namespaced kind's set spells it this way. */
@@ -72,12 +72,12 @@ export function withNamespaceSelect<Row extends ListRow>(
         if (selection.includes(namespace)) return namespace;
         const label = hint(selection, namespace);
         return (
-          <button
+          <Button
             type="button"
-            // Dotted at rest, solid under the pointer or the keyboard: a
-            // name with nothing drawn on it reads as text, and nobody clicks
-            // text to find out. Dotted because this is one cell in every row.
-            className="max-w-full cursor-pointer truncate text-left underline decoration-dotted underline-offset-2 hover:decoration-solid focus-visible:decoration-solid"
+            // The kit's link: underlined at rest, because a name with nothing
+            // drawn on it reads as text, and nobody clicks text to find out.
+            variant="link"
+            className="max-w-full truncate text-left"
             title={label}
             aria-label={label}
             onClick={(e) => {
@@ -98,7 +98,7 @@ export function withNamespaceSelect<Row extends ListRow>(
             }}
           >
             {namespace}
-          </button>
+          </Button>
         );
       },
     };
@@ -121,7 +121,8 @@ export const REFOCUS_WITHIN_MS = 10_000;
  *
  * `remember(key)` names the row (by the table's own `getRowKey`); when rows
  * are next on screen under `scope` and nothing else holds focus, that row is
- * focused. It gives up — without touching focus — as soon as the reader has
+ * focused, or the table's tab stop if the row isn't drawn: it was deleted, or
+ * it is out of a long table's window. It gives up — without touching focus — as soon as the reader has
  * put focus somewhere outside the table themselves, or after {@link
  * REFOCUS_WITHIN_MS}.
  *
@@ -187,13 +188,13 @@ export function useRowRefocus(): { scope: RefObject<HTMLDivElement | null>; reme
       if (!scope.current?.contains(active)) forget();
       return;
     }
-    const rows = scope.current?.querySelectorAll<HTMLElement>("tr[data-row-key]") ?? [];
-    for (const row of rows) {
-      if (row.dataset.rowKey !== wanted.key) continue;
-      row.focus();
-      forget();
-      return;
-    }
+    const rows = Array.from(scope.current?.querySelectorAll<HTMLElement>("tr[data-row-key]") ?? []);
+    // ponytail: a long table's tab stop sits in its overscan, so focusing it moves
+    // the list by about half a view. A kit `scrollToKey` would keep the place.
+    const row = rows.find((each) => each.dataset.rowKey === wanted.key) ?? rows.find((each) => each.tabIndex === 0);
+    if (!row) return;
+    row.focus();
+    forget();
   });
 
   return { scope, remember };

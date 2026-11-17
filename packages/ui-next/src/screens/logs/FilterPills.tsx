@@ -1,5 +1,5 @@
 import { removeClause, type QueryClause, type TimeRange } from "@srelens/core";
-import { toneColor } from "@srelens/ui-kit";
+import { Button, IconButton, toneColor } from "@srelens/ui-kit";
 import { Icons } from "../../lib/icons";
 import { rangeLabel } from "./time";
 
@@ -57,10 +57,11 @@ export function FilterPills({
           }}
         />
       )}
-      <button
+      <Button
         type="button"
+        variant="text"
         // The kit's text button takes the size of what it sits in, and a row of pills is not a size.
-        className="text-btn text-[0.75rem]"
+        className="text-[0.75rem]"
         onClick={() => {
           onQueryChange("");
           onRangeChange(undefined);
@@ -68,7 +69,7 @@ export function FilterPills({
         }}
       >
         Clear all
-      </button>
+      </Button>
     </div>
   );
 }
@@ -94,9 +95,8 @@ function Pill({
       <span data-slot="pill-label" className="min-w-0 overflow-x-auto whitespace-nowrap">
         {label}
       </span>
-      <button type="button" className="icon-btn shrink-0" aria-label={removeLabel} onClick={onRemove}>
-        <Icons.close size={11} aria-hidden="true" />
-      </button>
+      {/* No tooltip: the name carries the clause, often a value off a log line. */}
+      <IconButton icon={Icons.close} label={removeLabel} title={null} className="shrink-0" onClick={onRemove} />
     </span>
   );
 }

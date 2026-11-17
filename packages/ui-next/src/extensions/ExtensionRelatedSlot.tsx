@@ -1,4 +1,4 @@
-import { Button } from "@srelens/ui-kit";
+import { Button, EmptyState, Section } from "@srelens/ui-kit";
 import { contributionKind, describeError, extensionClusterResourceRoute, extensionEnabledFor, resolveExtensionLinks,
   resolveExtensionReverseLinks, type ExtensionLinkRelation, type ExtensionLinkTarget, type ExtensionResolvedLink,
   type ExtensionReverseLink, type InstalledExtension } from "@srelens/core";
@@ -160,7 +160,7 @@ function RelatedLinks({ plugins, context, kind, resource }: {
     .map(link => <LinkRow
     key={`${answer.plugin.manifest.id}/${link.id}`} plugin={answer.plugin} link={link} at={at}/>));
   return <>
-    {none ? <p className="extension-message">No related resources.</p> : <>
+    {none ? <EmptyState compact title="No related resources" /> : <>
       {(callFailures.length > 0 || forward.length > 0) && <ul className="extension-related">{callFailures}{forward}</ul>}
       {groups.map(group => <div key={group.relation} role="group" aria-label={REVERSE[group.relation]}>
         <p className="extension-related-group">{REVERSE[group.relation]}</p>
@@ -188,16 +188,14 @@ export function ExtensionRelatedSlot({ context, resource }: { context: string; r
   if (!linkResource(resource)) return null;
   const group = resource.apiVersion.includes("/") ? resource.apiVersion.split("/")[0] : "";
   const kind = contributionKind(resource.kind, group);
-  if (inventory.status === "error") return <section className="section" aria-label="Related">
-    <h4 className="extension-detail-heading">Related</h4>
+  if (inventory.status === "error") return <Section title="Related" padded={false} aria-label="Related">
     <NativeComponent label="Related resources" state={{ status:"error", error:inventory.error ?? "" }} onRetry={inventory.reload}/>
-  </section>;
+  </Section>;
   // Until the inventory answers, whether an app links from this kind is
   // unknown: say so, rather than render the same nothing as "none does".
-  if (inventory.status === "loading" && !inventory.data) return <section className="section" aria-label="Related">
-    <h4 className="extension-detail-heading">Related</h4>
+  if (inventory.status === "loading" && !inventory.data) return <Section title="Related" padded={false} aria-label="Related">
     <NativeComponent label="Related resources" state={{ status:"loading" }}/>
-  </section>;
+  </Section>;
   const offered = (inventory.data?.plugins ?? []).filter(plugin => plugin.enabled
     && !plugin.quarantined && !plugin.policyBlocked
     && plugin.manifest.contributions.resourceLinks?.some(link => link.from === kind || link.to === kind));
@@ -206,11 +204,10 @@ export function ExtensionRelatedSlot({ context, resource }: { context: string; r
   const plugins = offered.filter(plugin => extensionEnabledFor(plugin, contextId));
   const limited = offered.some(plugin => plugin.contexts && !extensionEnabledFor(plugin, contextId));
   if (!plugins.length && !(limited && (lookup.status === "failed" || lookup.status === "loading"))) return null;
-  return <section className="section extension-detail-panel" aria-label="Related">
-    <h4 className="extension-detail-heading">Related</h4>
+  return <Section title="Related" padded={false} className="extension-detail-panel" aria-label="Related">
     {limited && lookup.status === "failed" && <NativeComponent label="Related resources"
       state={{ status:"error", error:`Could not list clusters: ${lookup.error}` }} onRetry={() => void refreshContextIds()}/>}
     {limited && lookup.status === "loading" && <NativeComponent label="Related resources" state={{ status:"loading" }}/>}
     {plugins.length > 0 && <RelatedLinks plugins={plugins} context={context} kind={kind} resource={resource}/>}
-  </section>;
+  </Section>;
 }

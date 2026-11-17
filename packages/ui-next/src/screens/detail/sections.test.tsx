@@ -29,23 +29,48 @@ function tone(container: HTMLElement, name: string): string {
   return (pill as HTMLElement | undefined)?.style.color ?? "no such condition";
 }
 
+describe("StringList", () => {
+  it("sets its items at the size of a value, so a list reads like the rows around it (#1001)", () => {
+    render(<StringList items={["ReplicaSet/web-abc123"]} />);
+    expect(screen.getByText("ReplicaSet/web-abc123").className).toContain("text-[0.75rem]");
+  });
+});
+
 describe("ConditionsSection", () => {
   it("names the block and gives every condition a row", () => {
     const { container } = render(<ConditionsSection conditions={DEPLOYMENT_CONDITIONS} />);
     expect(screen.getByRole("heading", { level: 3, name: "Conditions" })).toBeDefined();
-    expect(container.querySelectorAll(".kv")).toHaveLength(3);
+    expect(container.querySelectorAll("li")).toHaveLength(3);
   });
 
-  it("reads the condition's name on the left and its status and reason on the right", () => {
+  it("keeps a condition out of the key column, where a long name was clipped (#1001)", () => {
+    const { container } = render(<ConditionsSection conditions={DEPLOYMENT_CONDITIONS} />);
+    expect(container.querySelector(".kv-k")).toBeNull();
+  });
+
+  it("reads the condition's name, then its status and reason", () => {
     render(<ConditionsSection conditions={DEPLOYMENT_CONDITIONS} />);
     expect(screen.getByText("Available")).toBeDefined();
     expect(screen.getByText("False · MinimumReplicasUnavailable")).toBeDefined();
     expect(screen.getByText("True · ReplicaSetUpdated")).toBeDefined();
   });
 
-  it("stands an em dash in for a condition that reports no reason", () => {
-    render(<ConditionsSection conditions={DEPLOYMENT_CONDITIONS} />);
-    expect(screen.getByText("False · —")).toBeDefined();
+  it("reads a condition that reports no reason as its status alone (#1070)", () => {
+    // It used to read "False · —". On a healthy pod that was five rows of
+    // "True · —": a dash standing in for nothing, beside a word that was
+    // already the whole answer.
+    const { container } = render(<ConditionsSection conditions={DEPLOYMENT_CONDITIONS} />);
+    expect(screen.getByText("False")).toBeDefined();
+    expect(container.textContent).not.toContain("—");
+  });
+
+  it("prints nothing beside a condition with neither a status nor a reason (#1070)", () => {
+    // Argo CD's shape, with only a message: the name and the message say it.
+    const { container } = render(
+      <ConditionsSection conditions={[{ type: "ComparisonError", message: "repository not found" } as unknown as Condition]} />,
+    );
+    expect(screen.getByText("repository not found")).toBeDefined();
+    expect(container.textContent).not.toContain("—");
   });
 
   it("prints a condition's message under its status and reason (#919)", () => {
@@ -56,6 +81,13 @@ describe("ConditionsSection", () => {
     );
     expect(screen.getByText("False · ComparisonError")).toBeDefined();
     expect(screen.getByText("repository not found")).toBeDefined();
+  });
+
+  it("draws a condition's message in the content's own ink (#1001)", () => {
+    // It is what the reader opened the block for, not a footnote.
+    render(<ConditionsSection conditions={[{ type: "Synced", status: "False", message: "repository not found" }]} />);
+    expect(screen.getByText("repository not found").className).toContain("text-ink");
+    expect(screen.getByText("repository not found").className).not.toContain("text-muted");
   });
 
   it("draws no message line for a condition that reports none", () => {
@@ -90,7 +122,7 @@ describe("ConditionsSection", () => {
         conditions={[null, { type: 7 }, { type: "Ready", status: "True", message: { nested: true } }] as unknown as Condition[]}
       />,
     );
-    expect(container.querySelectorAll(".kv")).toHaveLength(1);
+    expect(container.querySelectorAll("li")).toHaveLength(1);
     expect(container.querySelector("[data-slot='condition-message']")).toBeNull();
   });
 
@@ -103,9 +135,9 @@ describe("ConditionsSection", () => {
         ] as unknown as Condition[]}
       />,
     );
-    expect(container.querySelectorAll(".kv")).toHaveLength(2);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
     expect(container.textContent).not.toContain("[object Object]");
-    expect(screen.getByText("False · —")).toBeDefined();
+    expect(screen.getByText("False")).toBeDefined();
   });
 
   it("renders two conditions of one type without a key clash", () => {
@@ -113,7 +145,7 @@ describe("ConditionsSection", () => {
     const { container } = render(
       <ConditionsSection conditions={[{ type: "Ready", status: "True" }, { type: "Ready", status: "False" }]} />,
     );
-    expect(container.querySelectorAll(".kv")).toHaveLength(2);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
     expect(errors.mock.calls.some((call) => String(call[0]).includes("same key"))).toBe(false);
     errors.mockRestore();
   });
@@ -146,7 +178,7 @@ describe("ConditionsSection", () => {
     //
     //   (danger)  Available       False · MinimumReplicasUnavailable   red name
     //   (warn)    Progressing     True  · ReplicaSetUpdated            amber name
-    //   (ok)      ReplicaFailure  False · —                            plain name
+    //   (ok)      ReplicaFailure  False                                plain name
     //
     // Every tone is core's `conditionKindWithReason`; this section keeps no
     // second heuristic, which is why the two bugs the frame exposed could be
@@ -204,7 +236,7 @@ describe("ConditionsSection", () => {
     );
     expect(screen.getByText("Initialized")).toBeDefined();
     expect(screen.getByText("Ready")).toBeDefined();
-    expect(screen.getAllByText("True · —")).toHaveLength(2);
+    expect(screen.getAllByText("True")).toHaveLength(2);
   });
 });
 
@@ -322,6 +354,12 @@ describe("AnnotationsSection — the secrecy gate, wherever it is rendered from"
     expect(documentContains(FIXTURE_VALUE)).toBe(false);
     await userEvent.click(screen.getByRole("button", { name: "Show 1 annotation" }));
     expect(documentContains(FIXTURE_VALUE)).toBe(true);
+  });
+
+  it("sets a Secret's opened annotations at the size of every other kind's", async () => {
+    render(<AnnotationsSection kind="Secret" annotations={{ "srelens.io/rotated-from": FIXTURE_VALUE }} />);
+    await userEvent.click(screen.getByRole("button", { name: "Show 1 annotation" }));
+    expect(screen.getByText(`srelens.io/rotated-from=${FIXTURE_VALUE}`).className).toContain("text-[0.75rem]");
   });
 
   it("still gates a Secret whose applied manifest the shared rule would have withheld anyway", () => {

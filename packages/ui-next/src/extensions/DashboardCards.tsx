@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { CollectionScopeNotice, NamespaceScopePicker } from "../screens/collections/NamespaceScope";
 import {
-  describeError,
   extensionCardRoute,
   extensionEnabledFor,
+  listCrds,
   resolveDashboardCards,
   type ClusterContext,
   type ExtensionDashboardCard,
@@ -12,7 +12,7 @@ import {
   selectsNothing,
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { Button, RawError, Section, Spinner } from "@srelens/ui-kit";
+import { Button, LoadingState, MetricTile, Section, Toolbar } from "@srelens/ui-kit";
 import { getKubeconfigFiles } from "../lib/clusters";
 import { FailureAlert } from "../lib/errorCopy";
 import { openTab } from "../lib/tabsStore";
@@ -24,6 +24,7 @@ import { NO_PINNED_ID_MESSAGE } from "./contextIds";
 import { plainText } from "./displayText";
 import { extensionLabel, useExtensions } from "./inventoryStore";
 import { LiveNotice, LiveStatus, useLiveApps } from "./liveReaders";
+import { crdRequirements, readersServed } from "./requirements";
 
 /**
  * The cluster dashboard's app cards (#540): one band of host-drawn figures,
@@ -44,9 +45,8 @@ export function DashboardCards({ context }: { context: ClusterContext }) {
   if (inventory.status === "error") {
     return (
       <Section title="App cards" smallCaps padded={false}>
-        <div className="dashboard-cards-message">
-          <FailureAlert tone="sev" title="App cards could not be listed" error={inventory.error} />
-          <Button variant="secondary" size="sm" onClick={inventory.reload}>Retry</Button>
+        <div className="px-3 py-2.5">
+          <FailureAlert tone="sev" title="App cards could not be listed" error={inventory.error} onRetry={inventory.reload} />
         </div>
       </Section>
     );
@@ -64,10 +64,36 @@ export function DashboardCards({ context }: { context: ClusterContext }) {
   // Still listing, or nothing declares a card: there is no band to draw, and a
   // placeholder on every cluster's overview would be furniture.
   if (apps.length === 0) return null;
-  return <CardsBand context={context} apps={apps} />;
+  return <ServedCards context={context} apps={apps} />;
 }
 
-function CardsBand({ context, apps }: { context: ClusterContext; apps: InstalledExtension[] }) {
+/**
+ * The band, over only the cards whose reader this cluster serves (#1024): a
+ * card over a missing CRD would only say "Couldn't read", and its watch would
+ * stop the band's live updates. No band while that is unknown, nor when no card
+ * is left. A discovery that fails is unknown rather than missing — ordinary
+ * RBAC often refuses it — so every card shows, as on the app's own page.
+ */
+function ServedCards({ context, apps }: { context: ClusterContext; apps: InstalledExtension[] }) {
+  const cardsOf = (plugin: InstalledExtension) => plugin.manifest.contributions.dashboardCards ?? [];
+  const needed = apps.some((plugin) => cardsOf(plugin).some((card) => crdRequirements(plugin, new Set([card.source])).length));
+  // The cluster is asked, by pinned ID, only when a card reads a CRD. An answer
+  // to another question — another cluster's, say — is no answer.
+  const key = (needed && context.pinnedId) || "";
+  // ponytail: one uncached listCrds per Overview; share the sidebar's if it shows up in a profile.
+  const discovery = useResource(async () => ({ key, ...(key ? await listCrds(key) : {}) }), [key]);
+  if (discovery.data?.key !== key) return null;
+  const crds = discovery.data.crds;
+  const served = apps
+    .map((plugin) => ({ ...plugin, manifest: { ...plugin.manifest, contributions: { ...plugin.manifest.contributions,
+      dashboardCards: cardsOf(plugin).filter((card) => readersServed(plugin, new Set([card.source]), crds)) } } }))
+    .filter((plugin) => plugin.manifest.contributions.dashboardCards.length);
+  // Refresh asks again too, so an operator installed since shows its cards. Quietly: the band
+  // stays up until the answer lands.
+  return served.length ? <CardsBand context={context} apps={served} recheck={discovery.refresh} /> : null;
+}
+
+function CardsBand({ context, apps, recheck }: { context: ClusterContext; apps: InstalledExtension[]; recheck(): void }) {
   const selection = useNamespaces(context.stableId);
   const setNamespaces = useSetNamespaces();
   const namespaceOptions = useNamespaceOptions(context.name, getKubeconfigFiles());
@@ -101,18 +127,18 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
   const stale = live.state === "reconnecting";
   return (
     <Section title="App cards" smallCaps padded={false} className="dashboard-cards-band">
-      <div className="dashboard-cards-toolbar">
+      <Toolbar wrap className="justify-end gap-x-2">
         <NamespaceScopePicker context={context} options={namespaceOptions} />
         <LiveStatus live={live} />
-        <Button variant="secondary" size="sm" aria-label="Refresh app cards" onClick={() => setRefresh((n) => n + 1)}>
+        <Button variant="secondary" size="sm" aria-label="Refresh app cards" onClick={() => { recheck(); setRefresh((n) => n + 1); }}>
           Refresh
         </Button>
-      </div>
+      </Toolbar>
       <NamespaceErrorAlert error={namespaceError} />
       <CollectionScopeNotice context={context} />
       <LiveNotice live={live} what="figures" />
       {!host ? (
-        <p className="dashboard-cards-message">{NO_PINNED_ID_MESSAGE}</p>
+        <p className="px-3 py-2.5 text-[0.75rem] text-muted">{NO_PINNED_ID_MESSAGE}</p>
       ) : (
         <div className="dashboard-cards" data-stale={stale || undefined}>
           {apps.map((plugin) =>
@@ -194,8 +220,8 @@ export function AppCards({
         const target = card.target;
         if (previewLists && card.type === "list" && answer?.state === "list" && answer.total > 0) {
           return <section key={card.id} className="extension-overview-list" aria-label={plainText(card.title)}>
-            <header className="extension-toolbar"><h3>{plainText(card.title)}</h3>{target && <Button variant="ghost" onClick={()=>onOpen(card)}>View all matching</Button>}</header>
-            <ExtensionResults plugin={plugin} capability={card.source} context={host} namespace={selection.length === 1 ? selection[0] : ""} refresh={refresh} hideToolbar card={card.id} cardNamespaces={selection.length > 1 ? selection : undefined} previewRows={answer.rows}/>
+            <Toolbar wrap><h3 className="toolbar-title mr-auto">{plainText(card.title)}</h3>{target && <Button variant="ghost" onClick={()=>onOpen(card)}>View all matching</Button>}</Toolbar>
+            <ExtensionResults plugin={plugin} capability={card.source} context={host} namespaces={selection} refresh={refresh} hideToolbar card={card.id} previewRows={answer.rows}/>
           </section>;
         }
         const windowSetting = /^\$\{settings\.([^}]+)\}$/.exec(card.predicate?.within ?? "")?.[1];
@@ -256,126 +282,98 @@ function DashboardCard({
 }) {
   const title = plainText(card.title);
   const state = stateOf(answer);
+  const { value, body, caption } = cardParts(card, title, answer, retry);
+  // The caption, the window it counts over and the app it is from, one line under the figure.
+  const description = [caption, windowLabel && `Window: ${plainText(windowLabel)}`, plainText(appName)]
+    .filter(Boolean)
+    .map((part, index) => (
+      <Fragment key={index}>
+        {index > 0 && " · "}
+        <span>{part}</span>
+      </Fragment>
+    ));
   return (
-    <section className="dashboard-card" aria-label={title} data-state={state} data-size={state === "zero" ? "s" : card.size}>
-      <header className="dashboard-card-head">
-        <span className="dashboard-card-app">{plainText(appName)}</span>
-        {open ? (
-          <button type="button" className="dashboard-card-title dashboard-card-link" aria-label={`Open ${title}`} onClick={open}>
-            {title}
-          </button>
-        ) : (
-          <h3 className="dashboard-card-title">{title}</h3>
-        )}
-      </header>
-      <CardBody card={card} title={title} answer={answer} retry={retry} />
-      {windowLabel && <p className="dashboard-card-caption">Window: {plainText(windowLabel)}</p>}
-    </section>
+    // The band lays out this cell, by the card's state and size; the kit's tile draws the card.
+    <div className="dashboard-tile" data-state={state} data-size={state === "zero" ? "s" : card.size}>
+      <MetricTile
+        label={title}
+        onOpen={open}
+        // None is an answer, drawn quieter than a count but still a figure.
+        value={value !== undefined && (state === "zero" ? <span className="text-muted">{value}</span> : value)}
+        description={description}
+      >
+        {body}
+      </MetricTile>
+    </div>
   );
 }
 
-function CardBody({
-  card,
-  title,
-  answer,
-  retry,
-}: {
-  card: ExtensionDashboardCard;
-  title: string;
-  answer: ResolvedDashboardCard | undefined;
-  retry: () => void;
-}) {
-  if (!answer) {
-    return (
-      <p role="status" className="dashboard-card-loading">
-        <Spinner role="presentation" aria-hidden="true" />
-        Loading…
-      </p>
-    );
-  }
+/**
+ * What a card shows for its answer: a figure, or something under where the figure would be,
+ * and the caption that says what the figure is. Loading and a failed read have no figure.
+ */
+function cardParts(
+  card: ExtensionDashboardCard,
+  title: string,
+  answer: ResolvedDashboardCard | undefined,
+  retry: () => void,
+): { value?: ReactNode; body?: ReactNode; caption?: ReactNode } {
+  if (!answer) return { body: <LoadingState compact /> };
   switch (answer.state) {
-    case "error": {
-      const { title: headline, raw } = describeError(answer.reason, { domain: "cluster" });
-      return (
-        <div role="alert" className="dashboard-card-error">
-          <p>
-            <strong>Couldn’t read</strong> · {headline}
-          </p>
-          <RawError text={raw || answer.reason} />
-          <Button variant="secondary" size="sm" aria-label={`Retry ${title}`} onClick={retry}>
-            Retry
-          </Button>
-        </div>
-      );
-    }
+    case "error":
+      return {
+        body: (
+          <FailureAlert tone="sev" title="Couldn’t read" error={answer.reason} domain="cluster" onRetry={retry} retryLabel={`Retry ${title}`} />
+        ),
+      };
     case "count":
-      return (
-        <>
-          <p className="dashboard-card-figure">{figure(answer.count)}</p>
-          <p className="dashboard-card-caption">{answer.count === 0 ? "None match" : "Matching"}</p>
-        </>
-      );
+      return { value: figure(answer.count), caption: answer.count === 0 ? "None match" : "Matching" };
     case "countByStatus":
-      return (
-        <>
-          <p className="dashboard-card-figure">{figure(answer.total)}</p>
-          {answer.total === 0 ? (
-            <p className="dashboard-card-caption">None match</p>
-          ) : (
-            <ul className="dashboard-card-statuses">
-              {answer.statuses.map((row) => (
-                <li key={row.status}>
-                  <span>{plainText(row.status)}</span> <span className="num">{figure(row.count)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </>
-      );
+      if (answer.total === 0) return { value: "0", caption: "None match" };
+      return {
+        value: figure(answer.total),
+        body: (
+          <ul className="text-[0.75rem]">
+            {answer.statuses.map((row) => (
+              <li key={row.status} className="flex justify-between gap-2">
+                <span>{plainText(row.status)}</span> <span className="num">{figure(row.count)}</span>
+              </li>
+            ))}
+          </ul>
+        ),
+      };
     case "metric": {
-      const aggregate = card.metric ? AGGREGATE[card.metric.aggregate] : "Value";
       if (answer.value === null) {
-        return (
-          <>
-            <p className="dashboard-card-figure">No value</p>
-            <p className="dashboard-card-caption">
+        return {
+          value: "No value",
+          caption: (
+            <>
               No matching resource has a number at <span className="path">{plainText(card.metric?.jsonPath ?? "")}</span>
-            </p>
-          </>
-        );
+            </>
+          ),
+        };
       }
-      return (
-        <>
-          <p className="dashboard-card-figure">{figure(answer.value)}</p>
-          <p className="dashboard-card-caption">
-            {aggregate} over {figure(answer.counted)} {answer.counted === 1 ? "resource" : "resources"}
-          </p>
-        </>
-      );
+      const aggregate = card.metric ? AGGREGATE[card.metric.aggregate] : "Value";
+      return {
+        value: figure(answer.value),
+        caption: `${aggregate} over ${figure(answer.counted)} ${answer.counted === 1 ? "resource" : "resources"}`,
+      };
     }
     case "list":
-      if (answer.total === 0) {
-        return (
-          <>
-            <p className="dashboard-card-figure">0</p>
-            <p className="dashboard-card-caption">None match</p>
-          </>
-        );
-      }
-      return (
-        <>
-          <ol className="dashboard-card-rows">
+      if (answer.total === 0) return { value: "0", caption: "None match" };
+      return {
+        body: (
+          <ol className="text-[0.75rem]">
             {answer.rows.map((row) => (
-              <li key={`${row.namespace}/${row.name}`} className="dashboard-card-row">
+              // Machine text keeps its line and scrolls rather than wrapping.
+              <li key={`${row.namespace}/${row.name}`} className="flex justify-between gap-2 overflow-x-auto whitespace-nowrap">
                 <span className="path">{plainText(row.namespace ? `${row.namespace}/${row.name}` : row.name)}</span>
-                {row.value !== undefined && <span className="dashboard-card-row-value">{plainText(row.value)}</span>}
+                {row.value !== undefined && <span className="num text-muted">{plainText(row.value)}</span>}
               </li>
             ))}
           </ol>
-          <p className="dashboard-card-caption">
-            {figure(answer.rows.length)} of {figure(answer.total)}
-          </p>
-        </>
-      );
+        ),
+        caption: `${figure(answer.rows.length)} of ${figure(answer.total)}`,
+      };
   }
 }

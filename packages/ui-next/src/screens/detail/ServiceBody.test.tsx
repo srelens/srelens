@@ -108,7 +108,7 @@ describe("ServiceDetailsBody", () => {
 
     it("shows a ClusterIP service's external address as a dash", () => {
       render(<ServiceDetailsBody object={service({ type: "ClusterIP" })} context="ctx" />);
-      expect(screen.getByText("—")).toBeDefined();
+      expect(screen.getByText("External IP").closest("dl")?.textContent).toBe("External IP—");
     });
 
     it("shows the selector as label pairs", () => {
@@ -275,7 +275,7 @@ describe("ServiceDetailsBody", () => {
       listEndpointSlices.mockResolvedValue({ endpointslices: [] });
       render(<ServiceDetailsBody object={service({})} context="ctx" />);
       await Promise.resolve();
-      expect(screen.queryByText("Endpoint Slices")).toBeNull();
+      expect(screen.queryByText("Endpoint slices")).toBeNull();
     });
   });
 
@@ -315,8 +315,18 @@ describe("ServiceDetailsBody", () => {
         error: "endpointslices.discovery.k8s.io is forbidden: User cannot list resource endpointslices",
       });
       render(<ServiceDetailsBody object={service({ type: "ClusterIP" })} context="ctx" />);
-      await waitFor(() => expect(screen.getByRole("heading", { name: "Endpoint Slices" })).toBeDefined());
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Endpoint slices" })).toBeDefined());
       expect(document.body.textContent).toContain("cannot list resource endpointslices");
+    });
+
+    it("lists them again on Retry", async () => {
+      listEndpointSlices.mockResolvedValue({ error: "listing endpointslices timed out" });
+      render(<ServiceDetailsBody object={service({ type: "ClusterIP" })} context="ctx" />);
+      const retry = await screen.findByRole("button", { name: "Retry" });
+      listEndpointSlices.mockResolvedValue({ endpointslices: [] });
+      await userEvent.click(retry);
+      await waitFor(() => expect(screen.queryByRole("heading", { name: "Endpoint slices" })).toBeNull());
+      expect(listEndpointSlices).toHaveBeenCalledTimes(2);
     });
 
     // Classic draws nothing at all for a Service that simply HAS no slices, and
@@ -330,7 +340,7 @@ describe("ServiceDetailsBody", () => {
         />,
       );
       await waitFor(() => expect(listEndpointSlices).toHaveBeenCalled());
-      expect(screen.queryByRole("heading", { name: "Endpoint Slices" })).toBeNull();
+      expect(screen.queryByRole("heading", { name: "Endpoint slices" })).toBeNull();
       // Connection and Ports, and nothing after them.
       expect([...container.children]).toHaveLength(2);
     });

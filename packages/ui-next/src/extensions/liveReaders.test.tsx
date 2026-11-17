@@ -43,8 +43,8 @@ afterEach(() => cleanup());
 
 const plugin = { manifest: { id: "org.example.flux", name: "Flux" }, revision: 3 } as never;
 
-function hook(capabilities: string[], onChange = vi.fn(), namespace = "team") {
-  const rendered = renderHook(() => useLiveReaders({ plugin, capabilities, context: "kind-demo", namespace, label: "page:test", onChange }));
+function hook(capabilities: string[], onChange = vi.fn(), namespaces = ["team"]) {
+  const rendered = renderHook(() => useLiveReaders({ plugin, capabilities, context: "kind-demo", namespaces, label: "page:test", onChange }));
   return { ...rendered, onChange };
 }
 
@@ -111,7 +111,7 @@ describe("live readers (#566)", () => {
   it("shares one watch per reader within a view and closes the view with it", async () => {
     const onChange = vi.fn();
     function Consumer({ capability }: { capability: string }) {
-      useLiveReaders({ plugin, capabilities: [capability], context: "kind-demo", namespace: "", label: "x", onChange });
+      useLiveReaders({ plugin, capabilities: [capability], context: "kind-demo", namespaces: [], label: "x", onChange });
       return null;
     }
     const { unmount } = render(
@@ -134,7 +134,7 @@ describe("live readers (#566)", () => {
   it("gives the web reason only on the web, and is connecting from the first render on the desktop", () => {
     const first: LiveState[] = [];
     renderHook(() => {
-      const live = useLiveReaders({ plugin, capabilities: ["kustomizations"], context: "kind-demo", namespace: "", label: "x", onChange: () => {} });
+      const live = useLiveReaders({ plugin, capabilities: ["kustomizations"], context: "kind-demo", namespaces: [], label: "x", onChange: () => {} });
       first.push(live);
       return live;
     });
@@ -158,14 +158,14 @@ describe("live readers (#566)", () => {
 
   it("follows the new app when a mounted view is handed another one, and ends the old app's view", async () => {
     const other = { manifest: { id: "org.example.argocd", name: "Argo CD" }, revision: 3 } as never;
-    const own = renderHook(({ app }) => useLiveReaders({ plugin: app, capabilities: ["apps"], context: "kind-demo", namespace: "", label: "x", onChange: () => {} }), { initialProps: { app: plugin } });
+    const own = renderHook(({ app }) => useLiveReaders({ plugin: app, capabilities: ["apps"], context: "kind-demo", namespaces: [], label: "x", onChange: () => {} }), { initialProps: { app: plugin } });
     await settle();
     own.rerender({ app: other });
     await settle();
     expect(opened.map((o) => o.request.id)).toEqual(["org.example.flux", "org.example.argocd"]);
     expect(views[0].close).toHaveBeenCalled();
     function Consumer() {
-      useLiveReaders({ plugin: other, capabilities: ["apps"], context: "kind-demo", namespace: "", label: "x", onChange: () => {} });
+      useLiveReaders({ plugin: other, capabilities: ["apps"], context: "kind-demo", namespaces: [], label: "x", onChange: () => {} });
       return null;
     }
     const provided = render(<LiveReaders plugin={plugin} label="page"><Consumer /></LiveReaders>);
@@ -191,5 +191,29 @@ describe("live readers (#566)", () => {
     expect(screen.getByText("Connecting…")).toBeTruthy();
     expect(screen.getByText("Reconnecting…")).toBeTruthy();
     expect(screen.getAllByText("Not live")).toHaveLength(2);
+  });
+
+  it("pulses only while something is arriving or about to, and says why on hover", () => {
+    // On the kit's LiveSignal (#1001): its pulse reads as "arriving", which a
+    // view that has stopped following is not.
+    const states: LiveState[] = [
+      { state: "live" }, { state: "connecting" },
+      { state: "reconnecting", message: "reset" },
+      { state: "stopped", message: "refused" }, { state: "off", reason: "web" },
+    ];
+    const pulses = states.map((state) => {
+      const { container, unmount } = render(<LiveStatus live={state} />);
+      const pulse = container.querySelector(".live-dot") !== null;
+      const why = container.querySelector("[title]")?.getAttribute("title");
+      unmount();
+      return [pulse, why];
+    });
+    expect(pulses).toEqual([
+      [true, "Updates as the cluster changes"],
+      [true, "Starting live updates"],
+      [true, "Lost the watch: reset"],
+      [false, "Live updates stopped: refused"],
+      [false, "web"],
+    ]);
   });
 });

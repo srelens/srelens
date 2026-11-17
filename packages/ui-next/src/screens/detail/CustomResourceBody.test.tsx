@@ -22,9 +22,9 @@ const value = (facts: DetailFact[], label: string) => facts.find((f) => f.label 
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
 
 describe("customResourceFacts", () => {
-  it("leads with the CRD's own printer columns and leaves out one with no value", () => {
+  it("reads the CRD's own printer columns and leaves out one with no value", () => {
     const facts = customResourceFacts(APP, COLUMNS);
-    expect(labels(facts)).toEqual(["Sync Status", "Health Status", "Namespace"]);
+    expect(labels(facts)).toEqual(["Sync Status", "Health Status"]);
     expect(value(facts, "Sync Status")).toBe("Synced");
     expect(value(facts, "Health Status")).toBe("Healthy");
   });
@@ -72,8 +72,26 @@ describe("customResourceFacts", () => {
   });
 
   it("still gives the identity facts for a resource with no column values and no status yet", () => {
-    const fresh: K8sObject = { metadata: { name: "w", namespace: "default" } };
-    expect(labels(customResourceFacts(fresh, COLUMNS))).toEqual(["Namespace"]);
+    const fresh: K8sObject = { metadata: { name: "w", namespace: "default", creationTimestamp: daysAgo(3) } };
+    expect(labels(customResourceFacts(fresh, COLUMNS))).toEqual(["Created"]);
+  });
+
+  it("leads with the identity every kind leads with (#1001)", () => {
+    const object: K8sObject = {
+      ...APP,
+      metadata: {
+        ...APP.metadata,
+        creationTimestamp: daysAgo(3),
+        ownerReferences: [{ kind: "ApplicationSet", name: "fleet" }],
+      } as K8sObject["metadata"],
+    };
+    expect(labels(customResourceFacts(object, COLUMNS))).toEqual(["Created", "Controlled by", "Sync Status", "Health Status"]);
+  });
+
+  it("says the age once, leaving a creation-time column to Created (#1001)", () => {
+    const object: K8sObject = { metadata: { name: "w", creationTimestamp: daysAgo(3) } };
+    const age: PrinterColumn = { name: "Age", jsonPath: ".metadata.creationTimestamp", type: "date" };
+    expect(labels(customResourceFacts(object, [age]))).toEqual(["Created"]);
   });
 });
 
@@ -85,7 +103,7 @@ describe("CustomResourceBody", () => {
     };
     const { container } = render(<CustomResourceBody object={object} name="guestbook" />);
     expect(screen.getByRole("heading", { level: 3, name: "Conditions" })).toBeDefined();
-    expect(screen.getByRole("heading", { level: 3, name: "Raw status" })).toBeDefined();
+    expect(screen.getByRole("heading", { level: 3, name: "Status" })).toBeDefined();
     expect(container.querySelector(".cm-content")?.textContent).toContain("Synced");
   });
 

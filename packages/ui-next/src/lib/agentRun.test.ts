@@ -483,6 +483,16 @@ describe("the run store", () => {
       expect(sendChat.mock.calls.at(-1)?.[1]).toBe("Current context: cluster prod-eu.\n\nwhat is unhealthy");
     });
 
+    it("names a custom kind's API group, so the agent does not read the built-in kind (#1076)", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("why is it degraded", {
+        about: { cluster: "prod-eu", namespace: "checkout", kind: "Deployment", group: "acme.io", name: "api" },
+      });
+      expect(sendChat.mock.calls.at(-1)?.[1]).toBe(
+        "Current context: cluster prod-eu, namespace checkout, Deployment api (a custom resource in API group acme.io).\n\nwhy is it degraded",
+      );
+    });
+
     it("omits a namespace a cluster-scoped resource does not have", async () => {
       sendChat.mockResolvedValue(null);
       await askAgent("why is it not ready", {
@@ -1201,6 +1211,26 @@ describe("the run store", () => {
       await askAgent("second", LIST);
       expect(getRunSummaries()).toHaveLength(1);
       expect(getRunSummaries()[0].turns).toBe(2);
+    });
+
+    it("keeps a custom kind apart from the built-in kind of the same name (#1076)", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("on the built-in", {
+        about: { cluster: "prod-eu", namespace: "checkout", kind: "Deployment", name: "api" },
+        route: "/k/prod-eu/Deployment/checkout/api",
+      });
+      await askAgent("on the custom", {
+        about: { cluster: "prod-eu", namespace: "checkout", kind: "Deployment", group: "acme.io", name: "api" },
+        route: "/k/prod-eu/acme.io%2FDeployment/checkout/api",
+      });
+
+      // Two conversations, and the rail can tell them apart.
+      expect(getRunSummaries().map((r) => r.subject).sort()).toEqual(["Deployment.acme.io/api", "Deployment/api"]);
+      // A built-in subject keeps the key it always had, so its saved
+      // conversations still open.
+      const builtIn = getRun("prod-eu|Deployment|checkout|api").turns.map((t) => t.text);
+      expect(builtIn).toContain("on the built-in");
+      expect(builtIn).not.toContain("on the custom");
     });
 
     it("treats a pod's logs and that pod's detail as ONE subject", async () => {

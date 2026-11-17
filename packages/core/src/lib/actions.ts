@@ -1,4 +1,5 @@
 import { invokeCapability, type Invoker } from "../transport/transport";
+import type { DynamicGvk } from "./manifest";
 
 interface ActionResult {
   ok?: boolean;
@@ -25,8 +26,20 @@ export function deleteResource(
   namespace: string | null,
   name: string,
   invoke: Invoker = invokeCapability,
+  /** A custom resource's group/version/plural — `getManifest`'s same seam. */
+  crd?: DynamicGvk,
 ): Promise<ActionResult> {
-  return run("k8s.deleteResource", { context, kind, namespace: namespace ?? "", name }, invoke);
+  return run(
+    "k8s.deleteResource",
+    {
+      context,
+      kind,
+      namespace: namespace ?? "",
+      name,
+      ...(crd && { group: crd.group, version: crd.version, plural: crd.plural }),
+    },
+    invoke,
+  );
 }
 
 /** Set replica count via `k8s.scale`. */

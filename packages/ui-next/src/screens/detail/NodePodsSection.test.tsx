@@ -153,6 +153,8 @@ describe("NodePodsSection", () => {
     podsOnNode.mockImplementation(() => new Promise(() => {}));
     const view = render(<NodePodsSection context="prod-eu" node="worker-2" />);
     expect(screen.getByText("Loading pods on worker-2")).toBeDefined();
+    // One line under the heading, not a page's worth of waiting.
+    expect(document.body.innerHTML).not.toContain("py-16");
 
     podsOnNode.mockResolvedValue({ error: "forbidden" });
     await act(async () => {
@@ -167,6 +169,21 @@ describe("NodePodsSection", () => {
       view.rerender(<NodePodsSection context="prod-eu" node="worker-4" />);
       await Promise.resolve();
     });
+    expect(screen.getByText("No pods on this node")).toBeDefined();
+  });
+
+  it("says what could not be read, and reads it again on Retry", async () => {
+    podsOnNode.mockResolvedValue({ error: "forbidden" });
+    render(<NodePodsSection context="prod-eu" node="worker-2" />);
+    await act(async () => Promise.resolve());
+    expect(screen.getByText("Could not read pods")).toBeDefined();
+
+    podsOnNode.mockResolvedValue({ pods: [] });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await Promise.resolve();
+    });
+    expect(podsOnNode).toHaveBeenCalledTimes(2);
     expect(screen.getByText("No pods on this node")).toBeDefined();
   });
 });

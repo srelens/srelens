@@ -124,7 +124,8 @@ whole inventory, because no single entry can be trusted then.
 
 ## Hosts
 
-- **Desktop:** full support in both the new and classic designs.
+- **Desktop:** full support in the new design. The deprecated classic design shows a
+  notice in place of apps and offers the switch.
 - **Web:** each signed-in user has their own inventory, kept in the server database,
   and every user reads one shared catalog only the server writes
   ([#515](https://github.com/srelens/srelens/issues/515)). Every user's apps are held

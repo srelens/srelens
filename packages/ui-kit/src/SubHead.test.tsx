@@ -26,7 +26,19 @@ describe("SubHead", () => {
     const { container } = render(<SubHead>Clients</SubHead>);
     const head = container.querySelector("h3");
     expect(head?.className).toContain("font-semibold");
-    expect(head?.className).toContain("text-[0.75rem]");
+    expect(head?.className).toContain("text-[0.8125rem]");
+    expect(head?.className).toContain("text-ink");
+  });
+
+  it("is never the size of the keys it heads", () => {
+    // #1001: at 12px the heading over a key/value list was the size of every
+    // key in it, so a run of closed sections read as more rows.
+    const kit = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+    const start = kit.indexOf(".kv-k {");
+    const key = kit.slice(start, kit.indexOf("}", start)).match(/font-size:\s*([\d.]+rem)/)?.[1];
+    expect(key).toBeDefined();
+    const { container } = render(<SubHead>Labels</SubHead>);
+    expect(container.querySelector("h3")?.className).not.toContain(`text-[${key}]`);
   });
 
   it("forwards className", () => {
@@ -73,16 +85,17 @@ describe("the small-caps voice's recipe", () => {
   const components = css.slice(css.indexOf("@layer components {"), css.indexOf("@layer utilities {"));
 
   it("is the design's pane-head recipe, in the components layer", () => {
-    // §C.3: 10px / 600 / 0.07em / uppercase / --ink-faint — the same recipe
-    // `.pane-head` wears, so a section heading and the strip above it read as
-    // one system. Asserted on the stylesheet because jsdom does no layout.
+    // §C.3: 600 / 0.07em / uppercase — the same recipe `.pane-head` wears, so
+    // a section heading and the strip above it read as one system. 11px in
+    // --ink-soft since #1001 (theme-contrast.test.ts). Asserted on the
+    // stylesheet because jsdom does no layout.
     const rule = components.slice(components.indexOf("\n  .subhead-caps {"));
     const body = rule.slice(0, rule.indexOf("}"));
-    expect(body).toContain("font-size: 0.625rem");
+    expect(body).toContain("font-size: var(--text-meta)");
     expect(body).toContain("font-weight: 600");
     expect(body).toContain("letter-spacing: 0.07em");
     expect(body).toContain("text-transform: uppercase");
-    expect(body).toContain("color: var(--ink-faint)");
+    expect(body).toContain("color: var(--ink-soft)");
     // Tokens, never a literal colour.
     expect(body).not.toMatch(/#[0-9a-f]{3,8}/i);
   });

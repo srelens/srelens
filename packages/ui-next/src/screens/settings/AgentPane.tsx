@@ -19,6 +19,7 @@ import {
   Alert,
   Badge,
   Button,
+  LoadingState,
   Panel,
   RawError,
   Select,
@@ -359,9 +360,7 @@ export function AgentPane() {
         description="srelens's own agent talks directly to a provider with your API key. The key is written to the OS keychain and never read back — only whether one is set is shown here."
       >
         {stillLoadingProviders ? (
-          <p className="text-[0.75rem] text-muted">
-            Checking configured providers…
-          </p>
+          <LoadingState compact label="Checking configured providers" />
         ) : (
           <>
             {settingsRead.kind === "error" && (
@@ -594,9 +593,7 @@ export function AgentPane() {
         description="External coding-agent CLIs srelens can drive over MCP. Only the ones found on PATH are selectable in chat."
       >
         {agentsRead.kind === "loading" && (
-          <p className="text-[0.75rem] text-muted">
-            Checking installed agent CLIs…
-          </p>
+          <LoadingState compact label="Checking installed agent CLIs" />
         )}
         {agentsRead.kind === "error" && (
           <Alert tone="sev" title="Installed agent CLIs could not be checked">
@@ -633,8 +630,9 @@ export function AgentPane() {
                     //
                     // Shrinkable here, unlike the badge: this sentence carries a
                     // CLI's name and is the long one in the row.
-                    <button
+                    <Button
                       type="button"
+                      variant="link"
                       onClick={() => {
                         const url = a.installUrl;
                         if (!url) return;
@@ -643,10 +641,10 @@ export function AgentPane() {
                           setInstallError((e) => ({ ...e, [a.kind]: err })),
                         );
                       }}
-                      className="min-w-0 truncate text-[0.75rem] text-muted underline"
+                      className="min-w-0 truncate text-[0.75rem] text-muted"
                     >
                       not installed — install {a.label}
-                    </button>
+                    </Button>
                   ) : (
                     <span className="min-w-0 truncate text-[0.75rem] text-muted">
                       not installed

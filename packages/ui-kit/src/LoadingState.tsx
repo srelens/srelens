@@ -4,6 +4,8 @@ import { cx } from "./cx";
 export interface LoadingStateProps {
   /** Text shown beneath the spinner; also the spinner's accessible label. */
   label?: string;
+  /** One line inside a block, under a heading that may hold a single table row. */
+  compact?: boolean;
   className?: string;
 }
 
@@ -16,7 +18,15 @@ export interface LoadingStateProps {
  * spinner with `text-primary`, both classic tokens that do not exist here; the
  * new design's equivalents are `text-muted` and the accent. (#318)
  */
-export function LoadingState({ label = "Loading", className }: LoadingStateProps) {
+export function LoadingState({ label = "Loading", compact, className }: LoadingStateProps) {
+  if (compact) {
+    return (
+      <div className={cx("flex items-center gap-2 py-1 text-[0.75rem] text-muted", className)}>
+        <Spinner label={label} className="size-3.5" style={{ color: "var(--accent)" }} />
+        <span>{label}</span>
+      </div>
+    );
+  }
   return (
     <div
       className={cx(

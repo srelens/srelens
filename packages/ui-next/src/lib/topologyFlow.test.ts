@@ -748,3 +748,94 @@ describe("arrowPoints", () => {
     expect(up[2][1]).toBeGreaterThan(0);
   });
 });
+
+describe("a Gateway API gateway (#1089)", () => {
+  const routed = (): TopologyGraph =>
+    graph(
+      [
+        node("Gateway/edge", "gateway", "edge"),
+        node("HTTPRoute/shop", "route", "shop"),
+        node("Ingress/legacy", "route", "legacy"),
+        node("Service/web", "service", "web"),
+        node("Deployment/web", "workload", "web"),
+        node("Service/db", "service", "db"),
+      ],
+      [
+        edge("Gateway/edge", "HTTPRoute/shop"),
+        edge("HTTPRoute/shop", "Service/web"),
+        edge("Ingress/legacy", "Service/web"),
+        edge("Service/web", "Deployment/web"),
+        edge("Deployment/web", "Service/db", { kind: "calls", provenance: "declared" }),
+      ],
+    );
+
+  it("stands a column ahead of the routes it carries, which stand ahead of the tiers", () => {
+    const g = routed();
+    const rank = rankNodes(fold(g).nodes, g.edges);
+    expect(rank.get("Gateway/edge")).toBe(0);
+    expect(rank.get("HTTPRoute/shop")).toBe(1);
+    // An Ingress is a way in too, and shares the routes' column.
+    expect(rank.get("Ingress/legacy")).toBe(1);
+    expect(rank.get("Service/web")).toBe(2);
+    expect(rank.get("Deployment/web")).toBe(2);
+    expect(rank.get("Service/db")).toBe(3);
+  });
+
+  it("names its column, and keeps each column to its own place", () => {
+    const out = layoutFlow(routed());
+    expect(out.columns.map((c) => c.label)).toEqual(["GATEWAY", "INGRESS", "ENTRY", "HOP 1"]);
+    expect(out.entryRank).toBe(2);
+    const x = (id: string) => out.nodes.find((n) => n.id === id)!.x;
+    expect(x("Gateway/edge")).toBeLessThan(x("HTTPRoute/shop"));
+    expect(x("HTTPRoute/shop")).toBe(x("Ingress/legacy"));
+    expect(x("HTTPRoute/shop") - x("Gateway/edge")).toBeGreaterThanOrEqual(NODE_WIDTH);
+    expect(x("HTTPRoute/shop") + NODE_WIDTH).toBeLessThanOrEqual(x("Service/web"));
+    // No two cards share a spot.
+    const spots = out.nodes.map((n) => `${n.x},${n.y}`);
+    expect(new Set(spots).size).toBe(spots.length);
+  });
+
+  it("is not folded into the tier its route leads to", () => {
+    const out = layoutFlow(routed());
+    const at = (id: string) => out.nodes.find((n) => n.id === id)!;
+    const web = at("Service/web");
+    // A tier is drawn as a panel; the one around `web` holds neither.
+    const panel = out.tiers.find(
+      (t) => web.x >= t.x && web.x < t.x + t.width && web.y >= t.y && web.y < t.y + t.height,
+    )!;
+    expect(panel).toBeDefined();
+    for (const id of ["Gateway/edge", "HTTPRoute/shop"]) {
+      expect(at(id).x + NODE_WIDTH).toBeLessThanOrEqual(panel.x);
+    }
+  });
+
+  it("with no routes yet still has the first column to itself", () => {
+    const g = graph(
+      [
+        node("Gateway/edge", "gateway", "edge"),
+        node("Service/web", "service", "web"),
+        node("Deployment/web", "workload", "web"),
+        node("Service/db", "service", "db"),
+      ],
+      [
+        edge("Service/web", "Deployment/web"),
+        edge("Deployment/web", "Service/db", { kind: "calls", provenance: "declared" }),
+      ],
+    );
+    const out = layoutFlow(g);
+    expect(out.columns.map((c) => c.label)).toEqual(["GATEWAY", "ENTRY", "HOP 1"]);
+    const x = (id: string) => out.nodes.find((n) => n.id === id)!.x;
+    expect(x("Gateway/edge") + NODE_WIDTH).toBeLessThanOrEqual(x("Service/web"));
+  });
+
+  it("leaves a graph without one laid out as it was", () => {
+    const g = routed();
+    const without = graph(
+      g.nodes.filter((n) => n.lane !== "gateway"),
+      g.edges.filter((e) => e.from !== "Gateway/edge"),
+    );
+    const out = layoutFlow(without);
+    expect(out.columns.map((c) => c.label)).toEqual(["INGRESS", "ENTRY", "HOP 1"]);
+    expect(out.entryRank).toBe(1);
+  });
+});

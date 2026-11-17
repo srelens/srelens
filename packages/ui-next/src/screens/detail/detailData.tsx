@@ -2,6 +2,7 @@ import { createElement, useEffect, useRef, useState, type ReactNode } from "reac
 import {
   eventVerdict,
   getManifest,
+  getSecret,
   listEvents,
   redactSecretManifest,
   resourceStatusLine,
@@ -20,20 +21,22 @@ import {
   type Column,
   type TabItem,
 } from "@srelens/ui-kit";
-import { FailureState } from "../../lib/errorCopy";
+import { FailureAlert, FailureState } from "../../lib/errorCopy";
 import { descriptorFor } from "../../lib/kinds/descriptors";
 import { SLUG_BY_K8S_KIND, isCustomKind, resolveCrdGvk } from "../../lib/crdGvk";
 import { useObject } from "../../lib/useObject";
 import { ConfigDetailsBody } from "./ConfigBody";
 import { CronJobDetailsBody } from "./CronJobBody";
 import { CustomResourceBody, customResourceFacts } from "./CustomResourceBody";
+import { GatewayApiBody } from "./GatewayApiBody";
+import { gatewayStatusLine, isGatewayApi } from "../../lib/gatewayApi";
 import { GenericBody, identityFacts } from "./GenericBody";
 import { IngressDetailsBody } from "./IngressBody";
 import { JobDetailsBody } from "./JobBody";
 import { NodeDetailsBody } from "./NodeBody";
 import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
-import { AnnotationsSection, LabelsSection, NodePodsSection } from "./sections";
-import { SecretDetailsBody } from "./SecretBody";
+import { AnnotationsSection, LabelsSection } from "./sections";
+import { SecretAnnotationsSection, SecretDetailsBody } from "./SecretBody";
 import { ServiceDetailsBody } from "./ServiceBody";
 import { useDeployRevisions, WorkloadDetailsBody, workloadFacts, type RevisionsState } from "./WorkloadBody";
 import type { DetailFact, FactsFor } from "./facts";
@@ -96,7 +99,7 @@ type PaneBody = (props: {
 }) => ReactNode;
 
 /**
- * The Details/Overview pane's per-kind TITLED blocks, keyed on `k8sKind`.
+ * The Overview pane's per-kind TITLED blocks, keyed on `k8sKind`.
  *
  * A kind absent from the table renders no nested body of its own —
  * `GenericBody` still gives it a complete, correct pane (classic's
@@ -127,7 +130,7 @@ export const DETAILS_BODY: Record<string, PaneBody> = {
  * A kind's lead fact list — the unheaded block at the top of its detail.
  *
  * Keyed on `k8sKind` like {@link DETAILS_BODY}, and falling back to
- * `identityFacts` (Namespace, Created, Controlled by) for every kind without
+ * `identityFacts` (Created, Controlled by) for every kind without
  * one of its own, which is what `GenericBody` used to render as a section.
  * DaemonSet is deliberately absent: its numbers are per-node rather than
  * replicas, so it leads with the identity facts and states its own counts in
@@ -184,6 +187,8 @@ export interface LoadState<T> {
   status: LoadStatus;
   data?: T;
   error?: string;
+  /** Load it again, from `loading`. */
+  reload?: () => void;
 }
 
 /**
@@ -227,6 +232,7 @@ export function useLoad<T>(
     targetKey,
   });
   const gen = useRef(0);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     // Reset on every identity change, not only an enabling one: `target`
@@ -255,24 +261,38 @@ export function useLoad<T>(
       if (gen.current === mine) gen.current++;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, ...target]);
+  }, [enabled, attempt, ...target]);
 
   // The gate itself: if the data currently held was fetched for a different
   // target than the one being rendered right now, it is not this render's
   // to show — substitute "loading" rather than let it leak through for even
   // one committed frame.
-  return state.targetKey === targetKey ? state : { status: "loading" };
+  return state.targetKey === targetKey
+    ? { ...state, reload: () => setAttempt((n) => n + 1) }
+    : { status: "loading" };
 }
 
-/** The pane ids both screens use. The LABELS are each screen's own — the peek
- *  heads the first pane "Details" and the tab heads it "Overview" — but a pane
- *  is the same pane in both, which is what lets one memory, one gate and one
- *  lazy-load rule serve them. */
+/** The pane ids both screens use. A pane is the same pane in both, which is
+ *  what lets one memory, one gate and one lazy-load rule serve them. */
 export const PANE_DETAILS = "details";
 export const PANE_CONTAINERS = "containers";
 export const PANE_METRICS = "metrics";
 export const PANE_YAML = "yaml";
 export const PANE_EVENTS = "events";
+
+/**
+ * One order for every detail, on both surfaces and for every kind (#1001):
+ * Overview, the kind's own panes, Events, YAML last. What a screen chooses is
+ * only which of the kind's panes it has room for.
+ */
+export function detailTabs(kindTabs: TabItem[]): TabItem[] {
+  return [
+    { id: PANE_DETAILS, label: "Overview" },
+    ...kindTabs,
+    { id: PANE_EVENTS, label: "Events" },
+    { id: PANE_YAML, label: "YAML" },
+  ];
+}
 
 /** One subject, as data and blocks — no chrome, no layout. */
 export interface DetailSubject {
@@ -281,13 +301,15 @@ export interface DetailSubject {
   error?: string;
   /** Read the subject again without blanking the pane — see `useObject`. */
   refresh: () => void;
+  /** Read the subject again from `loading`: what Retry does. */
+  reload: () => void;
   /** A custom resource (#919): no built-in table applies to it, whatever its
-   *  kind is called, and its first pane is its status. */
+   *  kind is called. */
   custom: boolean;
   /** The kind's own row actions and extra panes, or `undefined` for a CRD. */
   descriptor: ReturnType<typeof descriptorFor>;
   /** Core's one verdict on this subject — the peek's status line and the
-   *  tab's metric strip are two renderings of it, never two readings. */
+   *  metric strip's Ready tile are two renderings of it, never two readings. */
   statusLine: ResourceStatusLine | null;
   /** Whether this kind's descriptor offers containers, and metrics. What each
    *  screen DOES with that differs: the peek gives containers a tab, the tab
@@ -313,8 +335,6 @@ export interface DetailSubject {
    *  comment gives: a Secret's annotation can be the secret. */
   labels: ReactNode;
   annotations: ReactNode;
-  /** A kind-specific block that both hosts place after their metadata layout. */
-  afterMetadata: ReactNode;
   /** This kind's manifest goes through `redactSecretManifest`. */
   isSecret: boolean;
 }
@@ -340,7 +360,7 @@ export function useDetailSubject({
   /** The API group, for a custom kind only — see `isCustomKind`. */
   group?: string;
 }): DetailSubject {
-  const { object, crd, status, error, refresh } = useObject(context, kind, namespace, name, group);
+  const { object, crd, status, error, refresh, reload } = useObject(context, kind, namespace, name, group);
 
   // A custom resource reads none of the built-in tables below — not even one
   // keyed on its name, since `Deployment` in `acme.io` is not a Deployment.
@@ -369,15 +389,25 @@ export function useDetailSubject({
   const meta = object?.metadata ?? {};
 
   const bodyProps = object ? { kind, object, context, revisions } : undefined;
+  // The one group of custom resources the app reads for itself (#1089). By the
+  // CRD's group, never the kind's name: `Gateway` in `acme.io` is not one.
+  const gatewayApi = custom && isGatewayApi(group ?? crd?.group);
 
   return {
     object,
     status,
     error,
     refresh,
+    reload,
     custom,
     descriptor,
-    statusLine: object && !custom ? resourceStatusLine(kind, object) : null,
+    statusLine: !object
+      ? null
+      : gatewayApi
+        ? gatewayStatusLine(kind, object)
+        : custom
+          ? null
+          : resourceStatusLine(kind, object),
     hasContainers,
     hasMetrics,
     facts: !object
@@ -388,7 +418,10 @@ export function useDetailSubject({
     body:
       bodyProps &&
       (custom ? (
-        <CustomResourceBody object={bodyProps.object} name={name} />
+        <>
+          {gatewayApi && <GatewayApiBody object={bodyProps.object} context={context} />}
+          <CustomResourceBody object={bodyProps.object} name={name} />
+        </>
       ) : (
         <GenericBody kind={kind} object={bodyProps.object} context={context}>
           {DetailsBody && createElement(DetailsBody, bodyProps)}
@@ -403,9 +436,19 @@ export function useDetailSubject({
         : null,
     metricsPane: bodyProps && MetricsBody ? createElement(MetricsBody, bodyProps) : null,
     labels: <LabelsSection labels={meta.labels ?? {}} />,
-    annotations: <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />,
-    afterMetadata:
-      object && !custom && kind === "Node" ? <NodePodsSection context={context} node={name} /> : null,
+    // A Secret's annotation values are blanked on `getObject`; its own block
+    // reads them through `k8s.getSecret`, as its body reads the data.
+    annotations:
+      !custom && kind === "Secret" ? (
+        <SecretAnnotationsSection
+          context={context}
+          namespace={namespace ?? ""}
+          name={name}
+          blanked={meta.annotations ?? {}}
+        />
+      ) : (
+        <AnnotationsSection kind={kind} annotations={meta.annotations ?? {}} />
+      ),
     isSecret: !custom && kind === "Secret",
   };
 }
@@ -422,9 +465,9 @@ export interface DetailPaneState {
 /**
  * The pane a reader is on, and the two panes that fetch for themselves.
  *
- * `tabs` is the SCREEN's — the peek offers Details/Containers/YAML/Events, the
- * tab offers Overview/YAML/Events — and all this layer does with it is refuse
- * to stay on a pane the screen does not offer. The lazy-load rule, the target
+ * `tabs` is the SCREEN's — the peek gives Containers a tab and the full tab
+ * does not — and all this layer does with it is refuse to stay on a pane the
+ * screen does not offer. The lazy-load rule, the target
  * gate and the Secret redaction are the same in both.
  */
 export function useDetailPaneState({
@@ -461,7 +504,7 @@ export function useDetailPaneState({
   // navigation intent, not data that goes stale — the peek fills on nearly
   // every row click on an already-mounted screen, and someone comparing YAML
   // (or scanning Events) across several rows should not be thrown back to
-  // Details, and charged a click to return, on every single one. It falls
+  // Overview, and charged a click to return, on every single one. It falls
   // back to the first pane only through the guard below (`tabs.some(...)`),
   // for the one case that genuinely needs it: the new subject's kind doesn't
   // have the pane that was selected (e.g. a Pod's Containers tab, followed by
@@ -492,22 +535,32 @@ export function useDetailPaneState({
   // object's own readiness doesn't gate this fetch — `getManifest` and
   // `listEvents` don't depend on `useObject` having succeeded, and while the
   // object is loading or has errored the pane isn't visible anyway (each
-  // screen's own early return short-circuits before any tab renders).
+  // screen's own early return draws that state in the pane's place).
   const target = [context, qualifiedKind, namespace, name] as const;
   // `getManifest` needs a CRD's group/version/plural to resolve a
   // custom-resource manifest — see `resolveCrdGvk`'s own doc comment for why
   // this is looked up here rather than threaded in from a descriptor.
   const custom = isCustomKind(kind, group);
-  // The Details pane keeps a Secret's values out of the DOM until the reader
-  // reveals them, and `k8s.getManifest` is an ungated read. The host blanks a
-  // Secret's values on it (#661, `crates/kube/src/manifest.rs`); this redacts
-  // again on arrival rather than trust that alone, because without it the
-  // reveal gate is worth nothing to anyone who clicks one tab over. The
-  // redaction goes here, on the result, rather than inside `getManifest`,
-  // because other callers of that function handle a Secret their own way.
-  // Classic's drawer YAML view does exactly this too (#659).
+  // A Secret's manifest is the one `k8s.getSecret`, the audited read, answers
+  // with: the server's key order, nothing blanked (#1085). `k8s.getManifest`
+  // is an ungated read whose Secret the host blanks for every caller (#661,
+  // `crates/kube/src/manifest.rs`), so it is only the fallback here, for when
+  // that read refuses: redacted again on arrival rather than trusted, shown
+  // under this pane's own refusal and Retry.
   const isSecret = !custom && kind === "Secret";
-  const yamlState = useLoad<string>(openedPanes.has(PANE_YAML), target, async () => {
+  const yamlState = useLoad<ManifestShown>(openedPanes.has(PANE_YAML), target, async () => {
+    if (isSecret) {
+      const secret = await getSecret(context, namespace ?? "", name);
+      if (secret.yaml !== undefined) return { data: { yaml: secret.yaml } };
+      const fallback = await getManifest(context, kind, namespace, name);
+      if (fallback.error !== undefined || fallback.yaml === undefined) return { error: fallback.error };
+      // Fails closed: on any shape it does not understand the redactor
+      // returns an error and no YAML at all.
+      const redacted = redactSecretManifest(fallback.yaml);
+      return redacted.yaml === undefined
+        ? { error: redacted.error }
+        : { data: { yaml: redacted.yaml, refusal: secret.error ?? "" } };
+    }
     let crd: DynamicGvk | undefined;
     if (custom) {
       const resolved = await resolveCrdGvk(context, kind, group);
@@ -515,14 +568,7 @@ export function useDetailPaneState({
       crd = resolved.crd;
     }
     const result = await getManifest(context, kind, namespace, name, undefined, crd);
-    if (result.error !== undefined || result.yaml === undefined || !isSecret) {
-      return { data: result.yaml, error: result.error };
-    }
-    // Fails closed: on any shape it does not understand the redactor returns
-    // an error and no YAML at all, which surfaces as the pane's error rather
-    // than as an unredacted manifest.
-    const redacted = redactSecretManifest(result.yaml);
-    return redacted.error !== undefined ? { error: redacted.error } : { data: redacted.yaml };
+    return result.yaml === undefined ? { error: result.error } : { data: { yaml: result.yaml } };
   });
   const eventsState = useLoad<{ events: EventSummary[]; truncated?: boolean }>(
     openedPanes.has(PANE_EVENTS),
@@ -543,15 +589,21 @@ export function useDetailPaneState({
   return {
     active,
     selectTab,
-    yamlPane: (
-      <YamlPane state={yamlState} kind={kind} namespace={namespace} name={name} redacted={isSecret} />
-    ),
+    yamlPane: <YamlPane state={yamlState} kind={kind} namespace={namespace} name={name} />,
     eventsPane: <EventsPane state={eventsState} kind={kind} namespace={namespace} name={name} />,
   };
 }
 
+/** The manifest the YAML pane shows. */
+interface ManifestShown {
+  yaml: string;
+  /** Set when this is a Secret's REDACTED manifest: why `k8s.getSecret`
+   *  refused, raw. */
+  refusal?: string;
+}
+
 /**
- * The manifest, and the notice that says a Secret's values are not in it.
+ * The manifest, and the notice that says what of a Secret's is not in it.
  *
  * Shared by both screens because it is CONTENT: an editor, a loading line and
  * an error line, drawn the same however wide the surface is. Neither screen
@@ -562,14 +614,11 @@ function YamlPane({
   kind,
   namespace,
   name,
-  redacted,
 }: {
-  state: LoadState<string>;
+  state: LoadState<ManifestShown>;
   kind: string;
   namespace: string | null;
   name: string;
-  /** This kind's manifest went through `redactSecretManifest` — say so. */
-  redacted: boolean;
 }) {
   if (state.status === "loading") {
     return <LoadingState label={`Loading ${describeTarget(kind, namespace, name)}'s manifest`} />;
@@ -579,6 +628,7 @@ function YamlPane({
       <FailureState
         title={`Could not load ${describeTarget(kind, namespace, name)}'s manifest`}
         error={state.error}
+        onRetry={state.reload}
       />
     );
   }
@@ -609,13 +659,18 @@ function YamlPane({
           disagree. Tone "info" is a `status` region rather than an `alert`, so
           it never competes with this pane's own error state for a screen
           reader's attention. */}
-      {redacted && (
-        <Alert tone="info" title="Values redacted">
-          This Secret's values are not shown here. Reveal them one key at a time in the Details pane.
-        </Alert>
+      {/* This pane's OWN read refused, so its own refusal and its own retry:
+          the Overview makes a separate read, which may have gone through, and
+          retrying there would not reload this manifest. */}
+      {state.data.refusal !== undefined && (
+        <FailureAlert
+          title="This Secret's values could not be read, so they are redacted here"
+          error={state.data.refusal}
+          onRetry={state.reload}
+        />
       )}
       <div className="min-h-0 flex-1">
-        <CodeEditor value={state.data} readOnly language="yaml" fill copy ariaLabel={`${name} manifest`} />
+        <CodeEditor value={state.data.yaml} readOnly language="yaml" fill copy ariaLabel={`${name} manifest`} />
       </div>
     </div>
   );
@@ -645,6 +700,30 @@ const EVENT_COLUMNS: Column<EventSummary>[] = [
   { key: "age", header: "Age" },
 ];
 
+/**
+ * A subject's events as the table every detail draws, with a remark above it
+ * when the list is only part of the story. An app's resource hands in the
+ * events its read carried; {@link EventsPane} loads a built-in one's.
+ */
+export function EventsTable({ events, notice }: { events: EventSummary[]; notice?: ReactNode }) {
+  // `Table` renders `emptyText` itself for a genuinely empty list — an early
+  // `return null` here would leave a healthy, event-free object looking like
+  // a broken pane instead of a labelled one.
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      {notice}
+      <div className="min-h-0 flex-1">
+        <Table
+          columns={EVENT_COLUMNS}
+          data={events}
+          getRowKey={(e) => e.name}
+          emptyText="No events"
+        />
+      </div>
+    </div>
+  );
+}
+
 /** The subject's events. Shared for the same reason as {@link YamlPane}: a
  *  table of what happened is content, not a layout either screen owns. */
 function EventsPane({
@@ -666,27 +745,20 @@ function EventsPane({
       <FailureState
         title={`Could not load events for ${describeTarget(kind, namespace, name)}`}
         error={state.error}
+        onRetry={state.reload}
       />
     );
   }
-  // `Table` renders `emptyText` itself for a genuinely empty list — an early
-  // `return null` here would leave a healthy, event-free object looking like
-  // a broken pane instead of a labelled one.
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2">
-      {state.data.truncated && (
-        <Alert tone="info" title={`Showing the first ${state.data.events.length.toLocaleString()} events`}>
-          More remain on the cluster. This list stops at the shared list row cap.
-        </Alert>
-      )}
-      <div className="min-h-0 flex-1">
-        <Table
-          columns={EVENT_COLUMNS}
-          data={state.data.events}
-          getRowKey={(e) => e.name}
-          emptyText="No events"
-        />
-      </div>
-    </div>
+    <EventsTable
+      events={state.data.events}
+      notice={
+        state.data.truncated && (
+          <Alert tone="info" title={`Showing the first ${state.data.events.length.toLocaleString()} events`}>
+            More remain on the cluster. This list stops at the shared list row cap.
+          </Alert>
+        )
+      }
+    />
   );
 }

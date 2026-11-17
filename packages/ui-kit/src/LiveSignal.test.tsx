@@ -57,6 +57,16 @@ describe("LiveSignal", () => {
     expect(dot(container)).not.toBeNull();
   });
 
+  it("holds the dot still for a signal that has stopped", () => {
+    // A pulse says "arriving". A stream that has stopped still needs its dot
+    // and its word, but not the motion.
+    const { container } = render(<LiveSignal label="Not live" tone="muted" still />);
+    const still = container.querySelector("[aria-hidden='true']") as HTMLElement;
+    expect(still.classList.contains("live-dot")).toBe(false);
+    expect(still.style.background).toContain("var(--ink-muted)");
+    expect(screen.getByRole("status").textContent).toBe("Not live");
+  });
+
   it("marks the tone on the dot for a stylesheet to reach", () => {
     const { container } = render(<LiveSignal tone="warn" />);
     expect(dot(container).getAttribute("data-tone")).toBe("warn");

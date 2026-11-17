@@ -1,4 +1,4 @@
-import { useContext, useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import {
   inspectExtension,
   type ExtensionChange,
@@ -7,9 +7,9 @@ import {
   type ExtensionProcess,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionControls } from "./ExtensionControls";
-import { ErrorNotice } from "./ExtensionResults";
-import { LogLineRow, clock } from "./ExtensionLogs";
+import { Alert, Button, EmptyState, KVList, LoadingState } from "@srelens/ui-kit";
+import { FailureAlert } from "../lib/errorCopy";
+import { AppLogLine, clock } from "./ExtensionLogs";
 import { bytes, describeGrant, inactiveReason, installedOn, origin } from "./detailsText";
 import { plainText } from "./displayText";
 
@@ -79,16 +79,12 @@ function Part({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+/** One block in its part's grid, so the part's gap falls around the rows, not between them. */
 function Facts({ rows }: { rows: Array<[string, ReactNode]> }) {
   return (
-    <dl className="extension-facts">
-      {rows.map(([term, value]) => (
-        <div key={term}>
-          <dt>{term}</dt>
-          <dd>{value}</dd>
-        </div>
-      ))}
-    </dl>
+    <div>
+      <KVList rows={rows} />
+    </div>
   );
 }
 
@@ -97,7 +93,7 @@ function Streams({ label, streams, empty }: { label: string; streams: ExtensionO
     <>
       <h4>{label}</h4>
       {streams.length === 0 ? (
-        <p className="extension-message">{empty}</p>
+        <EmptyState compact title={empty} />
       ) : (
         <ul className="extension-inspector-streams" aria-label={label}>
           {streams.map((stream) => (
@@ -128,16 +124,16 @@ function Process({
   change(action: ExtensionChange): Promise<boolean>;
   onViewLogs(): void;
 }) {
-  const { Button } = useContext(ExtensionControls);
   const process = inspection.process;
   if (inspection.runtime === "declarative")
     return (
-      <p className="extension-message">
-        No process. This is a declarative app: srelens runs nothing of its own for it, so there is no process, memory or
-        request traffic to show.
-      </p>
+      <EmptyState
+        compact
+        title="No process"
+        hint="This is a declarative app: srelens runs nothing of its own for it, so there is no process, memory or request traffic to show."
+      />
     );
-  if (!process) return <p className="extension-message">No process is running for this app.</p>;
+  if (!process) return <EmptyState compact title="No process is running for this app" />;
   const { memory, rpc, restart } = process;
   const rows: Array<[string, ReactNode]> = [["State", <span data-state={process.state}>{STATE[process.state]}</span>]];
   // With a headline, the reason is said once, in the block beside its actions.
@@ -172,10 +168,9 @@ function Process({
   return (
     <>
       {process.message && (
-        <div className="extension-process-alert" role="alert">
-          <strong>{plainText(process.message)}</strong>
+        <Alert tone="sev" title={plainText(process.message)}>
           {process.reason && <p>{plainText(process.reason)}</p>}
-          <div className="extension-toolbar">
+          <div className="mt-2 flex flex-wrap gap-2">
             {/* The supervisor offers "restart" too, but no host capability restarts a sidecar yet (#574). */}
             {process.actions.includes("viewLogs") && (
               <Button variant="secondary" onClick={onViewLogs}>
@@ -192,7 +187,7 @@ function Process({
               </Button>
             )}
           </div>
-        </div>
+        </Alert>
       )}
       <Facts rows={rows} />
     </>
@@ -270,7 +265,7 @@ export function ExtensionInspector({
 
       <Part title="Grants">
         {plugin.grants.length === 0 ? (
-          <p className="extension-message">No capabilities are granted.</p>
+          <EmptyState compact title="No capabilities are granted" />
         ) : (
           <ul className="extension-grants" aria-label="Granted capabilities">
             {plugin.grants.map((grant) => (
@@ -285,7 +280,7 @@ export function ExtensionInspector({
       <Part title="Active contributions">
         <p className="extension-message">{activity(plugin)}</p>
         {contributed.length === 0 ? (
-          <p className="extension-message">This app contributes nothing.</p>
+          <EmptyState compact title="This app contributes nothing" />
         ) : (
           <ul className="extension-inspector-counts">
             {contributed.map((each) => (
@@ -297,7 +292,7 @@ export function ExtensionInspector({
 
       <Part title="Registered capabilities">
         {manifest.capabilities.length === 0 ? (
-          <p className="extension-message">No capabilities are registered.</p>
+          <EmptyState compact title="No capabilities are registered" />
         ) : (
           <div className="extension-inspector-table">
             <table>
@@ -326,12 +321,10 @@ export function ExtensionInspector({
         )}
       </Part>
 
-      {error !== undefined && <ErrorNotice title="Could not inspect this app" message={error} retry={retry} />}
+      {error !== undefined && <FailureAlert tone="sev" title="Could not inspect this app" error={error} domain="local" onRetry={retry} />}
       {!inspection ? (
         error === undefined && (
-          <p role="status" className="extension-message">
-            Loading…
-          </p>
+          <LoadingState compact label="Inspecting this app" />
         )
       ) : (
         <>
@@ -345,8 +338,8 @@ export function ExtensionInspector({
           </Part>
 
           <Part title="Streams and watches">
-            <Streams label="Open streams" streams={inspection.streams.open} empty="No open streams." />
-            <Streams label="Watches" streams={inspection.streams.watches} empty="No watches." />
+            <Streams label="Open streams" streams={inspection.streams.open} empty="No open streams" />
+            <Streams label="Watches" streams={inspection.streams.watches} empty="No watches" />
             <Facts
               rows={[
                 ["Opened since srelens started", count(inspection.streams.opened)],
@@ -360,16 +353,16 @@ export function ExtensionInspector({
 
           <Part title="Recent errors">
             {inspection.recentErrors.length === 0 ? (
-              <p className="extension-message">
-                {inspection.runtime === "declarative"
-                  ? "No errors recorded since srelens started. Its pages and cards show their own failures where they happen."
-                  : "No errors recorded since srelens started."}
-              </p>
+              <EmptyState
+                compact
+                title="No errors recorded since srelens started"
+                hint={inspection.runtime === "declarative" && "Its pages and cards show their own failures where they happen."}
+              />
             ) : (
               // Focusable: it scrolls both ways, and a keyboard must be able to reach the rest.
               <div className="extension-app-log" role="log" aria-label="Recent errors" tabIndex={0}>
                 {inspection.recentErrors.map((line) => (
-                  <LogLineRow key={line.seq} line={line} level={false} />
+                  <AppLogLine key={line.seq} line={line} level={false} />
                 ))}
               </div>
             )}

@@ -12,7 +12,7 @@ export type IconComponent = ComponentType<{
   "aria-hidden"?: boolean | "true" | "false";
 }>;
 
-export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "type"> {
+export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "type" | "title"> {
   icon: IconComponent;
   /**
    * The element itself, for a wrapper that needs to position against it or
@@ -25,8 +25,12 @@ export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
   /** Tints the icon with the danger colour (e.g. Delete). */
   danger?: boolean;
   disabled?: boolean;
-  /** Tooltip override (defaults to `label`; used to explain a disabled reason). */
-  title?: string;
+  /**
+   * Tooltip override (defaults to `label`; used to explain a disabled reason).
+   * `null` draws none, for a label that carries data a tooltip must not put
+   * on show: "Exclude <a term from the log>". (#1001)
+   */
+  title?: string | null;
   className?: string;
 }
 
@@ -62,7 +66,7 @@ export function IconButton({
       type="button"
       className={cx("icon-btn", className)}
       aria-label={label}
-      title={title ?? label}
+      title={title === null ? undefined : (title ?? label)}
       onClick={onClick}
       disabled={disabled}
       style={danger ? { color: "var(--sev)", ...style } : style}

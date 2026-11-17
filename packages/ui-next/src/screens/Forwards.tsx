@@ -549,17 +549,17 @@ function forwardColumns(openAddress: (row: ForwardRow) => void): Column<ForwardR
           <span className="code block truncate text-muted">{row.address}</span>
         ) : (
           <Button
-            variant="ghost"
-            size="xs"
-            className="-mx-1 max-w-full text-[0.8125rem] text-accent"
+            type="button"
+            variant="link"
+            className="max-w-full text-[0.8125rem]"
             onClick={() => openAddress(row)}
           >
-            {/* `min-w-0` as well as `truncate`: a flex item's implicit
-                `min-width: auto` refuses to shrink below its content, so
-                without it a long proxy URL widens the button instead of
+            {/* A block, for `truncate` to have a box to clip: the link button
+                is an inline-block bounded by the cell, and an inline span
+                inside it would run on past the cell's edge instead of
                 ellipsing — invisible in jsdom, which is why the class is
                 asserted. */}
-            <span className="code min-w-0 truncate">{row.address}</span>
+            <span className="code block truncate">{row.address}</span>
           </Button>
         ),
     },

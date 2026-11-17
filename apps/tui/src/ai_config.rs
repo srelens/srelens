@@ -46,7 +46,7 @@ pub fn provider_slug(kind: AiProvider) -> &'static str {
 pub fn provider_display_name(kind: AiProvider) -> &'static str {
     match kind {
         AiProvider::Anthropic => "Anthropic (Claude)",
-        AiProvider::OpenAi => "OpenAI (GPT-4o)",
+        AiProvider::OpenAi => "OpenAI",
         AiProvider::Gemini => "Google Gemini",
         AiProvider::OpenAiCompatible => "OpenAI-Compatible / Ollama (Local)",
     }
@@ -55,7 +55,7 @@ pub fn provider_display_name(kind: AiProvider) -> &'static str {
 pub fn default_model_for_provider(kind: AiProvider) -> &'static str {
     match kind {
         AiProvider::Anthropic => "claude-3-7-sonnet-20250219",
-        AiProvider::OpenAi => "gpt-4o",
+        AiProvider::OpenAi => "gpt-6-luna",
         AiProvider::Gemini => "gemini-2.5-flash",
         AiProvider::OpenAiCompatible => "llama3.2",
     }
@@ -290,6 +290,19 @@ impl AiSettings {
             }
         }
         serde_json::from_value(value)
+    }
+
+    /// This copy's agent, provider and model choices over the rest of
+    /// `shared`: keys, endpoints, limits, theme and anything added later.
+    /// Each `:mux` pane keeps its own choices but saves its whole copy.
+    pub fn with_shared_from(&self, shared: &AiSettings) -> AiSettings {
+        AiSettings {
+            agent: self.agent,
+            agent_models: self.agent_models.clone(),
+            default_provider: self.default_provider,
+            models: self.models.clone(),
+            ..shared.clone()
+        }
     }
 
     pub fn save(&self) -> Result<PathBuf, String> {
@@ -598,7 +611,7 @@ mod tests {
             s.get_model(AiProvider::Anthropic),
             "claude-3-7-sonnet-20250219"
         );
-        assert_eq!(s.get_model(AiProvider::OpenAi), "gpt-4o");
+        assert_eq!(s.get_model(AiProvider::OpenAi), "gpt-6-luna");
         assert_eq!(
             s.get_base_url(AiProvider::OpenAiCompatible),
             "http://localhost:11434/v1"

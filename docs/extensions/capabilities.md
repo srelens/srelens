@@ -167,7 +167,9 @@ The reader binding fixes the exact API version for each action.
 `extensions.resource` returns action IDs and `actionMeta`, whose `title` and
 `availableWhen` predicates come from the installed declaration. The host primitive
 supplies `impact` and `confirm`; an app cannot soften those. Inspector and bulk
-controls render these fields without a GitOps label or availability table.
+controls render these fields without a GitOps label or availability table. Where the
+app has a status resolver for the kind, the reply also carries the resolved `status`:
+the same verdict the resource's list row shows, from the same rules.
 
 Declared preconditions reject reconciliation while suspended, redundant Suspend or
 Resume requests, and Sync while an Argo CD operation exists. The primitives enforce

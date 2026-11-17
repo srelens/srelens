@@ -1043,6 +1043,8 @@ export interface ExtensionResourceSelection {
   id: string; revision: number; capability: string; context: string; namespace: string; name: string;
 }
 export interface ExtensionResourceDetail {
+  /** The verdict this resource's list row shows; absent where the app declares no rules for it. */
+  status?: ResolvedStatus;
   resource: { apiVersion?: string; kind?: string; metadata: { name: string; namespace?: string; uid: string; resourceVersion: string; creationTimestamp?: string; labels?: Record<string,string>; annotations?: Record<string,string>; [key:string]: unknown }; spec?: Record<string, any>; status?: Record<string, any>; [key:string]: unknown };
   actions: string[];
   /** Titles and display predicates come from the installed manifest; impact

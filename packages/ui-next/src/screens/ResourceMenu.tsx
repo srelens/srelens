@@ -23,6 +23,7 @@ import {
 } from "@srelens/core";
 import { ConfirmDialog, KubectlPreview, Select, TextInput, type ContextMenuItem } from "@srelens/ui-kit";
 import { ClusterMovedAlert, useClusterGate } from "../lib/clusterMoved";
+import { deleteTarget } from "../lib/crdGvk";
 import { detailRoute, editRoute } from "../lib/detailRoute";
 import { FailureLine } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
@@ -468,8 +469,10 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
       switch (pending.type) {
         // Every one of these takes `target` — the cluster the entry was picked
         // on — and never the live `context` prop. See {@link Pending}.
-        case "delete":
-          return deleteResource(target, kind, row.namespace ?? null, row.name);
+        case "delete": {
+          const { crd, error } = await deleteTarget(target, kind, group);
+          return error ? { error } : deleteResource(target, kind, row.namespace ?? null, row.name, undefined, crd);
+        }
         case "scale":
           return scaleResource(target, kind, ns, row.name, Number(replicas));
         case "restart":
@@ -635,9 +638,7 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
     if (actions.drain) {
       destructive.push({ label: ROW_ACTION_LABEL.drain, icon: Icons.drain, danger: true, onPick: () => open({ type: "drain", row }) });
     }
-    if (actions.delete !== false) {
-      destructive.push({ label: ROW_ACTION_LABEL.delete, icon: Icons.trash, danger: true, onPick: () => open({ type: "delete", row }) });
-    }
+    destructive.push({ label: ROW_ACTION_LABEL.delete, icon: Icons.trash, danger: true, onPick: () => open({ type: "delete", row }) });
     if (destructive.length) list.push({ kind: "sep" }, ...destructive);
 
     return list;
@@ -647,6 +648,7 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
     <PendingDialog
       pending={pending}
       kind={kind}
+      group={group}
       // Captured, not current. The kubectl line under the message names the
       // cluster the write will actually reach, which is the same one the alert
       // above it names.
@@ -875,6 +877,7 @@ function kubectlFor(
 function PendingDialog({
   pending,
   kind,
+  group,
   context,
   moved,
   busy,
@@ -889,6 +892,8 @@ function PendingDialog({
 }: {
   pending: Pending;
   kind: string;
+  /** A custom kind's API group — see `UseRowMenuArgs.group`. */
+  group?: string;
   /** The cluster this runs against — `pending.context`, never the live prop. */
   context: string;
   /** The cluster-moved banner and its tick, or `null` when the rail has not moved. */
@@ -930,7 +935,9 @@ function PendingDialog({
                 : pending.suspend
                   ? "Suspend"
                   : "Resume";
-  const { command, note } = kubectlFor(pending, kind, context, replicas, revision);
+  // A custom kind qualified by its group: the only spelling kubectl cannot
+  // resolve to a built-in of the same name.
+  const { command, note } = kubectlFor(pending, group ? `${kind}.${group}` : kind, context, replicas, revision);
 
   return (
     <ConfirmDialog

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { commandsFor, matchCommands, type CommandDeps } from "./agentCommands";
+import { detailRoute } from "./detailRoute";
 
 const base: Omit<CommandDeps, "route"> = {
   context: "prod-eu",
@@ -75,6 +76,16 @@ describe("the / palette", () => {
     expect(onConfigMap.some((c) => c.group === "Action")).toBe(false);
     expect(onConfigMap.some((c) => c.id === "restart")).toBe(false);
     expect(onConfigMap.some((c) => c.id === "scale")).toBe(false);
+  });
+
+  it("offers no Action or Go on a custom resource named like a built-in kind (#1066)", () => {
+    // `Deployment` in `acme.io` is not a Deployment. Its commands would open
+    // the tab of a built-in Deployment of the same name: another object, or
+    // none at all.
+    const route = detailRoute("Deployment", "checkout", "api", { cluster: "prod-eu", group: "acme.io" });
+    const onCustom = commandsFor({ ...base, route });
+    expect(onCustom.filter((c) => c.group === "Action" || c.group === "Go").map((c) => c.id)).toEqual([]);
+    expect(onCustom.some((c) => c.group === "Cluster")).toBe(true);
   });
 
   it("routes a destructive action through openAction, never straight to the capability", () => {
