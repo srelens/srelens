@@ -41,6 +41,7 @@ directly, each would reach any pod.
 | `k8s.streamLogs` | Read-only, `low` impact | The `logs` app stream. |
 | `k8s.exec` | Sensitive, confirmation-gated, `high` impact, "Run this app's command[ in {resource}][ in cluster {cluster}]?" | The `exec` app stream, after the host confirmation names the pod, container and command. |
 | `k8s.portForward` | Read-only, `medium` impact, not confirmation-gated | The `portForward` app stream. |
+| `k8s.connectPod` | Not read-only, not sensitive, `high` impact, not confirmation-gated | A tunnel the app's own program opens with `host/connect`; a view cannot open it. |
 
 `k8s.portForward` is the one row that breaks [the rule below](#impact) that an ungated
 read is `low`, on purpose. It changes nothing in the cluster, but while it is open any
@@ -104,7 +105,12 @@ anything gated is at least `medium`, and an ungated read is `low`.
 `assert_impact_matches_the_gate` (`crates/mcp/src/completeness.rs`) fails the
 build over the whole registry otherwise. The broker-only capabilities are not in
 that registry; `k8s.portForward` is an ungated read at `medium`, for the reason
-[above](#extensions).
+[above](#extensions), and `k8s.connectPod` is an ungated non-read at `high`: it
+changes nothing in the cluster itself, but gives the app's program a raw TCP
+connection to a pod's port, and nothing it sends is confirmed. An app that binds it has
+operation tools (`plugin/<id>/<operation>`) that are not read-only, are `high` impact
+and are not gated when it declares no action; with actions they are never below `high`,
+and keep everything the actions impose.
 
 A capability that accepts several named operations publishes **the highest level
 any of them reaches**, because `tools/list` and the catalog carry one row per

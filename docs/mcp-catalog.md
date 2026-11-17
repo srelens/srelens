@@ -228,9 +228,10 @@ A tool's schema and its gate are the host's, never the app's. A reader takes `co
 | declared action | `k8s.requestRolloutRestart` | needs confirmation | high |
 | declared action | `k8s.requestCordonNode` | needs confirmation | medium |
 | sidecar operation, of an app that declares no action | its app's readers, through the broker | read-only | low |
+| sidecar operation, of an app that declares no action and binds `k8s.connectPod` | its app's readers, through the broker, and tunnels to the pods it is scoped to | not read-only, not gated | high |
 | sidecar operation, of an app that declares actions | its app's readers and declared actions, through the broker | needs confirmation | at least medium, and at least its highest action's |
 
-An executable app's sidecar reaches the host only through the broker ([#573](https://github.com/srelens/srelens/issues/573)): what its app's readers read, and its app's declared actions. So an operation of an app that declares none is not gated: it can change nothing outside its sandbox. One of an app that declares actions is gated as the strongest of them, and each write the sidecar then asks for is put to a person again, naming the app; where nobody can be asked, headless, it is refused. Either way an operation's arguments are the app's own vocabulary, so the audit log redacts them whole.
+An executable app's sidecar reaches the host only through the broker ([#573](https://github.com/srelens/srelens/issues/573)): what its app's readers read, and its app's declared actions. So an operation of an app that declares none is not gated, and it changes nothing outside its sandbox unless the app binds `k8s.connectPod`: a sidecar that connects to a pod can send it anything, nothing it sends is confirmed, and the app's operations are not read-only and are high impact. One of an app that declares actions, and binds it too, is never below high. One of an app that declares actions is gated as the strongest of them, and each write the sidecar then asks for is put to a person again, naming the app; where nobody can be asked, headless, it is refused. Either way an operation's arguments are the app's own vocabulary, so the audit log redacts them whole.
 
 ## Prompts
 

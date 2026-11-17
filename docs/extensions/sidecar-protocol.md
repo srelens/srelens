@@ -291,10 +291,10 @@ There are two ways out, both through srelens:
   declares, with the limits and redirect rules of
   [Network requests](manifest.md#network-requests).
 - `host/connect`, from protocol 0.3.0: a TCP connection to a pod, carried as bytes on the
-  same pipe ([Pod tunnels in protocol 0.3.0](#pod-tunnels-in-protocol-030)). The manifest
-  grant that makes it reachable arrives with the capability change that follows this one.
-  Until then a srelens process offers no pod connections, and `host/connect` is refused
-  with `-32601`.
+  same pipe ([Pod tunnels in protocol 0.3.0](#pod-tunnels-in-protocol-030)). It is open
+  only to an app whose manifest binds `k8s.connectPod` (API 0.9), and only to pods that
+  binding's scope admits: see [Pod connections](manifest.md#pod-connections). A process
+  that offers none refuses `host/connect` with `-32601`.
 
 ### Audit
 
@@ -306,6 +306,15 @@ from the UI: a scanner reads far more than a screen does, and every read would b
 write that answers "what did this app change?". A write that has started runs to its end on
 a task of its own, so a sidecar that cancels or exits cannot leave one unrecorded; every other
 call stops when the sidecar stops waiting for it.
+
+A `host/connect` that reaches the host's checks is recorded too, opened (`ok`) or refused
+(`rejected`), with `source` `sidecar`, tool `k8s.connectPod`, decision `auto`, the app's ID
+and revision, the cluster once it is resolved, the resource `namespace/pod` (the namespace alone for a refused call that names a Service), and the args
+`{capability, pod, service, port}`, plus `targetPort` for a tunnel through a Service. No
+tunnel byte is recorded. A call of the wrong shape is refused before it is counted or
+recorded. The sixty-first call in a minute is refused without reaching the cluster and
+recorded once for that window, as `denied`. A connect the sidecar cancels while the cluster
+connection is opening leaves no record.
 
 ### Cancellation and bounds
 
@@ -642,9 +651,10 @@ a tunnel carries is the bytes the sidecar and the pod send each other.
 
 Everything below needs a negotiated version of at least 0.3.0. On a session negotiated
 lower, `host/connect` is refused with `-32601`, and every `tunnel/*` notification is
-ignored, as any unknown method is. This release specifies the wire only: a srelens process
-offers no pod connections yet, so `host/connect` is refused with `-32601` there too. The
-grant that makes it reachable arrives with the capability change that follows.
+ignored, as any unknown method is. A srelens process that offers no pod connections refuses
+`host/connect` with `-32601` too. The grant that makes a tunnel reachable is the manifest's
+`k8s.connectPod` binding ([Pod connections](manifest.md#pod-connections)): an app without
+one is refused with `-32602`.
 
 | Message | Direction | Kind | Params |
 |---|---|---|---|
