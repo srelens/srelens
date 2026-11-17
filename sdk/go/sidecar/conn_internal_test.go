@@ -6,7 +6,10 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -159,9 +162,9 @@ func returns(t *testing.T, f func() (int, error)) func() ioResult {
 // A Write waiting for room in the output queue stops when the host closes the
 // tunnel, with what was queued before it and the host's reason.
 func TestABlockedWriteReturnsTheHostsCloseReason(t *testing.T) {
-	_, c := queuedConn(t, 1)
+	h, c := queuedConn(t, 1)
 	result := returns(t, func() (int, error) { return c.Write(make([]byte, 2*maxChunk)) })
-	time.Sleep(20 * time.Millisecond) // the first chunk is queued, the second waits
+	queueIsFull(t, h) // the first chunk is queued, the second waits
 	msg := "the pod left scope"
 	c.peerClosed(&msg)
 	if r := result(); r.n != maxChunk || r.err == nil || !strings.Contains(r.err.Error(), msg) {
@@ -172,7 +175,7 @@ func TestABlockedWriteReturnsTheHostsCloseReason(t *testing.T) {
 func TestABlockedWriteReturnsErrClosedAfterALocalClose(t *testing.T) {
 	h, c := queuedConn(t, 1)
 	result := returns(t, func() (int, error) { return c.Write(make([]byte, 2*maxChunk)) })
-	time.Sleep(20 * time.Millisecond)
+	queueIsFull(t, h)
 	closed := make(chan struct{})
 	go func() { c.Close(); close(closed) }() // its own tunnel/close waits for room too
 	if r := result(); r.n != maxChunk || !errors.Is(r.err, net.ErrClosed) {
@@ -190,7 +193,7 @@ func TestABlockedCreditSendReturnsAfterTheHostsCloseAndKeepsBufferedBytes(t *tes
 		t.Fatal(why)
 	}
 	result := returns(t, func() (int, error) { return c.Read(make([]byte, 4)) })
-	time.Sleep(20 * time.Millisecond) // the credit for those 4 bytes waits
+	creditIsWaiting(t, c, 4) // the credit for those 4 bytes waits
 	msg := "the pod left scope"
 	c.peerClosed(&msg)
 	if r := result(); r.n != 4 || r.err != nil {
@@ -209,7 +212,7 @@ func TestTheSessionEndingStopsBlockedSends(t *testing.T) {
 	h, c := queuedConn(t, 1)
 	c.deliver([]byte("0123456789"))
 	write := returns(t, func() (int, error) { return c.Write(make([]byte, 2*maxChunk)) })
-	time.Sleep(20 * time.Millisecond)
+	queueIsFull(t, h)
 	h.disconnect()
 	if r := write(); r.n != maxChunk || !errors.Is(r.err, ErrSessionEnded) {
 		t.Fatalf("%+v", r)
@@ -218,9 +221,77 @@ func TestTheSessionEndingStopsBlockedSends(t *testing.T) {
 	h2, c2 := queuedConn(t, 0)
 	c2.deliver([]byte("0123456789"))
 	read := returns(t, func() (int, error) { return c2.Read(make([]byte, 4)) })
-	time.Sleep(20 * time.Millisecond)
+	creditIsWaiting(t, c2, 4)
 	h2.disconnect()
 	if r := read(); r.n != 4 || r.err != nil {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// eventually waits for cond, which only another goroutine can make true.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("never happened: %s", what)
+		}
+	}
+}
+
+// queueIsFull waits until the output queue has no room: a send now waits.
+func queueIsFull(t *testing.T, h *Host) {
+	t.Helper()
+	eventually(t, "the output queue filled", func() bool { return len(h.out.general) == queueLines })
+}
+
+// creditIsWaiting waits until a Read has taken n of the 10 delivered bytes and
+// is sending their credit, which waits for room in the full queue.
+func creditIsWaiting(t *testing.T, c *tunnelConn, n int) {
+	t.Helper()
+	eventually(t, "a Read is returning credit", func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.allowed == tunnelWindow-10+n
+	})
+}
+
+// A Read's two deadlines are always the same one, whatever order concurrent
+// setters run in: a credit send that kept an old deadline would either never
+// send (the host's window fills and it stops sending) or wait past the
+// deadline.
+func TestConcurrentReadDeadlineSettersLeaveOneDeadline(t *testing.T) {
+	_, c := queuedConn(t, queueLines)
+	past := time.Now().Add(-time.Second)
+	for i := 0; i < 50000; i++ {
+		c.SetReadDeadline(time.Time{})
+		var ready atomic.Int32
+		var wg sync.WaitGroup
+		for _, deadline := range []time.Time{past, {}} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ready.Add(1)
+				for ready.Load() < 2 { // start together
+				}
+				c.SetReadDeadline(deadline)
+			}()
+		}
+		wg.Wait()
+		if c.rd.expired() != c.cd.expired() {
+			t.Fatalf("round %d: read deadline expired: %v, credit deadline expired: %v", i, c.rd.expired(), c.cd.expired())
+		}
+	}
+}
+
+// A Read that times out reports the timeout, whatever else has happened to the
+// conn: here it waits behind another Read, and srelens has closed the tunnel.
+func TestAReadTimeoutIsATimeoutAfterTheHostsClose(t *testing.T) {
+	_, c := queuedConn(t, queueLines)
+	msg := "the pod left scope"
+	c.peerClosed(&msg)
+	c.rlock <- struct{}{} // another Read holds the lock
+	c.SetReadDeadline(time.Now().Add(-time.Second))
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("%v", err)
 	}
 }

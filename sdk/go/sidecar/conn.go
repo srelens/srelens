@@ -213,6 +213,7 @@ type tunnelConn struct {
 	id     uint64
 	remote net.Addr
 	rd, wd deadline      // the read and write deadlines; fired for good when the conn ends, wd too
+	dmu    sync.Mutex    // held while the deadlines are set, so the paired ones never differ
 	cd     deadline      // bounds the credit Read sends: the read deadline, and fired for good when the conn ends
 	rlock  chan struct{} // held for the whole of a Read
 	wlock  chan struct{} // held for the whole of a Write
@@ -263,7 +264,7 @@ func (c *tunnelConn) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if err := c.acquire(c.rlock, &c.rd); err != nil {
+	if err := c.acquire(c.rlock, &c.rd, false); err != nil {
 		return 0, err
 	}
 	defer func() { <-c.rlock }()
@@ -324,7 +325,7 @@ func (c *tunnelConn) flushCredit() {
 // Write sends p in chunks of at most 64 KiB, each spending credit, and waits
 // for credit when it has none.
 func (c *tunnelConn) Write(p []byte) (int, error) {
-	if err := c.acquire(c.wlock, &c.wd); err != nil {
+	if err := c.acquire(c.wlock, &c.wd, true); err != nil {
 		return 0, err
 	}
 	defer func() { <-c.wlock }()
@@ -340,7 +341,7 @@ func (c *tunnelConn) Write(p []byte) (int, error) {
 			c.credit += n // never sent
 			c.mu.Unlock()
 			if errors.Is(err, errStopped) {
-				return sent, c.stoppedErr()
+				return sent, c.stoppedErr(true)
 			}
 			return sent, pipeFailed(c.h.out.err)
 		}
@@ -382,12 +383,12 @@ func (c *tunnelConn) reserve(want int) (int, error) {
 
 // acquire takes a Read's or a Write's lock, waiting behind another caller
 // until Close or the deadline ends the wait.
-func (c *tunnelConn) acquire(lock chan struct{}, d *deadline) error {
+func (c *tunnelConn) acquire(lock chan struct{}, d *deadline, write bool) error {
 	select {
 	case lock <- struct{}{}:
 		return nil
 	case <-d.wait():
-		return c.stoppedErr()
+		return c.stoppedErr(write)
 	}
 }
 
@@ -401,15 +402,16 @@ func (c *tunnelConn) writeErr() error {
 	return c.gone
 }
 
-// stoppedErr is why a wait stopped: Close, or the tunnel's end, or else the
-// write deadline.
-func (c *tunnelConn) stoppedErr() error {
+// stoppedErr is why a wait stopped: Close, or (for a write) the tunnel's end,
+// or else the deadline. A read's wait ends only by Close or its deadline: what
+// srelens sent before closing is still read.
+func (c *tunnelConn) stoppedErr(write bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch {
 	case c.closed:
 		return net.ErrClosed
-	case c.gone != nil:
+	case write && c.gone != nil:
 		return c.writeErr()
 	}
 	return os.ErrDeadlineExceeded
@@ -517,11 +519,24 @@ func (c *tunnelConn) stopWaits() {
 }
 
 func (c *tunnelConn) SetDeadline(t time.Time) error {
-	c.SetReadDeadline(t)
-	return c.SetWriteDeadline(t)
+	c.dmu.Lock()
+	defer c.dmu.Unlock()
+	c.rd.set(t)
+	c.cd.set(t)
+	c.wd.set(t)
+	return nil
 }
 
-func (c *tunnelConn) SetReadDeadline(t time.Time) error  { c.rd.set(t); c.cd.set(t); return nil }
+// SetReadDeadline sets the read deadline and the credit deadline that mirrors
+// it together: a concurrent setter cannot leave them different.
+func (c *tunnelConn) SetReadDeadline(t time.Time) error {
+	c.dmu.Lock()
+	defer c.dmu.Unlock()
+	c.rd.set(t)
+	c.cd.set(t)
+	return nil
+}
+
 func (c *tunnelConn) SetWriteDeadline(t time.Time) error { c.wd.set(t); return nil }
 
 // deadline is a channel that closes when its time passes, as net.Pipe's is:
