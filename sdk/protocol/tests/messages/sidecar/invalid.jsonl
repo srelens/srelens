@@ -37,6 +37,9 @@
 {"jsonrpc":"2.0","id":"t-1","method":"host/connect","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"kafka","tunnel":1}}
 {"jsonrpc":"2.0","id":"t-1","method":"host/connect","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"kafka","pod":"broker-0","tunnel":0}}
 {"jsonrpc":"2.0","id":"t-1","method":"host/connect","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"kafka","pod":"broker-0","tunnel":1}}
+{"jsonrpc":"2.0","id":"t-1","method":"host/connect","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"kafka","pod":null,"service":"kafka","tunnel":1}}
+{"jsonrpc":"2.0","id":"t-1","method":"host/connect","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"kafka","pod":"broker-0","service":null,"tunnel":1}}
+{"jsonrpc":"2.0","id":"t-1","method":"host/connect","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"kafka","name":null,"pod":"broker-0","tunnel":1}}
 # Credit is 1 to the window, and data is base64 text
 {"jsonrpc":"2.0","method":"tunnel/credit","params":{"tunnel":1,"bytes":0}}
 {"jsonrpc":"2.0","method":"tunnel/credit","params":{"tunnel":1,"bytes":262145}}

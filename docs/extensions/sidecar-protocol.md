@@ -674,7 +674,7 @@ Each is in [the schema](../../schemas/sidecar-protocol.v0.3.json).
 - **`tunnel`** is chosen by the sidecar: a positive integer, greater than every tunnel id it
   has used in this session. An id is never reused, so a frame still queued for a closed
   tunnel cannot land on a new one. A call whose params do not parse as the shape above (a
-  missing or mistyped field, both or neither of `pod` and `service`) is refused with
+  missing or mistyped field, an explicit `null` for `name`, `pod` or `service`, both or neither of `pod` and `service`) is refused with
   `-32602` before its id is counted. Once the params parse, the id is used up, whatever the
   outcome: refused (including for a `name`, `pod`, `service`, cluster or namespace that is
   not a valid name), failed or cancelled. A sidecar should treat every id it

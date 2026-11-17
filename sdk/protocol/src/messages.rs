@@ -331,13 +331,25 @@ pub struct HostConnectParams {
     pub context: JobContext,
     #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
     pub capability: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_present"
+    )]
     #[cfg_attr(feature = "schema", schemars(schema_with = "object_name"))]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_present"
+    )]
     #[cfg_attr(feature = "schema", schemars(schema_with = "object_name"))]
     pub pod: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_present"
+    )]
     #[cfg_attr(feature = "schema", schemars(schema_with = "object_name"))]
     pub service: Option<String>,
     #[serde(deserialize_with = "read_tunnel")]
@@ -415,6 +427,12 @@ pub struct TunnelCloseParams {
     pub tunnel: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// An optional string field the schema types as a string: absent is `None`,
+/// and an explicit null is refused.
+fn read_present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(d).map(Some)
 }
 
 fn read_tunnel<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
@@ -982,6 +1000,31 @@ mod tests {
         let mut neither = connect();
         neither.as_object_mut().unwrap().remove("pod");
         assert!(serde_json::from_value::<HostConnectParams>(neither).is_err());
+    }
+
+    #[test]
+    fn connect_refuses_an_explicit_null_pod_service_or_name() {
+        // The schema types all three as strings: absent is fine, null is not.
+        for (field, other) in [
+            ("pod", Some(("service", "kafka"))),
+            ("service", Some(("pod", "broker-0"))),
+            ("name", None),
+        ] {
+            let mut params = connect();
+            if let Some((key, value)) = other {
+                if key == "pod" {
+                    params["pod"] = json!(value);
+                } else {
+                    params.as_object_mut().unwrap().remove("pod");
+                    params["service"] = json!(value);
+                }
+            }
+            params[field] = Value::Null;
+            assert!(
+                serde_json::from_value::<HostConnectParams>(params.clone()).is_err(),
+                "{params}"
+            );
+        }
     }
 
     #[test]

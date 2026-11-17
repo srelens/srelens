@@ -1922,6 +1922,29 @@ mod tests {
         assert_eq!(open_tunnels(&connection), 2);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_connect_with_a_null_pod_is_refused_without_using_up_its_id() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024);
+        connection
+            .handle(
+                Incoming::Request {
+                    id: json!("c3"),
+                    method: method::HOST_CONNECT.into(),
+                    params: json!({"context": {"clusterId": "prod", "namespace": "team"},
+                        "capability": "kafka", "pod": null, "service": "kafka", "tunnel": 3}),
+                },
+                &broker,
+            )
+            .expect("a connect is not a violation");
+        let reply = answered(&mut lines).await;
+        assert_eq!(reply["error"]["code"], code::INVALID_PARAMS, "{reply}");
+        assert!(upstreams.try_recv().is_err(), "the broker was asked");
+        // The id was not counted: tunnel 3 itself still opens.
+        let _three = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 3).await;
+        assert_eq!(open_tunnels(&connection), 1);
+    }
+
     /// A broker whose connection opens in the same moment the reader accepts
     /// the sidecar's cancellation of the connect.
     struct CancelledAsItConnects {

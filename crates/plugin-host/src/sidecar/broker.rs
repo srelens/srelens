@@ -1735,6 +1735,16 @@ mod tests {
             case[field] = value;
             cases.push(case);
         }
+        // An explicit null is not an absent field: the schema types these as strings.
+        for (field, other) in [("pod", "service"), ("service", "pod"), ("name", "")] {
+            let mut case = connect_params();
+            if !other.is_empty() {
+                case.as_object_mut().unwrap().remove("pod");
+                case[other] = json!("kafka-0");
+            }
+            case[field] = Value::Null;
+            cases.push(case);
+        }
         for params in cases {
             let parsed = serde_json::from_value::<HostConnectParams>(params.clone()).is_ok();
             assert_eq!(parsed, validator.is_valid(&params), "{params}");
