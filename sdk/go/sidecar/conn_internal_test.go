@@ -8,8 +8,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -259,26 +257,22 @@ func creditIsWaiting(t *testing.T, c *tunnelConn, n int) {
 // setters run in: a credit send that kept an old deadline would either never
 // send (the host's window fills and it stops sending) or wait past the
 // deadline.
-func TestConcurrentReadDeadlineSettersLeaveOneDeadline(t *testing.T) {
+func TestTheReadAndCreditDeadlinesAreSetUnderOneLock(t *testing.T) {
 	_, c := queuedConn(t, queueLines)
-	past := time.Now().Add(-time.Second)
-	for i := 0; i < 50000; i++ {
-		c.SetReadDeadline(time.Time{})
-		var ready atomic.Int32
-		var wg sync.WaitGroup
-		for _, deadline := range []time.Time{past, {}} {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				ready.Add(1)
-				for ready.Load() < 2 { // start together
-				}
-				c.SetReadDeadline(deadline)
-			}()
+	for name, set := range map[string]func(time.Time) error{"SetReadDeadline": c.SetReadDeadline, "SetDeadline": c.SetDeadline} {
+		held := false
+		c.betweenDeadlines = func() {
+			// Between the read deadline and the credit deadline: a concurrent
+			// setter must not be able to run here.
+			if c.dmu.TryLock() {
+				c.dmu.Unlock()
+				return
+			}
+			held = true
 		}
-		wg.Wait()
-		if c.rd.expired() != c.cd.expired() {
-			t.Fatalf("round %d: read deadline expired: %v, credit deadline expired: %v", i, c.rd.expired(), c.cd.expired())
+		set(time.Now().Add(time.Hour))
+		if !held {
+			t.Fatalf("%s did not hold the deadline lock between its paired updates", name)
 		}
 	}
 }
