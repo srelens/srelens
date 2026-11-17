@@ -1278,9 +1278,11 @@ by a reader, the object (`name`). Two things differ from a forward:
   reach. For a binding scoped by namespaces, the list is the limit.
 - **Only the program opens one.** The binding is never a tool, and a view can neither
   open it nor list its pods: `extensions.streams` and `extensions.pods` refuse it with
-  "… is a k8s.connectPod binding, which only the app's program may open". Nothing a
-  sidecar sends through a tunnel is confirmed by a person, from the UI or from an MCP
-  client.
+  "… is a k8s.connectPod binding, which only the app's program may open". What a
+  sidecar sends through a tunnel is not confirmed byte by byte. The app's operations,
+  which run the program, are: an agent's call to one is confirmed per call (see
+  [what the host holds a sidecar to](#what-the-host-holds-a-sidecar-to)), while the
+  app's own pages run them without a prompt, on the grant given at install.
 
 The binding runs under the row `CONNECT_ANNOTATIONS`: not read-only, not destructive,
 no confirmation, not sensitive, and **high** impact. The install review says "High
@@ -1447,11 +1449,15 @@ Each operation is an MCP tool, `plugin/<id>/<name>`, alongside the app's readers
 actions. For an app that declares no action it is read-only and not gated, since the
 sidecar can change nothing outside its sandbox, unless the app binds
 [`k8s.connectPod`](#pod-connections): then it is not read-only, is high impact, and is
-still not gated. For one that declares actions it is gated as the strongest of them,
-because the sidecar may ask the broker to run them, and never below high when the app
-binds `k8s.connectPod`; each such write is then confirmed again, naming the app. Nothing
-a sidecar sends through a tunnel is confirmed. Either way it is sensitive, so the audit
-log redacts its arguments whole ([MCP.md](../MCP.md#installed-apps-tools)).
+gated, so an agent's call stops at "Let this app's program run its operation? It may
+send data to the pods it can connect to." (headless, it is refused unless the process
+allows destructive tools and the call says `_confirm`). The app's own pages run it
+through `extensions.callOperation` without a prompt. For one that declares actions it
+is gated as the strongest of them, because the sidecar may ask the broker to run them,
+and never below high when the app binds `k8s.connectPod`; each such write is then
+confirmed again, naming the app, and its pages do not run its operations. Nothing a
+sidecar sends through a tunnel is confirmed byte by byte. Either way it is sensitive,
+so the audit log redacts its arguments whole ([MCP.md](../MCP.md#installed-apps-tools)).
 
 ## Rules the desktop app adds
 

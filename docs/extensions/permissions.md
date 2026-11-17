@@ -119,8 +119,10 @@ fourth, `k8s.connectPod` (API 0.9), is for an executable app's own program: see
 - **Only the app's program, for `k8s.connectPod`.** Its sidecar may open a TCP
   connection to the binding's one port on a pod in scope, directly or through a Service
   that selects one, and the host relays the bytes over the sidecar's pipe. A view can
-  neither open it nor list its pods. It is **high** impact and nothing the sidecar sends is
-  confirmed. For a binding scoped by a reader's objects, the permission's `namespaces`
+  neither open it nor list its pods. It is **high** impact, and what the sidecar sends
+  is not confirmed byte by byte; the app's operations are gated instead, so an agent's
+  call to one is confirmed per call, while the app's own pages run them on the grant
+  given at install. For a binding scoped by a reader's objects, the permission's `namespaces`
   do not limit the namespace the sidecar names: it reaches the pods of any object of
   the reader's kind that the reader can read, in any namespace, as a port-forward does.
   Only for a binding scoped by namespaces is the list the limit. An unsigned executable

@@ -38,8 +38,10 @@ mitigation and the risk that remains.
   may also connect to a pod's port, with `k8s.connectPod`: the host opens the
   connection to a pod in scope and relays its bytes, the sandbox gains nothing, every
   connect is audited, and the review says "High impact". The permission's namespaces do
-  not limit a binding scoped by a reader's objects, and nothing sent through a tunnel
-  is confirmed ([manifest.md](manifest.md#pod-connections)).
+  not limit a binding scoped by a reader's objects, and what is sent through a tunnel
+  is not confirmed byte by byte; an agent's call to the app's operations, which run the
+  program, is confirmed per call, and the app's own pages run them on the grant given at
+  install ([manifest.md](manifest.md#pod-connections)).
 - **Consent cannot be weakened.** Bindings inherit the host capability's annotations,
   and so do an app's MCP tools ([MCP.md](../MCP.md#installed-apps-tools)). Mutating
   operations stay behind the MCP consent gate, and every UI action opens a host-owned

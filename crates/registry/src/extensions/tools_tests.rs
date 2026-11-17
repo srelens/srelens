@@ -780,3 +780,148 @@ async fn where_nobody_can_be_asked_a_sidecars_write_is_refused_and_recorded() {
         "the refusal is in the audit trail"
     );
 }
+
+/// The scanner, at manifest API 0.9, whose program may also connect to port 9092 of
+/// any pod in `team` (#1091). It declares no action. Its revision.
+fn install_connecting_scanner(path: &Path) -> u64 {
+    install_scanner(path);
+    let mut manifest = super::executable_tests::scanner_manifest();
+    manifest["srelensApiVersion"] = json!("^0.9");
+    manifest["permissions"] = json!([{"capability": "k8s.connectPod", "namespaces": ["team"]}]);
+    manifest["capabilities"] = json!([{"name": "anyPod", "title": "Any pod in team",
+        "target": "k8s.connectPod", "inputs": [], "arguments": {"port": 9092}}]);
+    let reviewed = read(path).unwrap().plugins.iter().find(|app| app.manifest.id == SCANNER).map(|app| app.revision);
+    use base64::Engine as _;
+    configure(
+        path,
+        json!({"action": "installPackage", "grants": ["k8s.connectPod"], "reviewedRevision": reviewed,
+            "package": base64::engine::general_purpose::STANDARD.encode(package_with_binaries(&manifest))}),
+    )
+    .unwrap()
+    .plugins
+    .iter()
+    .find(|app| app.manifest.id == SCANNER)
+    .unwrap()
+    .revision
+}
+
+/// Every gated call an MCP host put to its policy, answered `approve`.
+struct Asking {
+    approve: bool,
+    asked: Mutex<Vec<srelens_mcp::policy::ConsentRequest>>,
+}
+
+impl Asking {
+    fn new(approve: bool) -> Arc<Self> {
+        Arc::new(Self { approve, asked: Mutex::default() })
+    }
+}
+
+#[async_trait::async_trait]
+impl ConfirmPolicy for Asking {
+    async fn confirm(&self, request: &srelens_mcp::policy::ConsentRequest) -> srelens_mcp::policy::Decision {
+        self.asked.lock().unwrap().push(request.clone());
+        if self.approve {
+            srelens_mcp::policy::Decision::Approved
+        } else {
+            srelens_mcp::policy::Decision::Denied("the person declined".into())
+        }
+    }
+}
+
+const CONNECT_CONFIRM: &str =
+    "Let this app's program run its operation? It may send data to the pods it can connect to.";
+
+/// An agent's call to an operation of an app whose program may connect to pods stops
+/// at the host's consent gate (#1091): asked, run on approval, refused on a decline,
+/// and refused where nobody can be asked unless the operator allowed it.
+#[tokio::test]
+async fn an_agents_call_to_a_pod_connecting_apps_operation_is_confirmed() {
+    let setup = setup(fake_core());
+    let fake = FakeSidecar::default();
+    setup.tools.script_sidecars(Arc::new(fake.clone()));
+    install_connecting_scanner(&setup.path);
+    let scans = || fake.methods().iter().filter(|(_, method)| method == "scan").count();
+    let args = json!({"image": "nginx:1.27"});
+
+    // The GUI-hosted server: a person is asked, in the host's words, and approves.
+    let yes = Asking::new(true);
+    let mcp = server(&setup, yes.clone());
+    assert_eq!(mcp.consent_kind(SCAN), Some(srelens_mcp::policy::ConsentKind::Destructive));
+    let ran = srelens_mcp::stdio::handle_request(&mcp, &call(SCAN, args.clone()), Transport::Http)
+        .await
+        .unwrap();
+    assert_eq!(ran["result"]["isError"], false, "{ran}");
+    let asked = yes.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].tool, SCAN);
+    assert_eq!(asked[0].impact, srelens_capability::Impact::High);
+    assert_eq!(asked[0].prompt(), CONNECT_CONFIRM);
+    assert_eq!(scans(), 1);
+
+    // Declined: never run.
+    let no = Asking::new(false);
+    let declined = srelens_mcp::stdio::handle_request(&server(&setup, no.clone()), &call(SCAN, args.clone()), Transport::Http)
+        .await
+        .unwrap();
+    assert_eq!(declined["result"]["_meta"]["srelens/denied"], true, "{declined}");
+    assert_eq!(no.asked.lock().unwrap().len(), 1);
+    assert_eq!(scans(), 1);
+
+    // Headless: nobody to ask, so denied; and denied without the operator's flag or
+    // without the caller's `_confirm`.
+    let mut confirmed = args.clone();
+    confirmed["_confirm"] = json!(true);
+    for (policy, input) in [
+        (Arc::new(AlwaysDeny) as Arc<dyn ConfirmPolicy>, confirmed.clone()),
+        (Arc::new(FlagGated::new(false, true)), confirmed.clone()),
+        (Arc::new(FlagGated::new(true, false)), args.clone()),
+    ] {
+        let refused = srelens_mcp::stdio::handle_request(&server(&setup, policy), &call(SCAN, input), Transport::Stdio)
+            .await
+            .unwrap();
+        assert_eq!(refused["result"]["_meta"]["srelens/denied"], true, "{refused}");
+    }
+    assert_eq!(scans(), 1);
+    // The operator's allow and the caller's intent together let it run.
+    let allowed = srelens_mcp::stdio::handle_request(
+        &server(&setup, Arc::new(FlagGated::new(true, false))),
+        &call(SCAN, confirmed),
+        Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    assert_eq!(allowed["result"]["isError"], false, "{allowed}");
+    assert_eq!(scans(), 2);
+}
+
+/// The app's own page runs the same operation with no prompt: the person granted the
+/// connection at install. An app that declares actions is still refused there.
+#[tokio::test]
+async fn the_apps_own_page_runs_a_pod_connecting_operation_without_asking() {
+    let setup = setup(fake_core());
+    let fake = FakeSidecar::default();
+    setup.tools.script_sidecars(Arc::new(fake.clone()));
+    let revision = install_connecting_scanner(&setup.path);
+    let asking = Asking::new(false);
+    let _mcp = server(&setup, asking.clone());
+    let cap = setup.registry.get("extensions.callOperation").unwrap();
+    let answer = (cap.handler)(json!({"id": SCANNER, "revision": revision, "context": "demo",
+        "operation": "scan", "params": {"image": "alpine"}}))
+    .await
+    .unwrap();
+    assert_eq!(answer["params"], json!({"image": "alpine"}));
+    assert!(asking.asked.lock().unwrap().is_empty(), "the page path asked for consent");
+
+    // An app that declares an action: its gated operation is not run from a page.
+    let (relaying, _mcp, relayed) = relaying(Arc::new(srelens_plugin_host::sidecar::NoConsent), Arc::new(Spy::default()));
+    let argocd = read(&relaying.path).unwrap().plugins.iter().find(|app| app.manifest.id == "org.example.argocd").unwrap().revision;
+    let cap = relaying.registry.get("extensions.callOperation").unwrap();
+    let refused = (cap.handler)(json!({"id": "org.example.argocd", "revision": argocd, "context": "demo",
+        "operation": "relay", "params": {"method": "host/read", "params": "{}"}}))
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains("require confirmation through its installed-app tools"), "{refused}");
+    assert!(relayed.methods().iter().all(|(_, method)| method != "relay"));
+}

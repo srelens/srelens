@@ -107,10 +107,15 @@ build over the whole registry otherwise. The broker-only capabilities are not in
 that registry; `k8s.portForward` is an ungated read at `medium`, for the reason
 [above](#extensions), and `k8s.connectPod` is an ungated non-read at `high`: it
 changes nothing in the cluster itself, but gives the app's program a raw TCP
-connection to a pod's port, and nothing it sends is confirmed. An app that binds it has
-operation tools (`plugin/<id>/<operation>`) that are not read-only, are `high` impact
-and are not gated when it declares no action; with actions they are never below `high`,
-and keep everything the actions impose.
+connection to a pod's port, and nothing it sends is confirmed byte by byte. An app that
+binds it has operation tools (`plugin/<id>/<operation>`) that are not read-only, are
+`high` impact and are confirmation-gated, so an agent's call to one stops at a
+confirmation ("Let this app's program run its operation? It may send data to the pods
+it can connect to.") and every non-read tool is gated, with no exception. The app's own
+pages run the same operations through `extensions.callOperation` without a prompt,
+because the person granted the connection at install; that path still refuses the
+operations of an app that declares actions. With actions they are never below `high`,
+keep everything the actions impose, and are asked in one sentence naming both.
 
 A capability that accepts several named operations publishes **the highest level
 any of them reaches**, because `tools/list` and the catalog carry one row per

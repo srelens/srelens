@@ -64,12 +64,15 @@ pub const SIDECAR_OPERATION: Annotations = Annotations {
 
 /// What a sidecar operation runs under when its app declares no action but
 /// connects to pods (`k8s.connectPod`): what its sidecar sends through a tunnel
-/// can change whatever listens there, so it is not a read, and it is High
-/// impact. Not gated: the grant was given at install, and the app's own pages
-/// run its operations.
+/// can change whatever listens there, so it is not a read, it is High impact,
+/// and an agent's call is gated, in [`SIDECAR_OPERATION_CONNECT_CONFIRM`]'s
+/// words. The app's own pages run it without a prompt
+/// (`extensions.callOperation`): the person granted the connection at install.
 pub const SIDECAR_OPERATION_CONNECTING: Annotations = Annotations {
     read_only: false,
+    requires_confirm: true,
     impact: srelens_capability::Impact::High,
+    confirm: Some(SIDECAR_OPERATION_CONNECT_CONFIRM),
     ..SIDECAR_OPERATION
 };
 
@@ -77,6 +80,16 @@ pub const SIDECAR_OPERATION_CONNECTING: Annotations = Annotations {
 /// is asked, and that every change it leads to is asked about again.
 pub const SIDECAR_OPERATION_CONFIRM: &str =
     "Let this app's sidecar run its operation? It may ask to run the app's declared actions, and each one is confirmed on its own.";
+
+/// The host's sentence for an operation of an app that connects to pods and
+/// declares no action: the program runs, and what it sends reaches pods.
+pub const SIDECAR_OPERATION_CONNECT_CONFIRM: &str =
+    "Let this app's program run its operation? It may send data to the pods it can connect to.";
+
+/// The host's sentence for an operation of an app that connects to pods and
+/// declares actions: both of what it may then do.
+pub const SIDECAR_OPERATION_CONNECT_AND_ACT_CONFIRM: &str =
+    "Let this app's program run its operation? It may send data to the pods it can connect to, and ask to run the app's declared actions, each confirmed on its own.";
 
 /// What a sidecar operation runs under, given the host rows of the actions its
 /// app declares (`actions`).
@@ -91,7 +104,8 @@ pub const SIDECAR_OPERATION_CONFIRM: &str =
 /// which would describe a write the operation may never make. Each write it
 /// then asks for is confirmed again by the broker's consent, with the app
 /// named. An app that also connects to pods is never below
-/// [`SIDECAR_OPERATION_CONNECTING`].
+/// [`SIDECAR_OPERATION_CONNECTING`], and is asked in
+/// [`SIDECAR_OPERATION_CONNECT_AND_ACT_CONFIRM`]'s words.
 pub fn sidecar_operation_annotations(
     actions: impl IntoIterator<Item = Annotations>,
     connects_to_pods: bool,
@@ -105,7 +119,11 @@ pub fn sidecar_operation_annotations(
         reach = reach.at_least(SIDECAR_OPERATION_CONNECTING);
     }
     let mut row = Annotations::for_binding(reach, SIDECAR_OPERATION);
-    row.confirm = Some(SIDECAR_OPERATION_CONFIRM);
+    row.confirm = Some(if connects_to_pods {
+        SIDECAR_OPERATION_CONNECT_AND_ACT_CONFIRM
+    } else {
+        SIDECAR_OPERATION_CONFIRM
+    });
     row
 }
 
