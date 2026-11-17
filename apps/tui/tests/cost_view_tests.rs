@@ -649,3 +649,35 @@ async fn a_failed_look_for_a_cost_tool_is_not_reported_as_an_installed_one() {
     let (msg, _, _) = app.toast.clone().expect("told the user");
     assert!(msg.contains("Could not check"), "{msg}");
 }
+
+#[tokio::test]
+async fn the_timed_refresh_does_not_supersede_a_read_that_is_still_running() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.switch_view_to_kind(ResourceKind::Cost).await;
+    let request = |app: &srectl::app::App| match &app.active_view {
+        ActiveView::Cost(c) => c.request,
+        _ => panic!(),
+    };
+    let started = request(&app);
+
+    // The 30s timer fires several times while a slow read (up to the 120s
+    // request timeout) is still out. None of them may renumber the view, or the
+    // slow answer would be dropped as stale and never appear.
+    for _ in 0..1000 {
+        app.handle_tick();
+    }
+    assert_eq!(request(&app), started, "the read in flight is left alone");
+
+    app.handle_cost_reply(started, "test-cluster", Ok(data()));
+    match &app.active_view {
+        ActiveView::Cost(c) => assert!(c.data.is_some() && !c.is_loading, "the slow answer is shown"),
+        _ => panic!(),
+    }
+
+    // Once idle, the timer refreshes again.
+    for _ in 0..300 {
+        app.handle_tick();
+    }
+    assert_ne!(request(&app), started, "an idle dashboard still refreshes itself");
+}

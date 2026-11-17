@@ -203,7 +203,7 @@ pub struct App {
     pub notifications_rows: usize,
     /// Alerts raised up to this bookmark were there when the reader last opened
     /// or moved the overlay; only those are marked read as they are drawn.
-    notifications_seen_upto: u64,
+    pub notifications_seen_upto: u64,
     /// What the one-slot toast loses, plus alerts raised by the pod watcher.
     pub notifications: crate::notifications::NotificationCenter,
     pub toast: Option<(String, Instant, Style)>,
@@ -243,7 +243,7 @@ pub struct App {
     /// shows the install's real state instead of the one it was left in.
     pub kubecost_installs: std::collections::HashMap<String, (cost_view::InstallState, Option<Instant>)>,
     /// Numbers cost fetches, so a reply is accepted only from the latest one.
-    cost_request_seq: u64,
+    pub cost_request_seq: u64,
     /// The install started from `:cost`. Never aborted on a cluster switch:
     /// killing Helm half way leaves a half-installed release behind.
     pub kubecost_install_task: Option<tokio::task::AbortHandle>,
@@ -838,7 +838,7 @@ impl App {
         if matches!(self.active_view, ActiveView::Cost(_)) {
             self.node_metrics_tick_counter = self.node_metrics_tick_counter.saturating_add(1);
             if self.node_metrics_tick_counter.is_multiple_of(300) {
-                self.reload_cost_view();
+                self.refresh_cost_view_if_idle();
             }
         }
 
@@ -865,7 +865,7 @@ impl App {
             } else if self.node_metrics_tick_counter.is_multiple_of(100)
                 && !self.node_metrics_tick_counter.is_multiple_of(300)
             {
-                self.reload_cost_view();
+                self.refresh_cost_view_if_idle();
             }
         }
 
@@ -13096,6 +13096,15 @@ impl App {
             let _ = event_tx.send(crate::event::AppEvent::CostResult { request, context: ctx, result });
         });
         request
+    }
+
+    /// The timed refreshes. A read still in flight is left to finish: starting
+    /// another would renumber the view and make its slow answer look stale,
+    /// so a read that takes longer than the refresh interval would never show.
+    fn refresh_cost_view_if_idle(&mut self) {
+        if matches!(&self.active_view, ActiveView::Cost(c) if !c.is_loading) {
+            self.reload_cost_view();
+        }
     }
 
     pub fn reload_cost_view(&mut self) {
