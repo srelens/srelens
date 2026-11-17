@@ -2243,6 +2243,16 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_chunk_of_too_long_text_closes_the_tunnel_not_the_session() {
+        let (connection, mut lines) = tunnel_session();
+        let (broker, mut upstreams) = pods(1024 * 1024);
+        let mut upstream = opened_tunnel(&connection, &mut lines, &broker, &mut upstreams, 1).await;
+        let params = json!({"tunnel": 1, "data": "A".repeat(87_388)});
+        assert_eq!(frame(&connection, "tunnel/data", params), Ok(()));
+        closed_saying(&connection, &mut lines, &mut upstream, 1, "65536").await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn credit_past_the_window_closes_the_tunnel() {
         let (connection, mut lines) = tunnel_session();
         let (broker, mut upstreams) = pods(1024 * 1024);

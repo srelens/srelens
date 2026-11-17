@@ -273,6 +273,7 @@ var fieldShapes = map[string]fieldShape{
 	"HostRunJobParams.capability":                  {pattern: regexp.MustCompile("^[A-Za-z0-9-]{1,64}$"), maxLength: 64, not: []string(nil)},
 	"JobContext.clusterId":                         {pattern: regexp.MustCompile("[^\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"), maxLength: 4096, not: []string(nil)},
 	"JobContext.namespace":                         {pattern: regexp.MustCompile("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"), maxLength: 63, not: []string(nil)},
+	"TunnelDataParams.data":                        {pattern: regexp.MustCompile("^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"), maxLength: 87384, not: []string(nil)},
 }
 
 // fieldShape is one string field's rule: at most maxLength bytes, matching pattern, and none of not.

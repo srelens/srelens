@@ -11,7 +11,7 @@ use serde_json::json;
 use serde_json::Value;
 
 use crate::bounds::MAX_CLUSTER_ID_BYTES;
-use crate::TUNNEL_WINDOW_BYTES;
+use crate::{MAX_TUNNEL_CHUNK_TEXT, TUNNEL_WINDOW_BYTES};
 // What only the schema's patterns and limits read.
 #[cfg(feature = "schema")]
 use crate::bounds::{
@@ -434,8 +434,10 @@ fn read_credit<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
 
 fn read_base64<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     let data = String::deserialize(d)?;
-    if !crate::shape::is_base64(&data) {
-        return Err(serde::de::Error::custom("data is base64 text"));
+    if data.len() > MAX_TUNNEL_CHUNK_TEXT || !crate::shape::is_base64(&data) {
+        return Err(serde::de::Error::custom(
+            "data is base64 text of at most 65536 bytes",
+        ));
     }
     Ok(data)
 }
@@ -455,6 +457,7 @@ fn base64_text(_: &mut SchemaGenerator) -> Schema {
     schema(json!({
         "type": "string",
         "pattern": "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+        "maxLength": MAX_TUNNEL_CHUNK_TEXT,
     }))
 }
 
@@ -1021,6 +1024,17 @@ mod tests {
         for bad in ["aGk", "aGk=\n", "a=Gk", "a-Gk", "aGk=aGk=", "=", "é==="] {
             assert!(data(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn tunnel_data_is_at_most_a_chunk_of_base64() {
+        let data = |len: usize| {
+            serde_json::from_value::<TunnelDataParams>(
+                json!({"tunnel": 1, "data": "A".repeat(len)}),
+            )
+        };
+        assert!(data(87_384).is_ok());
+        assert!(data(87_388).is_err());
     }
 
     #[test]

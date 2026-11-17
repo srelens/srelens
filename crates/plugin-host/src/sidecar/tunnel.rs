@@ -25,7 +25,7 @@ use super::connection::Connection;
 use super::protocol::{self, method, Violation};
 use srelens_sidecar_protocol::{
     TunnelCloseParams, TunnelCreditParams, TunnelDataParams, MAX_TUNNEL_CHUNK_BYTES,
-    TUNNEL_WINDOW_BYTES,
+    MAX_TUNNEL_CHUNK_TEXT, TUNNEL_WINDOW_BYTES,
 };
 
 /// Tunnel frames that may wait for the writer. A pump with a full lane stops
@@ -34,9 +34,6 @@ use srelens_sidecar_protocol::{
 pub const TUNNEL_LANE: usize = 32;
 
 const WINDOW: usize = TUNNEL_WINDOW_BYTES as usize;
-
-/// The longest base64 text of one chunk, checked before decoding it.
-const MAX_CHUNK_TEXT: usize = MAX_TUNNEL_CHUNK_BYTES.div_ceil(3) * 4;
 
 /// A byte stream to a pod.
 pub trait TunnelIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -113,12 +110,17 @@ pub(super) fn open(
 impl OpenTunnel {
     /// A `tunnel/data` frame. `Some(why)` when it breaks the tunnel's rules.
     fn received(&mut self, params: Value) -> Option<String> {
+        let too_long = params
+            .get("data")
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.len() > MAX_TUNNEL_CHUNK_TEXT);
         let bytes = match serde_json::from_value::<TunnelDataParams>(params) {
-            Ok(frame) if frame.data.len() > MAX_CHUNK_TEXT => None,
             Ok(frame) => match BASE64.decode(frame.data) {
                 Ok(bytes) => Some(bytes),
                 Err(_) => return Some("sent tunnel data that is not base64".into()),
             },
+            // The text is too long to be a chunk; not a malformed frame.
+            Err(_) if too_long => None,
             Err(_) => return Some("sent tunnel data that is not base64".into()),
         };
         let Some(bytes) = bytes.filter(|bytes| bytes.len() <= MAX_TUNNEL_CHUNK_BYTES) else {

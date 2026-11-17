@@ -115,6 +115,8 @@ pub const MAX_TUNNELS: usize = 16;
 pub const TUNNEL_WINDOW_BYTES: u32 = 262_144;
 /// The most bytes (before base64) one `tunnel/data` frame carries.
 pub const MAX_TUNNEL_CHUNK_BYTES: usize = 65_536;
+/// The most base64 characters one `tunnel/data` frame carries.
+pub const MAX_TUNNEL_CHUNK_TEXT: usize = MAX_TUNNEL_CHUNK_BYTES.div_ceil(3) * 4;
 /// `host/connect` calls a sidecar may make per minute.
 pub const MAX_CONNECTS_PER_MINUTE: u32 = 60;
 
