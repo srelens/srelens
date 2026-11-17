@@ -764,6 +764,8 @@ pub const FORWARD_ANNOTATIONS: Annotations = Annotations {
 
 /// `k8s.connectPod`'s: it changes nothing in the cluster by itself, but gives an
 /// app's own program a raw TCP connection to a pod's port, so it is high impact.
+/// Broker-only and never a tool; the app's operations, which run that program,
+/// are the gated tools (`SIDECAR_OPERATION_CONNECTING`).
 pub const CONNECT_ANNOTATIONS: Annotations = Annotations {
     read_only: false,
     destructive: false,

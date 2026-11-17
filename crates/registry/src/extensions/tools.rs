@@ -142,8 +142,10 @@ impl AppTools {
             return Err(CapabilityError::InvalidInput("The operation's cluster differs from its pinned cluster".into()));
         }
         let app = state.plugins[index].clone();
-        // Native views currently serve reading apps. An app that can write
-        // needs the operation-level consent its dynamic MCP tool already has.
+        // Native views serve apps that declare no action. An app whose sidecar may
+        // ask for a write needs the operation-level consent its MCP tool has. One
+        // that only connects to pods (#1091) runs here unprompted, on the grant
+        // given at install, though its MCP tool is gated for agents.
         if !app.manifest.actions.is_empty() { return Err(CapabilityError::InvalidInput("This app's operations require confirmation through its installed-app tools".into())); }
         let operation = app.manifest.operation(&input.operation).ok_or_else(|| CapabilityError::InvalidInput("This app does not declare the operation".into()))?;
         let params = operation.check_input(&Value::Object(input.params.clone())).map_err(CapabilityError::InvalidInput)?;

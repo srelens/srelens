@@ -375,7 +375,9 @@ preview until API 1.0, and so are executable apps
   needs a verified publisher or the unsigned-app setting even without writes, and runs
   its sidecar only in the OS sandbox, starting on its first operation call. Its sidecar
   reaches the host only through the broker (#573): an operation of an app that declares
-  no action is read-only and not gated, and one of an app that declares actions is gated
+  no action is read-only and not gated unless the app binds `k8s.connectPod` (then an
+  agent's call is confirmed, and the app's own pages run it unprompted), and one of an
+  app that declares actions is gated
   as the strongest of them, each write it asks for confirmed again, naming the app. See
   [What the host holds a sidecar to](manifest.md#what-the-host-holds-a-sidecar-to).
 - The host supports API 0.3, 0.4, 0.5 and 0.6, and `extensions.catalog` reports all
