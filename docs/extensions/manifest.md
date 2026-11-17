@@ -1459,7 +1459,7 @@ The desktop app accepts a narrower surface than the developer broker:
 
 - Targets are `k8s.listCustomResource`, `k8s.listEvents`, the built-in workload and
   node summary readers, `network.http`, or a pod capability (`k8s.streamLogs`,
-  `k8s.exec`, `k8s.portForward`). A provider sends its query through a `network.http`
+  `k8s.exec`, `k8s.portForward`, and for executable apps `k8s.connectPod`). A provider sends its query through a `network.http`
   binding, so an app with providers is refused wherever `network.http` is (on the web,
   without the operator's network ceiling).
   A reader target must be read-only with no

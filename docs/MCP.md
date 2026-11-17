@@ -544,9 +544,9 @@ host only through the broker ([#573](https://github.com/srelens/srelens/issues/5
 what its app's readers read, and its app's declared actions. So an operation of an
 app that declares no action is read-only and not gated, unless it binds a
 [pod connection](extensions/manifest.md#pod-connections), which makes it not read-only and
-high impact, still not gated (nothing a sidecar sends to a pod is confirmed); one of an app that declares actions is gated as
-the strongest of them, in the host's own sentence for an operation, and never below high
-when the app binds one. Either way it is **sensitive**: its arguments are the app's own
+high impact, still not gated (nothing a sidecar sends to a pod is confirmed); one of an
+app that declares actions is gated as the strongest of them, in the host's own sentence
+for an operation, and never below high when the app binds one. Either way it is **sensitive**: its arguments are the app's own
 vocabulary, so the audit log redacts them whole.
 
 **A sidecar's writes are asked about again, naming the app.** Every write a sidecar

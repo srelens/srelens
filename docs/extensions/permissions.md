@@ -98,7 +98,7 @@ nothing can call it except through an installed app's binding. See
 Logs, exec and port-forwards (API 0.5, [#567](https://github.com/srelens/srelens/issues/567)),
 each a separate permission: `k8s.streamLogs`, `k8s.exec` and `k8s.portForward`. A
 fourth, `k8s.connectPod` (API 0.9), is for an executable app's own program: see
-the fourth item below.
+"Only the app's program, for `k8s.connectPod`" below.
 
 - **Only pods in scope.** A pod binding names a reader whose objects select pods, and
   reaches only the pods one object's own label selector selects, in its namespace; or

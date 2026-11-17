@@ -308,12 +308,13 @@ a task of its own, so a sidecar that cancels or exits cannot leave one unrecorde
 call stops when the sidecar stops waiting for it.
 
 A `host/connect` that reaches the host's checks is recorded too, opened (`ok`) or refused
-(`rejected`), with `source` `sidecar`, tool `k8s.connectPod`, decision `auto`, the app's ID
+(`rejected`), with `source` `app`, `transport` `sidecar`, tool `k8s.connectPod`, decision `auto`, the app's ID
 and revision, the cluster once it is resolved, the resource `namespace/pod` (the namespace alone for a refused call that names a Service), and the args
 `{capability, pod, service, port}`, plus `targetPort` for a tunnel through a Service. No
 tunnel byte is recorded. A call of the wrong shape is refused before it is counted or
 recorded. The sixty-first call in a minute is refused without reaching the cluster and
-recorded once for that window, as `denied`. A connect the sidecar cancels while the cluster
+recorded once for that window, as `denied`, with the args `{capability, pod, service}` (no
+`port`) and the resource `namespace/pod`, or none when it names a Service. A connect the sidecar cancels while the cluster
 connection is opening leaves no record.
 
 ### Cancellation and bounds
