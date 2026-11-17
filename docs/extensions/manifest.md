@@ -1325,7 +1325,9 @@ grant, and on any inventory change that revokes it: each tick rechecks the app a
 the saved inventory, so a change made in another srelens process counts too. The scope
 object's selector is read once, when the tunnel opens, and not again while it is open.
 A tunnel is unattended, so a pod it cannot read is not taken to be still there: three
-failed reads in a row, about six seconds, end it with the read's error, and a read that
+failed reads in a row end it with the read's error: about six seconds when the cluster
+answers with an error, longer when it does not answer, since a read counts only once it
+finishes or times out. The app's access is rechecked every tick meanwhile. A read that
 answers starts the count again, so one or two failures (a blip) change nothing.
 
 The frames each source sends are in [streams.md](streams.md#logs).
