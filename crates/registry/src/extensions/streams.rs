@@ -23,7 +23,7 @@ mod providers;
 mod operations;
 pub(super) use pods::MAX_LINE_BYTES;
 pub use pods::{ExecConfirmed, PodTiming};
-pub(crate) use pods::{pod_still_there, Authority, ExtensionStreamsParts, Record};
+pub(crate) use pods::{read_pod, Authority, ExtensionStreamsParts, Record};
 #[cfg(test)]
 pub(super) use pods::MAX_LINES_PER_FRAME;
 

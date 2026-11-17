@@ -922,7 +922,8 @@ impl LogFollow {
 
 /// The monitor's check of a forwarded pod, every [`PodTiming::monitor`]: `Err`
 /// with why when it left `scope`, `Ok(false)` when it is gone or not running,
-/// else `Ok(true)` — a read that got no answer is not the pod going away.
+/// else `Ok(true)` — a read that got no answer is not the pod going away: a
+/// person is watching a view's forward.
 pub(crate) async fn pod_still_there(
     cluster: &dyn PodCluster,
     context: &str,
@@ -930,11 +931,24 @@ pub(crate) async fn pod_still_there(
     app: &str,
     pod: &str,
 ) -> Result<bool, String> {
+    Ok(read_pod(cluster, context, scope, app, pod).await?.unwrap_or(true))
+}
+
+/// [`pod_still_there`], with a failed read said rather than taken as the pod
+/// still there: `Ok(Err(why))` when the read failed. An unattended pod tunnel
+/// (#1091) counts those.
+pub(crate) async fn read_pod(
+    cluster: &dyn PodCluster,
+    context: &str,
+    scope: &Scope,
+    app: &str,
+    pod: &str,
+) -> Result<Result<bool, String>, String> {
     match cluster.pod(context, &scope.namespace, pod).await {
         Ok(Some(facts)) if !scope.admits(&facts) => Err(scope.refusal(app, pod)),
-        Ok(Some(facts)) => Ok(facts.running()),
-        Ok(None) => Ok(false),
-        Err(_) => Ok(true),
+        Ok(Some(facts)) => Ok(Ok(facts.running())),
+        Ok(None) => Ok(Ok(false)),
+        Err(error) => Ok(Err(ScopeError::from(error).into())),
     }
 }
 

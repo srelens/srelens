@@ -127,6 +127,10 @@ pub(super) struct Cluster {
     failed_reads: Mutex<BTreeMap<usize, ReadError>>,
     /// Lets an `EndWhenLetGo` session end.
     let_go: std::sync::atomic::AtomicBool,
+    /// Pod reads so far, and how the next ones go: `Some` fails with it,
+    /// `None` answers; once it is empty every read answers.
+    pub(super) pod_reads: AtomicUsize,
+    pub(super) pod_answers: Mutex<std::collections::VecDeque<Option<ReadError>>>,
 }
 
 /// Counts itself out of `open` when the connection it echoes on ends.
@@ -236,6 +240,10 @@ impl PodCluster for Cluster {
         namespace: &str,
         name: &str,
     ) -> Result<Option<PodFacts>, ReadError> {
+        self.pod_reads.fetch_add(1, Ordering::SeqCst);
+        if let Some(Some(failure)) = self.pod_answers.lock().unwrap().pop_front() {
+            return Err(failure);
+        }
         Ok(self
             .pods
             .lock()

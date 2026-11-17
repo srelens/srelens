@@ -1324,9 +1324,9 @@ leaving the scope, stopping or being deleted, or of the app being disabled or lo
 grant, and on any inventory change that revokes it: each tick rechecks the app against
 the saved inventory, so a change made in another srelens process counts too. The scope
 object's selector is read once, when the tunnel opens, and not again while it is open.
-A failure to read the pod, including an error such as forbidden, is taken as transient
-and does not end it, so such a tunnel stays open until the pod, the app or the session
-ends.
+A tunnel is unattended, so a pod it cannot read is not taken to be still there: three
+failed reads in a row, about six seconds, end it with the read's error, and a read that
+answers starts the count again, so one or two failures (a blip) change nothing.
 
 The frames each source sends are in [streams.md](streams.md#logs).
 

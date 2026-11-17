@@ -11,11 +11,12 @@ use super::tunnels::PodTunnels;
 use serde_json::{json, Value};
 use srelens_capability::audit::{AppRef, Source, OUTCOME_OK, OUTCOME_REJECTED};
 use srelens_capability::Registry;
-use srelens_kube::app_pods::{PortTarget, ServiceFacts, ServicePort};
+use srelens_kube::app_pods::{PortTarget, ReadError, ServiceFacts, ServicePort};
 use srelens_plugin_host::sidecar::protocol::code;
 use srelens_plugin_host::sidecar::{AppIdentity, PodConnector, Tunnel};
 use srelens_sidecar_protocol::{HostConnectParams, JobContext};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -531,9 +532,11 @@ async fn pod_on_a_service_binding() {
 
 // ---- Ended ----
 
-/// Waits out `ticks` monitor ticks, and says the tunnel is still open.
+/// Waits out `ticks` monitor ticks, and just past the last, so its checks
+/// have run; and says the tunnel is still open.
 async fn still_open(tunnel: &mut Tunnel, ticks: u32) {
-    if let Ok(why) = tokio::time::timeout(TICK * ticks, &mut tunnel.ended).await {
+    let past = TICK * ticks + Duration::from_millis(1);
+    if let Ok(why) = tokio::time::timeout(past, &mut tunnel.ended).await {
         panic!("ended early: {why}");
     }
 }
@@ -643,4 +646,55 @@ async fn the_tunnel_ends_when_another_process_disables_the_app() {
         why,
         "The connection to pod team/kafka-0 ended: Extension was disabled or updated"
     );
+}
+
+const FORBIDDEN: &str = "pods \"kafka-0\" is forbidden: User \"me\" cannot get resource \"pods\"";
+
+fn failed_read() -> Option<ReadError> {
+    Some(ReadError::Answered(FORBIDDEN.into()))
+}
+
+/// A pod tunnel is unattended: a pod that cannot be read, tick after tick,
+/// is not taken to be still there. Three failed reads in a row end it, and
+/// not one fewer.
+#[tokio::test(start_paused = true)]
+async fn the_tunnel_ends_after_three_failed_pod_reads() {
+    let host = host();
+    let mut tunnel = host
+        .connect(ask("broker", Some("kafka"), Some("kafka-0"), None))
+        .await;
+    let before = host.cluster.pod_reads.load(Ordering::SeqCst);
+    host.cluster
+        .pod_answers
+        .lock()
+        .unwrap()
+        .extend([failed_read(), failed_read(), failed_read()]);
+    still_open(&mut tunnel, 2).await;
+    assert_eq!(host.cluster.pod_reads.load(Ordering::SeqCst), before + 2);
+    let why = ends(&mut tunnel).await;
+    assert_eq!(
+        why,
+        format!("The connection to pod team/kafka-0 ended: Pod team/kafka-0 could not be read: {FORBIDDEN}")
+    );
+}
+
+/// A read that answers starts the count again: a blip must not drop a
+/// tunnel.
+#[tokio::test(start_paused = true)]
+async fn a_pod_read_that_recovers_keeps_the_tunnel() {
+    let host = host();
+    let mut tunnel = host
+        .connect(ask("broker", Some("kafka"), Some("kafka-0"), None))
+        .await;
+    let before = host.cluster.pod_reads.load(Ordering::SeqCst);
+    host.cluster.pod_answers.lock().unwrap().extend([
+        failed_read(),
+        failed_read(),
+        None,
+        failed_read(),
+        failed_read(),
+    ]);
+    still_open(&mut tunnel, 5).await;
+    assert_eq!(host.cluster.pod_reads.load(Ordering::SeqCst), before + 5);
+    assert!(host.cluster.pod_answers.lock().unwrap().is_empty());
 }

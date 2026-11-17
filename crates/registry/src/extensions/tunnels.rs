@@ -19,7 +19,7 @@
 
 use super::pods::{self as scope, KubePods, PodCluster, ScopeError};
 use super::streams::{
-    pod_still_there, Authority, ExtensionStreams, ExtensionStreamsParts, PodTiming, Record,
+    read_pod, Authority, ExtensionStreams, ExtensionStreamsParts, PodTiming, Record,
 };
 use serde_json::json;
 use srelens_capability::audit::{AuditSink, Source};
@@ -296,6 +296,12 @@ impl PodConnector for PodTunnels {
     }
 }
 
+/// Pod reads in a row that may fail before a tunnel ends: a tunnel is
+/// unattended, so a pod it cannot read is not taken to be still there, but a
+/// blip must not drop it.
+// ponytail: a fixed count, about 6 s at the 2 s tick; a time budget per tunnel if that proves too short or too long.
+const MAX_FAILED_POD_READS: u32 = 3;
+
 /// What an open tunnel is held to.
 struct Monitor {
     cluster: Arc<dyn PodCluster>,
@@ -316,15 +322,22 @@ impl Monitor {
     async fn run(mut self) -> String {
         let mut tick =
             tokio::time::interval_at(Instant::now() + self.timing.monitor, self.timing.monitor);
+        let mut failed = 0;
         let why = loop {
             tokio::select! {
                 _ = tick.tick() => {
                     if let Err(why) = self.authority.check().await {
                         break for_program(why);
                     }
-                    match pod_still_there(self.cluster.as_ref(), &self.context, &self.scope, &self.authority.id, &self.pod).await {
-                        Ok(true) => {}
-                        Ok(false) => break format!("Pod {} is no longer running", self.pod),
+                    match read_pod(self.cluster.as_ref(), &self.context, &self.scope, &self.authority.id, &self.pod).await {
+                        Ok(Ok(true)) => failed = 0,
+                        Ok(Ok(false)) => break format!("Pod {} is no longer running", self.pod),
+                        Ok(Err(why)) => {
+                            failed += 1;
+                            if failed >= MAX_FAILED_POD_READS {
+                                break format!("Pod {}/{} could not be read: {why}", self.scope.namespace, self.pod);
+                            }
+                        }
                         Err(why) => break why,
                     }
                 }
