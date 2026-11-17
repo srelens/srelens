@@ -76,6 +76,14 @@ The module is `github.com/srelens/srelens/sdk/go`, with Go 1.25 or later. It use
   - At most `min(8, maxConcurrentRequests)` calls are in flight; the rest wait.
   - When the `ctx` you pass ends first, the call returns `ctx.Err()`. If srelens had already seen it, it is sent a `$/cancelRequest`, and the slot stays taken until srelens answers.
   - srelens's refusals match `sidecar.ErrConsentDenied`, `ErrCapabilityFailed`, `ErrInvalidParams` and `ErrCallCancelled` through `errors.Is`. `errors.As` gives the `*sidecar.HostError` with its code and message. `ErrSessionEnded` means the session ended first.
+- **Pod connections** (API 0.3.0).
+  - `sidecar.HostFrom(ctx).Dial(ctx, cc, sidecar.PodTarget{Capability: …, Pod: …})` returns a `net.Conn` to a pod's port through srelens. Name a `Service` instead of a `Pod` to reach one of its ready pods, and `Object` for a binding that has a scope object. `cc` must name a namespace.
+  - The conn supports deadlines, and `Read`, `Write` and `Close` may run concurrently. Its addresses are placeholders.
+  - Close it. An open conn holds one of the sidecar's 16 tunnels until it is closed or the session ends.
+  - When srelens closes the tunnel, the bytes already received are read first, then `Read` returns an error carrying srelens's message, or `io.EOF` when there was none.
+  - If `ctx` ends before `Dial` returns, the call is cancelled and the tunnel closed.
+  - `ctx` only bounds the dial, so a network client may call `Dial` with any context: keep the `Host` from the operation and pass its own. The `Host` belongs to the session, and `Dial` on it fails with `ErrSessionEnded` once that is over.
+  - A srelens that offers no pod connections refuses `Dial` with `-32601`. [The protocol](../../docs/extensions/sidecar-protocol.md#pod-tunnels-in-protocol-030) has the limits and the wire.
 - **Streams.**
   - The ack goes out before any frame. The stream ends in exactly one `stream/close`, or `stream/error` when the handler returns an error, and nothing follows it.
   - `Frames.Send` fails with `ErrStreamCancelled`, `ErrStreamFinished` (a `Frames` kept past its handler), `ErrSessionEnded`, `ErrFrameTooLarge`, or the JSON error.
@@ -108,4 +116,4 @@ The module is `github.com/srelens/srelens/sdk/go`, with Go 1.25 or later. It use
 
 ## Regenerating the protocol types
 
-`protocol/protocol_gen.go` is generated from [`schemas/sidecar-protocol.v0.2.json`](../../schemas/sidecar-protocol.v0.2.json). After the schema changes, run `go generate ./...` here. CI fails when the file is stale.
+`protocol/protocol_gen.go` is generated from [`schemas/sidecar-protocol.v0.3.json`](../../schemas/sidecar-protocol.v0.3.json). After the schema changes, run `go generate ./...` here. CI fails when the file is stale.

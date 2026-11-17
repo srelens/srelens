@@ -30,6 +30,9 @@ tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "process",
 # A sidecar's data directory (#573) is named by a digest of its app ID, as its
 # Windows AppContainer profile is. Already in the lockfile.
 sha2 = "0.10"
+# Pod tunnel bytes travel base64 in `tunnel/data` frames (#1091). Already in
+# the lockfile through srelens-kube.
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

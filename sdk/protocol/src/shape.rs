@@ -53,6 +53,18 @@ pub fn is_cluster_id(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= MAX_CLUSTER_ID_BYTES
 }
 
+/// Base64 text, standard alphabet with padding, as a `tunnel/data` frame
+/// carries its bytes. Checks the shape, so a frame is refused without being
+/// decoded.
+pub fn is_base64(value: &str) -> bool {
+    let body = value.trim_end_matches('=');
+    value.len() % 4 == 0
+        && value.len() - body.len() <= 2
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

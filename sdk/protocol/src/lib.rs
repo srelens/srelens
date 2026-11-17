@@ -4,7 +4,7 @@
 //!
 //! The contract both sides build on. The host (`srelens-plugin-host`) and the
 //! SDKs (#576) share these constants and types, and the committed
-//! `schemas/sidecar-protocol.v0.2.json` is generated from them. The prose is
+//! `schemas/sidecar-protocol.v0.3.json` is generated from them. The prose is
 //! `docs/extensions/sidecar-protocol.md`.
 //!
 //! # The `schema` feature
@@ -39,9 +39,11 @@ pub use methods::{is_reserved, Direction, Kind, MethodSpec, METHODS};
 pub use schema::{schema, schema_file};
 
 pub use messages::{
-    CallContext, CancelParams, ContextError, Empty, HostActionParams, HostReadParams,
-    HostResourceParams, HostBindingAvailabilityParams, HostRunJobParams, JobContext, InitializeLimits, InitializeParams, InitializeResult, Peer, RequestId,
-    StreamCancelParams, StreamCloseParams, StreamDataParams, StreamErrorParams, StreamOpenParams,
+    CallContext, CancelParams, ContextError, Empty, HostActionParams,
+    HostBindingAvailabilityParams, HostConnectParams, HostConnectResult, HostReadParams,
+    HostResourceParams, HostRunJobParams, InitializeLimits, InitializeParams, InitializeResult,
+    JobContext, Peer, RequestId, StreamCancelParams, StreamCloseParams, StreamDataParams,
+    StreamErrorParams, StreamOpenParams, TunnelCloseParams, TunnelCreditParams, TunnelDataParams,
     UnsupportedApiVersion,
 };
 
@@ -53,7 +55,7 @@ pub use wire::{JsonRpc, Message, Notification, Request, Response};
 /// Its own line, not the extension API's (`SUPPORTED_API_VERSIONS`): no
 /// manifest kind runs a sidecar yet, so there is no extension API version for
 /// it to belong to. The executable kind (#574) kept the two apart.
-pub const SIDECAR_API_VERSIONS: &[&str] = &["0.1.0", "0.2.0"];
+pub const SIDECAR_API_VERSIONS: &[&str] = &["0.1.0", "0.2.0", "0.3.0"];
 
 /// The longest line a sidecar may write, not counting its line ending. The
 /// same bound as one MCP request (`MAX_REQUEST_BYTES` in `srelens-mcp`).
@@ -95,7 +97,28 @@ pub mod method {
     pub const HOST_ACTION: &str = "host/action";
     pub const HOST_BINDING_AVAILABILITY: &str = "host/bindingAvailability";
     pub const HOST_RUN_JOB: &str = "host/runJob";
+    /// Sidecar → host request (0.3): a TCP connection to a pod, carried as
+    /// `tunnel/*` frames on this pipe.
+    pub const HOST_CONNECT: &str = "host/connect";
+    /// Either way, notification: `{"tunnel": n, "data": …}`, base64 bytes.
+    pub const TUNNEL_DATA: &str = "tunnel/data";
+    /// Either way, notification: `{"tunnel": n, "bytes": …}`, more room to send.
+    pub const TUNNEL_CREDIT: &str = "tunnel/credit";
+    /// Either way, notification: `{"tunnel": n}`, the tunnel ended.
+    pub const TUNNEL_CLOSE: &str = "tunnel/close";
 }
+
+/// Tunnels a sidecar may hold open at once.
+pub const MAX_TUNNELS: usize = 16;
+/// The bytes one side may send on a tunnel before the other grants more
+/// (`tunnel/credit`), and the most one credit grants.
+pub const TUNNEL_WINDOW_BYTES: u32 = 262_144;
+/// The most bytes (before base64) one `tunnel/data` frame carries.
+pub const MAX_TUNNEL_CHUNK_BYTES: usize = 65_536;
+/// The most base64 characters one `tunnel/data` frame carries.
+pub const MAX_TUNNEL_CHUNK_TEXT: usize = MAX_TUNNEL_CHUNK_BYTES.div_ceil(3) * 4;
+/// `host/connect` calls a sidecar may make per minute.
+pub const MAX_CONNECTS_PER_MINUTE: u32 = 60;
 
 /// Error codes. The first five are JSON-RPC 2.0's own.
 pub mod code {

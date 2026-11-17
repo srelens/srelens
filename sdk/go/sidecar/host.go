@@ -37,6 +37,12 @@ type Host struct {
 	mu      sync.Mutex
 	waiting map[string]*pending // by id key; nil once disconnected
 	absent  bool                // no session: every call fails with ErrNoSession
+	version string              // the sidecar API version negotiated; set once, before any handler runs
+
+	order   chan struct{} // held from taking a tunnel id until its host/connect is queued
+	tmu     sync.Mutex
+	tunnels map[uint64]*tunnelConn // open or opening; nil once disconnected
+	lastID  uint64                 // the greatest tunnel id used
 }
 
 // pending is a call srelens has not answered: where its answer goes, and
@@ -66,6 +72,8 @@ func newHost(out *outbox, limits protocol.InitializeLimits) *Host {
 		ended:   ended,
 		end:     end,
 		waiting: map[string]*pending{},
+		order:   make(chan struct{}, 1),
+		tunnels: map[uint64]*tunnelConn{},
 	}
 }
 
@@ -129,8 +137,8 @@ func (h *Host) ReadPage(ctx context.Context, cc CallContext, capability, cursor 
 	if h.absent {
 		return nil, ErrNoSession
 	}
-	if APIVersion(ctx) != "0.2.0" {
-		return nil, fmt.Errorf("%w: paged reads require sidecar API 0.2.0", ErrInvalidCall)
+	if !h.atLeast("0.2.0") {
+		return nil, fmt.Errorf("%w: paged reads require sidecar API 0.2.0 or newer", ErrInvalidCall)
 	}
 	if err := check(cc, field{"capability", capability, protocol.IsIdentifier, identifierRule}); err != nil {
 		return nil, err
@@ -152,7 +160,7 @@ func (h *Host) BindingAvailability(ctx context.Context, cc CallContext, bindings
 	if h.absent {
 		return nil, ErrNoSession
 	}
-	if APIVersion(ctx) != "0.2.0" {
+	if !h.atLeast("0.2.0") {
 		return nil, fmt.Errorf("%w: binding discovery requires sidecar API 0.2.0", ErrInvalidCall)
 	}
 	if err := check(cc); err != nil {
@@ -170,8 +178,8 @@ func (h *Host) RunJob(ctx context.Context, cc CallContext, capability string, in
 	if h.absent {
 		return nil, ErrNoSession
 	}
-	if APIVersion(ctx) != "0.2.0" {
-		return nil, fmt.Errorf("%w: Jobs require sidecar API 0.2.0", ErrInvalidCall)
+	if !h.atLeast("0.2.0") {
+		return nil, fmt.Errorf("%w: Jobs require sidecar API 0.2.0 or newer", ErrInvalidCall)
 	}
 	if err := check(cc, field{"capability", capability, protocol.IsIdentifier, identifierRule}); err != nil {
 		return nil, err
@@ -234,22 +242,33 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 	if err != nil {
 		return nil, err
 	}
+	id, p, err := h.submit(ctx, method, raw)
+	if err != nil {
+		return nil, err
+	}
+	return h.await(ctx, id, p)
+}
+
+// submit queues a call's request, holding a slot until srelens answers; the
+// call's id and pending answer, for await.
+func (h *Host) submit(ctx context.Context, method string, raw json.RawMessage) (protocol.RequestID, *pending, error) {
+	var err error
 	select {
 	case <-h.ended.Done():
-		return nil, ErrSessionEnded
+		return protocol.RequestID{}, nil, ErrSessionEnded
 	default:
 	}
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return protocol.RequestID{}, nil, ctx.Err()
 	default:
 	}
 	select {
 	case h.slots <- struct{}{}:
 	case <-h.ended.Done():
-		return nil, ErrSessionEnded
+		return protocol.RequestID{}, nil, ErrSessionEnded
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return protocol.RequestID{}, nil, ctx.Err()
 	}
 	// select picks at random among ready cases: ctx may have ended at the
 	// same instant a slot was free. Checked again now that a slot is held, so
@@ -257,7 +276,7 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 	// nothing and frees its slot at once, rather than reaching the queue.
 	if ctx.Err() != nil {
 		<-h.slots
-		return nil, h.stopped(ctx)
+		return protocol.RequestID{}, nil, h.stopped(ctx)
 	}
 	id := protocol.StringID(fmt.Sprintf("c-%d", h.next.Add(1)))
 	p := &pending{answer: make(chan protocol.Response, 1), holdsSlot: true}
@@ -265,7 +284,7 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 	if h.waiting == nil {
 		h.mu.Unlock()
 		<-h.slots
-		return nil, ErrSessionEnded
+		return protocol.RequestID{}, nil, ErrSessionEnded
 	}
 	h.waiting[id.Key()] = p
 	h.mu.Unlock()
@@ -275,14 +294,14 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 		var over *errOverLimit
 		switch {
 		case errors.As(err, &over):
-			return nil, &CallTooLargeError{Bytes: over.bytes}
+			return protocol.RequestID{}, nil, &CallTooLargeError{Bytes: over.bytes}
 		case errors.Is(err, errStopped):
-			return nil, h.stopped(ctx)
+			return protocol.RequestID{}, nil, h.stopped(ctx)
 		default:
-			return nil, ErrSessionEnded
+			return protocol.RequestID{}, nil, ErrSessionEnded
 		}
 	}
-	return h.await(ctx, id, p)
+	return id, p, nil
 }
 
 // await waits for srelens's answer to call id, the caller's ctx to end, or
@@ -405,6 +424,7 @@ func (h *Host) disconnect() {
 	h.waiting = nil
 	h.mu.Unlock()
 	h.end()
+	h.endTunnels()
 	for range held {
 		<-h.slots
 	}
