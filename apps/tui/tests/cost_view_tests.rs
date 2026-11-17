@@ -70,6 +70,7 @@ fn ctx(name: &str) -> ContextDto {
         server: format!("https://{name}.example.invalid"),
         namespace: String::new(),
         is_current: false,
+        distribution: None,
         is_local: false,
         provider: None,
         source_file: "cluster-config.yaml".to_string(),

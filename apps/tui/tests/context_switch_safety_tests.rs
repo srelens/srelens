@@ -21,6 +21,7 @@ fn ctx(name: &str) -> ContextDto {
         is_current: false,
         is_local: false,
         provider: None,
+        distribution: None,
         source_file: "cluster-config.yaml".to_string(),
         auth_kind: "token".to_string(),
     }
@@ -73,11 +74,11 @@ async fn cluster_info_from_the_previous_context_is_ignored() {
     app.contexts = vec![ctx("test-cluster"), ctx("staging")];
     app.switch_context("staging".into()).await;
 
-    app.handle_cluster_info_update("v1.20.0|3|40|test-cluster");
+    app.handle_cluster_info_update_for_context(Some("test-cluster"), "v1.20.0|3|40");
     assert_eq!(app.cluster_version, "Connecting...");
     assert!(!app.is_connected);
 
-    app.handle_cluster_info_update("v1.31.0|5|60|staging");
+    app.handle_cluster_info_update_for_context(Some("staging"), "v1.31.0|5|60");
     assert_eq!(app.cluster_version, "v1.31.0");
     assert!(app.is_connected);
 }
@@ -98,10 +99,10 @@ async fn a_failure_from_the_previous_context_does_not_mark_the_new_one_unreachab
     app.switch_context("staging".into()).await;
     app.connection_attempt_start = std::time::Instant::now() - std::time::Duration::from_secs(30);
 
-    app.handle_cluster_info_failure_for("test-cluster", "connection refused");
+    app.handle_cluster_info_failure_for_context(Some("test-cluster"), "connection refused");
     assert!(!app.cluster_unreachable);
 
-    app.handle_cluster_info_failure_for("staging", "connection refused");
+    app.handle_cluster_info_failure_for_context(Some("staging"), "connection refused");
     assert!(app.cluster_unreachable);
 }
 

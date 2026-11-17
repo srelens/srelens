@@ -56,8 +56,8 @@ async fn journey_late_answers_from_the_cluster_just_left_are_ignored() {
     app.switch_context("staging".into()).await;
     time_out(&mut app);
 
-    app.handle_cluster_info_update("v9.9.9|50|500|test-cluster");
-    app.handle_cluster_info_failure_for("test-cluster", "connection refused");
+    app.handle_cluster_info_update_for_context(Some("test-cluster"), "v9.9.9|50|500");
+    app.handle_cluster_info_failure_for_context(Some("test-cluster"), "connection refused");
 
     assert_eq!(app.cluster_version, "Connecting...", "still waiting on staging");
     assert!(!app.cluster_unreachable);

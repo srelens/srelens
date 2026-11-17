@@ -59,13 +59,6 @@ pub enum ActiveView {
     Changed(changed_view::ChangedViewState),
 }
 
-/// CRDs as discovered for one named context.
-#[derive(serde::Deserialize, serde::Serialize)]
-struct CrdsForContext {
-    context: String,
-    crds: Vec<CrdMeta>,
-}
-
 /// The Argo Applications last seen for one context, shared by `:argo` and
 /// `:changed`, so `:changed` matches workloads against what is already known
 /// instead of waiting on a hub that lists thousands of apps.
@@ -1847,10 +1840,7 @@ impl App {
             match tokio::time::timeout(std::time::Duration::from_secs(15), fetch).await {
                 Ok(Ok(crds)) => {
                     crate::commands::save_cached_crds(&ctx, &crds);
-                    if let Ok(json_str) = serde_json::to_string(&CrdsForContext {
-                        context: ctx.clone(),
-                        crds,
-                    }) {
+                    if let Ok(json_str) = serde_json::to_string(&crds) {
                         let _ = event_tx.send(AppEvent::ActionResult {
                             title: format!("crds_updated:{}", ctx),
                             result: Ok(json_str),
@@ -2359,6 +2349,7 @@ impl App {
                         table.is_loading = false;
                     }
                 }
+                self.offer_context_picker_when_unreachable();
             }
         } else if let Some(mux) = &mut self.mux_state {
             if let Some(inactive) = &mut mux.inactive_pane {
@@ -2374,7 +2365,6 @@ impl App {
                     }
                 }
             }
-            self.offer_context_picker_when_unreachable();
         }
     }
 
@@ -17993,6 +17983,7 @@ impl App {
             ActiveView::NodeInspector(ni) => render_node_inspector_view(f, area, ni),
             ActiveView::Topology(topo) => topology_view::render_topology_view(f, area, topo),
             ActiveView::GpuInfo(gpu) => gpu_view::render(f, area, gpu),
+            ActiveView::Cost(cost) => cost_view::render(f, area, cost),
             ActiveView::Bgp(bgp) => render_bgp_view(f, area, bgp),
             ActiveView::Top(top) => top_view::render_top_view(f, area, top),
             ActiveView::Changed(changed) => render_changed_view(f, area, changed),

@@ -107,6 +107,7 @@ pub fn context_named(name: &str) -> srelens_kube::contexts::ContextDto {
         is_current: false,
         is_local: false,
         provider: None,
+        distribution: None,
         source_file: "cluster-config.yaml".to_string(),
         auth_kind: "token".to_string(),
     }
