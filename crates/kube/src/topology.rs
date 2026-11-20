@@ -2116,21 +2116,40 @@ fn has_condition(conditions: &[serde_json::Value], kind: &str, status: &str) -> 
 /// or does not, and the handful of fields read here is not worth a dependency
 /// that would have to track the API's versions.
 ///
-/// The Ingress rule holds for both ends: an edge only to a node that is drawn.
-/// A backend that is not a Service in view, or a parent Gateway outside the
-/// namespaces asked for, is a route pointing off the picture, and inventing
-/// the node would draw traffic arriving somewhere it cannot. A parent that is
-/// not a Gateway — a Service, for a mesh route — is not this lane's to draw.
+/// The Ingress rule holds for backends: an edge only to a node that is drawn.
+/// A backend that is not a Service in view is a route pointing off the
+/// picture, and inventing the node would draw traffic arriving somewhere it
+/// cannot. A parent that is not a Gateway — a Service, for a mesh route — is
+/// not this lane's to draw.
+///
+/// A parent Gateway that was not listed is different (#1104). When a
+/// controller reports the route `Accepted` by it, the Gateway exists and
+/// traffic does come through it, so it is drawn from the route — health
+/// unknown, because its own status was not read, and its detail saying why:
+/// `Not readable` where listing Gateways in its namespace failed (in
+/// `graph.unread`, so set that first), `Not in view` where its namespace is not
+/// one of `namespaces`, `Not found` where it was listed and is not there. A
+/// parent nobody accepted is only a name in a spec, and is not drawn.
 pub fn apply_gateway_api(
     graph: &mut TopologyGraphOut,
     gateways: &[serde_json::Value],
     routes: &[serde_json::Value],
+    namespaces: &[String],
 ) {
     let mut drawn: BTreeMap<String, Health> = graph
         .nodes
         .iter()
         .map(|n| (n.id.clone(), n.health))
         .collect();
+    let unreadable: BTreeSet<String> = graph
+        .unread
+        .iter()
+        .filter(|u| u.kind == "Gateway")
+        .map(|u| u.namespace.clone())
+        .collect();
+    // Gateways drawn from routes alone, added after the loop so the closure
+    // below can keep its hold on the edges.
+    let mut stubs: Vec<TopologyNode> = Vec::new();
 
     for gateway in gateways {
         let metadata = &gateway["metadata"];
@@ -2229,7 +2248,29 @@ pub fn apply_gateway_api(
             {
                 continue;
             }
-            let from = node_id("Gateway", &or_own(parent), text(parent, "name"));
+            let (parent_namespace, parent_name) = (or_own(parent), text(parent, "name"));
+            let from = node_id("Gateway", &parent_namespace, parent_name);
+            if !drawn.contains_key(&from) && accepted_by(&route["status"], parent, namespace) {
+                let detail = if unreadable.contains(&parent_namespace) {
+                    "Not readable"
+                } else if !namespaces.contains(&parent_namespace) {
+                    "Not in view"
+                } else {
+                    "Not found"
+                };
+                drawn.insert(from.clone(), Health::Unknown);
+                stubs.push(TopologyNode {
+                    id: from.clone(),
+                    kind: "Gateway".into(),
+                    name: parent_name.into(),
+                    namespace: parent_namespace,
+                    lane: Lane::Gateway,
+                    detail: detail.into(),
+                    ready: None,
+                    desired: None,
+                    health: Health::Unknown,
+                });
+            }
             if drawn.contains_key(&from) {
                 join(from, id.clone(), health);
             }
@@ -2247,6 +2288,37 @@ pub fn apply_gateway_api(
             }
         }
     }
+    graph.nodes.extend(stubs);
+}
+
+/// Whether a controller reported `route` accepted by `parent` — the same
+/// reference, with the defaults the API applies, ignoring which listener.
+fn accepted_by(status: &serde_json::Value, parent: &serde_json::Value, route_namespace: &str) -> bool {
+    let identity = |reference: &serde_json::Value| {
+        (
+            match text(reference, "group") {
+                "" => GATEWAY_API_GROUP,
+                group => group,
+            }
+            .to_string(),
+            match text(reference, "kind") {
+                "" => "Gateway",
+                kind => kind,
+            }
+            .to_string(),
+            match text(reference, "namespace") {
+                "" => route_namespace,
+                namespace => namespace,
+            }
+            .to_string(),
+            text(reference, "name").to_string(),
+        )
+    };
+    let wanted = identity(parent);
+    items(status, "parents").iter().any(|reported| {
+        reported.get("parentRef").is_some_and(|r| identity(r) == wanted)
+            && has_condition(items(reported, "conditions"), "Accepted", "True")
+    })
 }
 
 /// One Gateway API kind's objects in a namespace, as JSON, for
@@ -2423,8 +2495,10 @@ pub async fn build_topology(
                 );
                 // Before the policies and the telemetry, which both read the
                 // finished set of nodes.
-                apply_gateway_api(&mut graph, &all.gateways, &all.routes);
+                // Unread first: a parent Gateway that could not be listed is
+                // drawn from its routes, and said to be unreadable.
                 graph.unread = all.unread;
+                apply_gateway_api(&mut graph, &all.gateways, &all.routes, &input.namespaces);
                 // Measured traffic, when there is somewhere to read it from.
                 // A metrics backend that cannot be reached must NOT take the
                 // graph down with it: the structural half is still true and
@@ -4343,6 +4417,7 @@ mod tests {
                 serde_json::json!([{"name": "edge"}]),
                 serde_json::json!([{"name": "web", "port": 80}]),
             )],
+            &in_view(&["checkout"]),
         );
 
         let gw = find(&g, "Gateway/checkout/edge");
@@ -4382,6 +4457,7 @@ mod tests {
                     {"name": "web", "namespace": "elsewhere"},
                 ]),
             )],
+            &in_view(&["checkout"]),
         );
         // The route itself, and nothing invented for it to point at — nor a
         // gateway nobody listed.
@@ -4397,11 +4473,11 @@ mod tests {
             serde_json::json!([]),
         );
         let mut without = shop();
-        apply_gateway_api(&mut without, &[], std::slice::from_ref(&route));
+        apply_gateway_api(&mut without, &[], std::slice::from_ref(&route), &in_view(&["checkout"]));
         assert!(!without.edges.iter().any(|e| e.to == "HTTPRoute/checkout/shop"));
 
         let mut with = shop();
-        apply_gateway_api(&mut with, &[gateway("infra", "edge", None)], &[route]);
+        apply_gateway_api(&mut with, &[gateway("infra", "edge", None)], &[route], &in_view(&["checkout", "infra"]));
         assert!(has_edge(&with, "Gateway/infra/edge", "HTTPRoute/checkout/shop", EdgeKind::Routes));
         // A Service parent is a mesh route, not a gateway's.
         assert_eq!(with.edges.iter().filter(|e| e.to == "HTTPRoute/checkout/shop").count(), 1);
@@ -4417,7 +4493,7 @@ mod tests {
             {"conditions": [{"type": "Accepted", "status": "False"}]},
         ]});
         let mut g = shop();
-        apply_gateway_api(&mut g, &[gateway("checkout", "edge", Some("False"))], &[route]);
+        apply_gateway_api(&mut g, &[gateway("checkout", "edge", Some("False"))], &[route], &in_view(&["checkout"]));
         assert_eq!(find(&g, "Gateway/checkout/edge").health, Health::Failing);
         assert_eq!(find(&g, "HTTPRoute/checkout/shop").health, Health::Failing);
         // The line from the gateway says what it leads to.
@@ -4466,7 +4542,7 @@ mod tests {
             {"type": "ResolvedRefs", "status": "False", "reason": "RefNotPermitted"},
         ]}]});
         let mut g = shop();
-        apply_gateway_api(&mut g, &[gateway("checkout", "edge", Some("True"))], &[route]);
+        apply_gateway_api(&mut g, &[gateway("checkout", "edge", Some("True"))], &[route], &in_view(&["checkout"]));
         assert_eq!(find(&g, "HTTPRoute/checkout/shop").health, Health::Failing);
     }
 
@@ -4474,8 +4550,118 @@ mod tests {
     fn a_cluster_without_the_gateway_api_draws_what_it_drew() {
         let mut g = shop();
         let before = serde_json::to_string(&g).unwrap();
-        apply_gateway_api(&mut g, &[], &[]);
+        apply_gateway_api(&mut g, &[], &[], &in_view(&["checkout"]));
         assert_eq!(serde_json::to_string(&g).unwrap(), before);
+    }
+
+    fn in_view(namespaces: &[&str]) -> Vec<String> {
+        namespaces.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// A route a controller accepted for `edge` in `infra` — which is the
+    /// controller saying that Gateway exists, whether or not it can be read.
+    fn accepted_by_infra_edge(name: &str) -> serde_json::Value {
+        let mut route = http_route(
+            name,
+            serde_json::json!([{"name": "edge", "namespace": "infra", "sectionName": "https"}]),
+            serde_json::json!([{"name": "web", "port": 80}]),
+        );
+        route["status"] = serde_json::json!({"parents": [{
+            "parentRef": {"name": "edge", "namespace": "infra", "sectionName": "https"},
+            "controllerName": "example.com/gateway",
+            "conditions": [{"type": "Accepted", "status": "True"}],
+        }]});
+        route
+    }
+
+    #[test]
+    fn a_gateway_the_reader_may_not_list_is_drawn_from_the_route_that_names_it() {
+        // #1104: app teams may list HTTPRoutes and not Gateways. The route's
+        // accepted parent is still known, so the hop stays on the picture —
+        // said to be unreadable, with nothing claimed about its health.
+        let mut g = shop();
+        g.unread.push(UnreadSource {
+            namespace: "infra".into(),
+            kind: "Gateway".into(),
+            reason: "gateways.gateway.networking.k8s.io is forbidden".into(),
+        });
+        apply_gateway_api(&mut g, &[], &[accepted_by_infra_edge("shop")], &in_view(&["checkout", "infra"]));
+        let gw = find(&g, "Gateway/infra/edge");
+        assert_eq!(gw.lane, Lane::Gateway);
+        assert_eq!(gw.detail, "Not readable");
+        assert_eq!(gw.health, Health::Unknown);
+        assert!(has_edge(&g, "Gateway/infra/edge", "HTTPRoute/checkout/shop", EdgeKind::Routes));
+        assert!(has_edge(&g, "HTTPRoute/checkout/shop", "Service/checkout/web", EdgeKind::Routes));
+    }
+
+    #[test]
+    fn a_gateway_outside_the_namespaces_drawn_is_said_to_be_out_of_view() {
+        // The shared-gateway layout: the Gateway lives in `infra`, which the
+        // reader did not pick. Not a permission problem, and not said as one.
+        let mut g = shop();
+        apply_gateway_api(&mut g, &[], &[accepted_by_infra_edge("shop")], &in_view(&["checkout"]));
+        let gw = find(&g, "Gateway/infra/edge");
+        assert_eq!(gw.detail, "Not in view");
+        assert_eq!(gw.health, Health::Unknown);
+        assert!(has_edge(&g, "Gateway/infra/edge", "HTTPRoute/checkout/shop", EdgeKind::Routes));
+    }
+
+    #[test]
+    fn a_gateway_read_and_not_there_is_said_to_be_missing() {
+        // Its namespace was listed and it was not in it: a route still
+        // accepted for it is stale, and the graph says what it found.
+        let mut g = shop();
+        apply_gateway_api(&mut g, &[], &[accepted_by_infra_edge("shop")], &in_view(&["checkout", "infra"]));
+        assert_eq!(find(&g, "Gateway/infra/edge").detail, "Not found");
+    }
+
+    #[test]
+    fn routes_sharing_an_unread_gateway_share_one_node() {
+        let mut g = shop();
+        apply_gateway_api(
+            &mut g,
+            &[],
+            &[accepted_by_infra_edge("shop"), accepted_by_infra_edge("cart")],
+            &in_view(&["checkout"]),
+        );
+        assert_eq!(g.nodes.iter().filter(|n| n.id == "Gateway/infra/edge").count(), 1);
+        assert!(has_edge(&g, "Gateway/infra/edge", "HTTPRoute/checkout/shop", EdgeKind::Routes));
+        assert!(has_edge(&g, "Gateway/infra/edge", "HTTPRoute/checkout/cart", EdgeKind::Routes));
+    }
+
+    #[test]
+    fn a_parent_no_controller_accepted_is_not_invented() {
+        // Refused, or not looked at yet: nothing says the Gateway exists, and
+        // a name in a spec is not a door traffic comes through.
+        for conditions in [
+            serde_json::json!([{"type": "Accepted", "status": "False", "reason": "NoMatchingParent"}]),
+            serde_json::json!([]),
+        ] {
+            let mut route = accepted_by_infra_edge("shop");
+            route["status"]["parents"][0]["conditions"] = conditions;
+            let mut g = shop();
+            apply_gateway_api(&mut g, &[], &[route], &in_view(&["checkout"]));
+            assert!(g.nodes.iter().all(|n| n.lane != Lane::Gateway));
+        }
+        // Accepted for a different parent says nothing about this one.
+        let mut route = accepted_by_infra_edge("shop");
+        route["status"]["parents"][0]["parentRef"]["name"] = "other".into();
+        let mut g = shop();
+        apply_gateway_api(&mut g, &[], &[route], &in_view(&["checkout"]));
+        assert!(g.nodes.iter().all(|n| n.lane != Lane::Gateway));
+    }
+
+    #[test]
+    fn an_accepted_parent_in_the_route_s_own_namespace_defaults_as_the_api_does() {
+        let mut route = http_route("shop", serde_json::json!([{"name": "edge"}]), serde_json::json!([]));
+        route["status"] = serde_json::json!({"parents": [{
+            "parentRef": {"name": "edge"},
+            "conditions": [{"type": "Accepted", "status": "True"}],
+        }]});
+        let mut g = shop();
+        g.unread.push(UnreadSource { namespace: "checkout".into(), kind: "Gateway".into(), reason: "forbidden".into() });
+        apply_gateway_api(&mut g, &[], &[route], &in_view(&["checkout"]));
+        assert_eq!(find(&g, "Gateway/checkout/edge").detail, "Not readable");
     }
 
     #[test]
