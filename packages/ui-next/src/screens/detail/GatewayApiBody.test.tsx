@@ -3,9 +3,10 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext, CrdRef, K8sObject } from "@srelens/core";
 
-const { listCrds, listCustomResource } = vi.hoisted(() => ({
+const { listCrds, listCustomResource, useAccess } = vi.hoisted(() => ({
   listCrds: vi.fn(),
   listCustomResource: vi.fn(),
+  useAccess: vi.fn(),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => ({
@@ -13,6 +14,16 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   listCrds,
   listCustomResource,
 }));
+
+vi.mock("@srelens/core/react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core/react")>()),
+  useAccess,
+}));
+
+/** What `useAccess` answers: not yet known, the hook's own state while it asks. */
+const unknownAccess = { allowed: () => false, reason: () => "", known: () => false, loading: true };
+/** The cluster answered: no. */
+const deniedAccess = { allowed: () => false, reason: () => "", known: () => true, loading: false };
 
 import { resetContexts } from "../../lib/clusters";
 import { defaultState } from "../../lib/tabs";
@@ -73,6 +84,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   store.setState(defaultState([CTX]));
   resetContexts();
+  useAccess.mockReturnValue(unknownAccess);
   listCrds.mockResolvedValue({ crds: [crd("gateways", "Gateway"), crd("httproutes", "HTTPRoute"), crd("grpcroutes", "GRPCRoute")] });
   listCustomResource.mockImplementation(async (_context: string, ref: CrdRef) =>
     ref.kind === "HTTPRoute"
@@ -158,6 +170,36 @@ describe("a route's pane", () => {
     expect(within(row).getByText("False")).toBeDefined();
     await userEvent.click(within(row).getByRole("button", { name: "infra/edge" }));
     expect(lastRoute()).toBe(`/k/prod-eu/${encodeURIComponent(`${G}/Gateway`)}/infra/edge`);
+  });
+
+  it("asks whether the parent gateway can be read, on this cluster", () => {
+    render(<GatewayApiBody object={ROUTE} context="prod-eu" />);
+    expect(useAccess).toHaveBeenCalledWith("prod-eu", [
+      { verb: "get", group: G, resource: "gateways", namespace: "infra", name: "edge" },
+    ]);
+  });
+
+  it("names a parent gateway the reader may not read without offering to open it (#1104)", () => {
+    // HTTPRoute-only RBAC: the route says everything the pane shows about its
+    // parent, and a link would only open a 403.
+    useAccess.mockReturnValue(deniedAccess);
+    render(<GatewayApiBody object={ROUTE} context="prod-eu" />);
+    const row = screen.getByRole("row", { name: /edge/ });
+    expect(within(row).queryByRole("button", { name: "infra/edge" })).toBeNull();
+    expect(within(row).getByText("infra/edge")).toBeDefined();
+    // Said in words, not only by the link going missing.
+    const note = within(row).getByText("no read access");
+    expect(note.getAttribute("title")).toBe("You don't have permission to get gateways in infra");
+    // What the route itself carries is still there.
+    expect(within(row).getByText("False")).toBeDefined();
+  });
+
+  it("keeps the link while the answer is not in, or the check itself failed", () => {
+    // A failed check is not a denial (access.ts), so it must not read as one.
+    useAccess.mockReturnValue(unknownAccess);
+    render(<GatewayApiBody object={ROUTE} context="prod-eu" />);
+    expect(screen.getByRole("button", { name: "infra/edge" })).toBeDefined();
+    expect(screen.queryByText("no read access")).toBeNull();
   });
 
   it("shows what each rule matches and opens a Service backend", async () => {

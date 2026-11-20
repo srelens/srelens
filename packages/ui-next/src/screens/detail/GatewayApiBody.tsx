@@ -1,4 +1,5 @@
 import { listCrds, listCustomResource, str, type K8sObject } from "@srelens/core";
+import { denyReason, useAccess, type AccessCheck } from "@srelens/core/react";
 import { Alert, Button, LoadingState, Table, type Column } from "@srelens/ui-kit";
 import { detailRoute } from "../../lib/detailRoute";
 import { FailureAlert } from "../../lib/errorCopy";
@@ -171,24 +172,47 @@ function GatewayRoutesSection({ object, context }: { object: K8sObject; context:
   );
 }
 
-function parentColumns(context: string): Column<RouteParent>[] {
+/** Only the Gateway API's own Gateway opens as one; a same-named kind in another group is an implementation's own resource. */
+const isGateway = (p: RouteParent) => p.kind === "Gateway" && p.group === GATEWAY_API_GROUP;
+
+/** Reading the parent Gateway, which is what opening it does. */
+const readGateway = (p: RouteParent): AccessCheck => ({
+  verb: "get",
+  group: GATEWAY_API_GROUP,
+  resource: "gateways",
+  namespace: p.namespace,
+  name: p.name,
+});
+
+function parentColumns(context: string, denied: (p: RouteParent) => string | undefined): Column<RouteParent>[] {
   return [
     {
       key: "parent",
       header: "Parent",
-      render: (p) =>
-        // Only the Gateway API's own Gateway opens as one; a same-named kind
-        // in another group is an implementation's own resource.
-        p.kind === "Gateway" && p.group === GATEWAY_API_GROUP ? (
+      render: (p) => {
+        if (!isGateway(p)) {
+          return (
+            // A Service parent is a mesh route; another kind is an implementation's own.
+            value(`${p.group ? `${p.kind}.${p.group}` : p.kind}/${p.namespace}/${p.name}`)
+          );
+        }
+        const label = `${p.namespace}/${p.name}`;
+        const reason = denied(p);
+        // HTTPRoute-only RBAC (#1104): everything this row shows comes from
+        // the route itself, and a link would only open a 403. Said in words
+        // beside the name, not just by the link going missing.
+        return reason ? (
+          <span className="whitespace-nowrap">
+            <span>{label}</span> <span className="text-faint" title={reason}>no read access</span>
+          </span>
+        ) : (
           <Opens
-            label={`${p.namespace}/${p.name}`}
+            label={label}
             route={detailRoute("Gateway", p.namespace, p.name, { cluster: context, group: GATEWAY_API_GROUP })}
             context={context}
           />
-        ) : (
-          // A Service parent is a mesh route; another kind is an implementation's own.
-          value(`${p.group ? `${p.kind}.${p.group}` : p.kind}/${p.namespace}/${p.name}`)
-        ),
+        );
+      },
     },
     {
       key: "section",
@@ -242,6 +266,26 @@ function ruleColumns(routeNamespace: string, context: string): Column<RouteRule>
 }
 
 /**
+ * What a route attaches to. Each parent Gateway opens as a tab unless the
+ * cluster has said the reader may not read it; while that answer is out, or if
+ * asking failed, the link stays — a failed check is not a denial.
+ */
+function ParentsSection({ object, context }: { object: K8sObject; context: string }) {
+  const parents = routeParents(object);
+  const access = useAccess(context, parents.filter(isGateway).map(readGateway));
+  return (
+    <Section title="Parents">
+      <Table
+        columns={parentColumns(context, (p) => denyReason(access, readGateway(p)))}
+        data={parents}
+        getRowKey={(p) => `${p.group}/${p.kind}/${p.namespace}/${p.name}/${p.sectionName}/${p.port}`}
+        emptyText="Attached to nothing"
+      />
+    </Section>
+  );
+}
+
+/**
  * The Gateway API's own blocks for a Gateway or a route (#1089), ahead of the
  * conditions and status every custom resource shows: how traffic gets in, and
  * where it is sent. Any other kind in the group adds nothing here.
@@ -262,14 +306,7 @@ export function GatewayApiBody({ object, context }: { object: K8sObject; context
   const namespace = str(object.metadata?.namespace);
   return (
     <>
-      <Section title="Parents">
-        <Table
-          columns={parentColumns(context)}
-          data={routeParents(object)}
-          getRowKey={(p) => `${p.group}/${p.kind}/${p.namespace}/${p.name}/${p.sectionName}/${p.port}`}
-          emptyText="Attached to nothing"
-        />
-      </Section>
+      <ParentsSection object={object} context={context} />
       <Section title="Rules">
         <Table columns={ruleColumns(namespace, context)} data={routeRules(object)} getRowKey={(r) => r.key} emptyText="No rules" />
       </Section>
