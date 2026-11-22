@@ -20,3 +20,9 @@
 
 # A scoped container Job uses only a declared binding and bounded scalar inputs.
 {"jsonrpc":"2.0","id":"scan-1","method":"host/runJob","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"namespace-job","inputs":{"namespace":"team"}}}
+# A pod tunnel (0.3): connect by pod or by service, then frames both ways
+{"jsonrpc":"2.0","id":"t-1","method":"host/connect","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"kafka","pod":"broker-0","tunnel":1}}
+{"jsonrpc":"2.0","id":"t-2","method":"host/connect","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"kafka","name":"bootstrap","service":"kafka","tunnel":2}}
+{"jsonrpc":"2.0","method":"tunnel/data","params":{"tunnel":1,"data":"aGVsbG8="}}
+{"jsonrpc":"2.0","method":"tunnel/credit","params":{"tunnel":1,"bytes":65536}}
+{"jsonrpc":"2.0","method":"tunnel/close","params":{"tunnel":1}}

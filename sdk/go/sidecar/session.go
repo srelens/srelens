@@ -17,7 +17,7 @@ import (
 )
 
 // supportedVersions are the sidecar API versions this SDK speaks, oldest first.
-var supportedVersions = []string{"0.1.0", protocol.APIVersion}
+var supportedVersions = []string{"0.1.0", "0.2.0", protocol.APIVersion}
 
 // sessionKey is the context key for what initialize told the sidecar.
 type sessionKey struct{}
@@ -302,6 +302,11 @@ func (se *session) notify(note protocol.Notification) {
 		if err := json.Unmarshal(note.Params, &p); err == nil {
 			se.cancelRunning(streamKey(p.Stream), ErrCancelled)
 		}
+	case protocol.MethodTunnelData, protocol.MethodTunnelCredit, protocol.MethodTunnelClose:
+		// Routed without waiting: the reader goroutine must reach the next line.
+		if se.shared != nil {
+			se.shared.host.tunnelFrame(note)
+		}
 	}
 }
 
@@ -340,6 +345,7 @@ func (se *session) initialize(id protocol.RequestID, raw json.RawMessage) {
 	if se.sc.sizeRuntime {
 		sizeRuntime(params.Limits, processKnobs)
 	}
+	se.shared.host.version = chosen
 	se.base = context.WithValue(context.Background(), sessionKey{}, se.shared)
 	result, _ := json.Marshal(protocol.InitializeResult{
 		APIVersion: chosen,
