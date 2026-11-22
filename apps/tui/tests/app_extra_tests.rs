@@ -2487,6 +2487,116 @@ async fn a_parked_mux_pane_keeps_requesting_its_clusters_metrics() {
     .unwrap_or_else(|_| panic!("the parked pane's cluster got only {:?}", asked));
 }
 
+/// Opens `:mux` on `cluster-right` with `view` on the fake cluster's pane, so
+/// that pane is parked with `view` still on screen.
+async fn park_on_the_fake_cluster(
+    cluster: &FakeCluster,
+    view: ActiveView,
+) -> (common::env::SettingsGuard, App, UnboundedReceiver<AppEvent>) {
+    let (settings, mut app, mut rx) = app_on(cluster).await;
+    app.contexts = vec![mux_context(FAKE_CONTEXT), mux_context("cluster-right")];
+    app.active_view = view;
+    app.handle_key_event(common::ch(':')).await;
+    for c in "mux".chars() {
+        app.handle_key_event(common::ch(c)).await;
+    }
+    app.handle_key_event(common::key(KeyCode::Enter)).await;
+    app.handle_key_event(common::key(KeyCode::Enter)).await;
+    assert_eq!(app.active_context, "cluster-right");
+    common::drain(&mut rx);
+    (settings, app, rx)
+}
+
+const NO_HELM_RELEASES: &str = "/api/v1/namespaces/default/secrets";
+
+/// A Helm list `:mux` parked is still on screen: the tick keeps asking its
+/// own cluster, and the answer lands on it (#1097). Here the release it shows
+/// has been uninstalled since.
+#[tokio::test]
+async fn a_parked_helm_list_keeps_refreshing_from_its_cluster() {
+    let cluster = fake_cluster(vec![route(
+        NO_HELM_RELEASES,
+        json!({ "kind": "SecretList", "metadata": {}, "items": [] }),
+    )])
+    .await;
+    let mut helm = HelmViewState::new();
+    helm.set_releases(vec![HelmReleaseItem {
+        name: "web".into(),
+        namespace: "default".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "web".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "1.0".into(),
+        updated: "2026-11-01".into(),
+    }]);
+    let (_settings, mut app, mut rx) =
+        park_on_the_fake_cluster(&cluster, ActiveView::Helm(helm)).await;
+
+    app.handle_tick();
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(AppEvent::HelmReleasesResult {
+                context,
+                namespace,
+                result,
+            }) = rx.recv().await
+            {
+                let done = context == FAKE_CONTEXT;
+                app.handle_helm_releases_result(&context, &namespace, result);
+                if done {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the parked pane's cluster was never asked for its releases");
+    let parked = &app
+        .mux_state
+        .as_ref()
+        .unwrap()
+        .inactive_pane
+        .as_ref()
+        .unwrap();
+    let ActiveView::Helm(helm) = &parked.active_view else {
+        panic!("the parked pane should still show Helm");
+    };
+    assert!(
+        helm.releases.is_empty(),
+        "the uninstalled release must leave the parked list"
+    );
+}
+
+/// The same for a Helm release `:mux` parked: the tick asks its own cluster
+/// for that release again (#1097).
+#[tokio::test]
+async fn a_parked_helm_release_keeps_refreshing_from_its_cluster() {
+    let cluster = fake_cluster(vec![route(
+        NO_HELM_RELEASES,
+        json!({ "kind": "SecretList", "metadata": {}, "items": [] }),
+    )])
+    .await;
+    let detail = srectl::views::HelmDetailViewState::new("web".into(), "default".into());
+    let (_settings, mut app, mut rx) =
+        park_on_the_fake_cluster(&cluster, ActiveView::HelmDetail(detail)).await;
+
+    app.handle_tick();
+
+    let (context, name) = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(AppEvent::HelmDetailResult { context, name, .. }) = rx.recv().await {
+                break (context, name);
+            }
+        }
+    })
+    .await
+    .expect("nobody was asked for the parked release");
+    assert_eq!(context, FAKE_CONTEXT);
+    assert_eq!(name, "web");
+}
+
 // ---------------------------------------------------------------------------
 // Command resolution
 // ---------------------------------------------------------------------------

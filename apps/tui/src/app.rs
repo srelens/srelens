@@ -856,6 +856,31 @@ impl App {
             self.helm_tick_counter = 0;
         }
 
+        // A parked Helm list or release is still on screen too: keep asking
+        // its own cluster, or an upgrade or rollback never shows there (#1097).
+        // One fetch at a time, under the pane's own guard.
+        let parked_helm = self.mux_state.as_mut().and_then(|mux| {
+            let pane = mux.inactive_pane.as_mut()?;
+            let release = match &pane.active_view {
+                ActiveView::Helm(_) => None,
+                ActiveView::HelmDetail(d) => Some((d.release_name.clone(), d.namespace.clone())),
+                _ => return None,
+            };
+            mux.parked_helm_tick_counter = mux.parked_helm_tick_counter.saturating_add(1);
+            if mux.parked_helm_tick_counter % 35 != 1 || pane.helm_refreshing {
+                return None;
+            }
+            pane.helm_refreshing = true;
+            Some((pane.context.clone(), pane.namespace.clone(), release))
+        });
+        match parked_helm {
+            Some((ctx, ns, None)) => self.refresh_helm_releases_for(ctx, ns),
+            Some((ctx, _, Some((name, release_ns)))) => {
+                self.fetch_helm_detail(ctx, release_ns, name, None)
+            }
+            None => {}
+        }
+
         // Periodically refresh ArgoCD applications or ArgoCD Application detail
         if let ActiveView::Argo(argo) = &self.active_view {
             self.argo_tick_counter = self.argo_tick_counter.saturating_add(1);
@@ -2644,6 +2669,9 @@ impl App {
 
             // 2. Switch context and namespace
             self.active_context = new_context;
+            // A Helm fetch still out is for the cluster just left, and its
+            // answer frees nothing (#1097), so free the guard here.
+            self.helm_refreshing = false;
 
             // 3. Restore or initialize assistant state for the target context
             if let Some(saved_state) = self.assistant_states.remove(&self.active_context) {
@@ -10306,6 +10334,7 @@ impl App {
             }),
             inactive_pane: None,
             parked_metrics_tick_counter: 0,
+            parked_helm_tick_counter: 0,
         });
 
         self.set_toast(
@@ -13342,21 +13371,20 @@ impl App {
                 helm.is_loading = true;
             }
         }
-        let ctx = self.active_context.clone();
-        let ns = if self.active_namespace.is_empty() {
-            None
-        } else {
-            Some(self.active_namespace.clone())
-        };
-        let ns_str = self.active_namespace.clone();
+        self.refresh_helm_releases_for(self.active_context.clone(), self.active_namespace.clone());
+    }
+
+    /// Ask `ctx` for its Helm releases in `ns` (every namespace when empty);
+    /// the reply names both.
+    pub fn refresh_helm_releases_for(&self, ctx: String, ns: String) {
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
-
         tokio::spawn(async move {
-            let res = srelens_kube::helm::fetch_helm_releases(&cache, &ctx, ns.as_deref()).await;
+            let scope = (!ns.is_empty()).then_some(ns.as_str());
+            let res = srelens_kube::helm::fetch_helm_releases(&cache, &ctx, scope).await;
             let _ = event_tx.send(crate::event::AppEvent::HelmReleasesResult {
                 context: ctx,
-                namespace: ns_str,
+                namespace: ns,
                 result: res,
             });
         });
@@ -13368,20 +13396,45 @@ impl App {
         namespace: &str,
         result: Result<Vec<srelens_kube::helm::HelmReleaseSummary>, String>,
     ) {
-        self.helm_refreshing = false;
-        if let ActiveView::Helm(helm) = &mut self.active_view {
-            if self.active_context == context && self.active_namespace == namespace {
+        let parked = self.release_helm_guard(context);
+        let shown_ns = self.namespace_for_context(context).map(str::to_owned);
+        if let Some((ActiveView::Helm(helm), _, _)) = self.pane_for_context(context) {
+            if shown_ns.as_deref() == Some(namespace) {
                 match result {
                     Ok(summaries) => {
-                        let items: Vec<HelmReleaseItem> =
-                            summaries.into_iter().map(Into::into).collect();
-                        helm.set_releases(items);
+                        helm.set_releases(summaries.into_iter().map(Into::into).collect())
                     }
                     Err(err) => helm.set_error(err),
                 }
-            } else {
-                self.refresh_helm_releases();
+                return;
             }
+        }
+        // An answer the focused list cannot use held its guard while it was
+        // out, so ask again now. The parked pane's answers ask nothing of it.
+        if !parked && matches!(self.active_view, ActiveView::Helm(_)) {
+            self.refresh_helm_releases();
+        }
+    }
+
+    /// A Helm answer ends the fetch of the pane that asked, and only that
+    /// one: one fetch at a time is per pane (#1097). Says whether that was
+    /// the parked pane. An answer for a cluster no pane shows frees nothing:
+    /// switching cluster freed the guard already.
+    fn release_helm_guard(&mut self, context: &str) -> bool {
+        if self.active_context == context {
+            self.helm_refreshing = false;
+            return false;
+        }
+        match self
+            .mux_state
+            .as_mut()
+            .and_then(|mux| mux.inactive_pane.as_mut())
+        {
+            Some(pane) if pane.context == context => {
+                pane.helm_refreshing = false;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -13393,24 +13446,7 @@ impl App {
     ) {
         let mut detail_state = HelmDetailViewState::new(name.clone(), namespace.clone());
         detail_state.set_tab(initial_tab);
-        let ctx = self.active_context.clone();
-        let cache = self.client_cache.clone();
-        let event_tx = self.event_tx.clone();
-        let name_c = name.clone();
-        let ns_c = namespace.clone();
-
-        tokio::spawn(async move {
-            let res =
-                srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None)
-                    .await;
-            let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
-                context: ctx,
-                namespace: ns_c,
-                name: name_c,
-                revision: None,
-                result: res,
-            });
-        });
+        self.fetch_helm_detail(self.active_context.clone(), namespace, name, None);
 
         let old_view =
             std::mem::replace(&mut self.active_view, ActiveView::HelmDetail(detail_state));
@@ -13422,24 +13458,12 @@ impl App {
             detail.is_loading = true;
             detail.error = None;
         }
-        let ctx = self.active_context.clone();
-        let cache = self.client_cache.clone();
-        let event_tx = self.event_tx.clone();
-        let name_c = name.to_string();
-        let ns_c = namespace.to_string();
-
-        tokio::spawn(async move {
-            let res =
-                srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None)
-                    .await;
-            let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
-                context: ctx,
-                namespace: ns_c,
-                name: name_c,
-                revision: None,
-                result: res,
-            });
-        });
+        self.fetch_helm_detail(
+            self.active_context.clone(),
+            namespace.to_string(),
+            name.to_string(),
+            None,
+        );
     }
 
     pub fn refresh_helm_detail_silent(&mut self, name: &str, namespace: &str) {
@@ -13447,21 +13471,35 @@ impl App {
             return;
         }
         self.helm_refreshing = true;
-        let ctx = self.active_context.clone();
+        self.fetch_helm_detail(
+            self.active_context.clone(),
+            namespace.to_string(),
+            name.to_string(),
+            None,
+        );
+    }
+
+    /// Ask `ctx` for release `name` in `namespace`: its latest revision, or
+    /// `revision`. The reply names all of them.
+    fn fetch_helm_detail(
+        &self,
+        ctx: String,
+        namespace: String,
+        name: String,
+        revision: Option<i64>,
+    ) {
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
-        let name_c = name.to_string();
-        let ns_c = namespace.to_string();
-
         tokio::spawn(async move {
-            let res =
-                srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None)
-                    .await;
+            let res = srelens_kube::helm::fetch_helm_release_detail(
+                &cache, &ctx, &namespace, &name, revision,
+            )
+            .await;
             let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
                 context: ctx,
-                namespace: ns_c,
-                name: name_c,
-                revision: None,
+                namespace,
+                name,
+                revision,
                 result: res,
             });
         });
@@ -13475,12 +13513,11 @@ impl App {
         revision: Option<i64>,
         result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
     ) {
-        self.helm_refreshing = false;
-        if let ActiveView::HelmDetail(detail) = &mut self.active_view {
-            if self.active_context == context
-                && detail.namespace == namespace
-                && detail.release_name == name
-            {
+        self.release_helm_guard(context);
+        let mut previous = None;
+        // The focused pane's release, or the parked pane's (#1097).
+        if let Some((ActiveView::HelmDetail(detail), _, _)) = self.pane_for_context(context) {
+            if detail.namespace == namespace && detail.release_name == name {
                 match result {
                     Ok(rel_detail) => {
                         if let Some(rev) = revision {
@@ -13495,29 +13532,7 @@ impl App {
                         detail.set_detail(rel_detail);
 
                         if curr_rev > 1 && detail.previous_detail.is_none() {
-                            let prev_rev = curr_rev - 1;
-                            let ctx = self.active_context.clone();
-                            let cache = self.client_cache.clone();
-                            let event_tx = self.event_tx.clone();
-                            let name_c = name.to_string();
-                            let ns_c = namespace.to_string();
-                            tokio::spawn(async move {
-                                let res = srelens_kube::helm::fetch_helm_release_detail(
-                                    &cache,
-                                    &ctx,
-                                    &ns_c,
-                                    &name_c,
-                                    Some(prev_rev),
-                                )
-                                .await;
-                                let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
-                                    context: ctx,
-                                    namespace: ns_c,
-                                    name: name_c,
-                                    revision: Some(prev_rev),
-                                    result: res,
-                                });
-                            });
+                            previous = Some(curr_rev - 1);
                         }
                     }
                     Err(err) => {
@@ -13527,6 +13542,15 @@ impl App {
                     }
                 }
             }
+        }
+        // From the cluster that answered, which may be the parked pane's.
+        if let Some(rev) = previous {
+            self.fetch_helm_detail(
+                context.to_string(),
+                namespace.to_string(),
+                name.to_string(),
+                Some(rev),
+            );
         }
     }
 
