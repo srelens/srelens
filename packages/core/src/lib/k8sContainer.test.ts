@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  containerLastExit,
   containerLastRestartTime,
   latestRestartTime,
   portText,
@@ -321,5 +322,24 @@ describe("resourceSummary", () => {
   it("stands an em dash in for a half that was never set", () => {
     expect(resourceSummary({ memory: "512Mi" })).toBe("— · 512Mi");
     expect(resourceSummary({})).toBe("— · —");
+  });
+});
+
+describe("containerLastExit", () => {
+  it("names the exit code and the reason of the previous run", () => {
+    expect(
+      containerLastExit({ lastState: { terminated: { exitCode: 1, reason: "Error" } } }),
+    ).toBe("exit 1 (Error)");
+  });
+
+  it("gives whichever of the two the cluster sent", () => {
+    expect(containerLastExit({ lastState: { terminated: { exitCode: 137 } } })).toBe("exit 137");
+    expect(containerLastExit({ lastState: { terminated: { reason: "OOMKilled" } } })).toBe("OOMKilled");
+  });
+
+  it("is empty for a container that has never terminated", () => {
+    expect(containerLastExit({ lastState: {} })).toBe("");
+    expect(containerLastExit({ lastState: { running: {} } })).toBe("");
+    expect(containerLastExit(undefined)).toBe("");
   });
 });

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import {
   asArray,
   asRecord,
+  containerLastExit,
   containerLastRestartTime,
   containerStateText,
   envText,
@@ -394,6 +395,7 @@ function ContainerCard({
   const state = status ? containerStateText(status) : undefined;
   const targetContainerName = str(container.targetContainerName);
   const restarts = status?.restartCount;
+  const lastExit = containerLastExit(status);
   const lastRestart = status ? containerLastRestartTime(status) : "";
   const runningSince = status ? str(asRecord(asRecord(status.state).running).startedAt) : "";
   const image = str(container.image);
@@ -418,6 +420,7 @@ function ContainerCard({
       </SubHead>
       {targetContainerName && <KV k="Debugging" v={targetContainerName} mono />}
       {restarts != null && <KV k="Restarts" v={str(restarts)} />}
+      {lastExit && <KV k="Last exit" v={lastExit} />}
       {lastRestart && <KV k="Last restart" v={timestampWithAge(lastRestart, Date.now())} />}
       {runningSince && <KV k="Running since" v={timestampWithAge(runningSince, Date.now())} />}
       {image && <KV k="Image" v={image} mono />}
@@ -644,6 +647,8 @@ function containerColumns(subject?: Omit<PortsSubject, "container">): Column<Con
       return <StatusPill status={state.text} kind={state.kind} tinted />;
     },
   },
+  // Why the previous run ended (#1112): a crash loop's state is only "waiting".
+  { key: "lastExit", header: "Last exit", render: (r) => containerLastExit(r.status) || "—" },
   ];
 }
 

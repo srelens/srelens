@@ -585,6 +585,8 @@ describe("ResourceTabView — the full tab the design draws", () => {
         "Limits",
         "Probe",
         "State",
+        // Beyond the design's seven: why the previous run ended (#1112).
+        "Last exit",
       ]);
       const rows = Array.from(table.querySelectorAll("tbody tr.tbl-row"));
       expect(rows.length).toBe(2);
