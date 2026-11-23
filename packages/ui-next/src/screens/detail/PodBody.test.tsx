@@ -759,3 +759,67 @@ describe("PodDetailsBody", () => {
     });
   });
 });
+
+// #1112: a crash loop's current state is "waiting"; why the last run ended is
+// on `lastState.terminated`, and the detail showed only its time.
+const CRASHED_STATUS = {
+  name: "app",
+  ready: false,
+  restartCount: 12,
+  state: { waiting: { reason: "CrashLoopBackOff" } },
+  lastState: { terminated: { exitCode: 1, reason: "Error", finishedAt: "2026-08-19T00:00:00Z" } },
+};
+
+describe("a container's last exit (#1112)", () => {
+  it("is on the peek's Containers pane", () => {
+    render(
+      <PodContainersBody
+        context="ctx"
+        object={pod({ containers: [APP_CONTAINER] }, { containerStatuses: [CRASHED_STATUS] })}
+      />,
+    );
+    expect(screen.getByText("Last exit").closest("dl")?.textContent).toContain("exit 1 (Error)");
+  });
+
+  it("is a column of the full tab's containers table", () => {
+    render(
+      <PodContainersTable
+        context="ctx"
+        object={pod({ containers: [APP_CONTAINER] }, { containerStatuses: [CRASHED_STATUS] })}
+      />,
+    );
+    const headers = Array.from(document.querySelectorAll("thead th")).map((th) => th.textContent?.trim());
+    expect(headers).toContain("Last exit");
+    expect(screen.getByText("exit 1 (Error)")).toBeDefined();
+  });
+
+  it("is left out for a container on its first run", () => {
+    render(
+      <PodContainersBody
+        context="ctx"
+        object={pod({ containers: [APP_CONTAINER] }, { containerStatuses: [APP_STATUS] })}
+      />,
+    );
+    expect(screen.queryByText("Last exit")).toBeNull();
+  });
+});
+
+describe("sorting the containers table by last exit (#1112)", () => {
+  it("reorders the rows", async () => {
+    render(
+      <PodContainersTable
+        context="ctx"
+        object={pod(
+          { containers: [APP_CONTAINER, SIDECAR_CONTAINER] },
+          { containerStatuses: [CRASHED_STATUS, SIDECAR_STATUS] },
+        )}
+      />,
+    );
+    const names = () =>
+      Array.from(document.querySelectorAll("tbody tr.tbl-row")).map((tr) => tr.querySelector("td")?.textContent);
+    expect(names()).toEqual(["app", "sidecar"]);
+    // Ascending: the sidecar has never exited, so its empty value sorts first.
+    await userEvent.click(screen.getByRole("button", { name: "Sort by Last exit" }));
+    expect(names()).toEqual(["sidecar", "app"]);
+  });
+});

@@ -7,6 +7,19 @@ export function containerLastRestartTime(status: unknown): string {
   return str(asRecord(asRecord(st.lastState).terminated).finishedAt);
 }
 
+/**
+ * How a container's previous run ended: `exit 1 (Error)`, `exit 137
+ * (OOMKilled)`. Empty for a container that has never terminated — `lastState`
+ * is `{}` on a first run, so the `terminated` key is the test. Each half is
+ * dropped rather than faked when the cluster did not send it. (#1112)
+ */
+export function containerLastExit(status: unknown): string {
+  const terminated = asRecord(asRecord(asRecord(status).lastState).terminated);
+  const reason = str(terminated.reason);
+  if (typeof terminated.exitCode !== "number") return reason;
+  return reason ? `exit ${terminated.exitCode} (${reason})` : `exit ${terminated.exitCode}`;
+}
+
 export function latestRestartTime(statuses: Record<string, unknown>[]): string {
   return statuses
     .map(containerLastRestartTime)
