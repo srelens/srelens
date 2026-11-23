@@ -1,0 +1,516 @@
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "id": "org.srelens.kamaji",
+  "name": "Kamaji",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.5",
+  "kind": "declarative",
+  "permissions": [
+    "k8s.listCustomResource",
+    "k8s.listEvents"
+  ],
+  "capabilities": [
+    {
+      "name": "tenantcontrolplanes",
+      "title": "List Tenant control planes",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "kamaji.clastix.io",
+        "version": "v1alpha1",
+        "plural": "tenantcontrolplanes",
+        "kind": "TenantControlPlane",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Version",
+            "jsonPath": ".spec.kubernetes.version",
+            "type": "string"
+          },
+          {
+            "name": "Installed Version",
+            "jsonPath": ".status.kubernetesResources.version.version",
+            "type": "string"
+          },
+          {
+            "name": "Status",
+            "jsonPath": ".status.kubernetesResources.version.status",
+            "type": "string"
+          },
+          {
+            "name": "Control-Plane endpoint",
+            "jsonPath": ".status.controlPlaneEndpoint",
+            "type": "string"
+          },
+          {
+            "name": "Kubeconfig",
+            "jsonPath": ".status.kubeconfig.admin.secretName",
+            "type": "string"
+          },
+          {
+            "name": "Datastore",
+            "jsonPath": ".status.storage.dataStoreName",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "datastores",
+      "title": "List Datastores",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "kamaji.clastix.io",
+        "version": "v1alpha1",
+        "plural": "datastores",
+        "kind": "DataStore",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Driver",
+            "jsonPath": ".spec.driver",
+            "type": "string"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.ready",
+            "type": "boolean"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "kubeconfiggenerators",
+      "title": "List Kubeconfig generators",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "kamaji.clastix.io",
+        "version": "v1alpha1",
+        "plural": "kubeconfiggenerators",
+        "kind": "KubeconfigGenerator",
+        "namespaced": false
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "events",
+      "title": "List events",
+      "target": "k8s.listEvents",
+      "arguments": {},
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    }
+  ],
+  "contributions": {
+    "pages": [
+      {
+        "id": "overview",
+        "title": "Overview",
+        "capability": "tenantcontrolplanes",
+        "dashboard": {
+          "pages": [
+            "tenantcontrolplanes",
+            "datastores"
+          ],
+          "events": {
+            "capability": "events",
+            "apiGroups": [
+              "kamaji.clastix.io"
+            ]
+          }
+        }
+      },
+      {
+        "id": "tenantcontrolplanes",
+        "title": "Tenant control planes",
+        "capability": "tenantcontrolplanes"
+      },
+      {
+        "id": "datastores",
+        "title": "Datastores",
+        "capability": "datastores"
+      },
+      {
+        "id": "kubeconfiggenerators",
+        "title": "Kubeconfig generators",
+        "capability": "kubeconfiggenerators"
+      }
+    ],
+    "detailPanels": [
+      {
+        "id": "tenantcontrolplane-summary",
+        "title": "Tenant control plane",
+        "forKinds": [
+          "kamaji.clastix.io/TenantControlPlane"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Kubernetes version",
+                "jsonPath": ".spec.kubernetes.version"
+              },
+              {
+                "label": "Installed version",
+                "jsonPath": ".status.kubernetesResources.version.version"
+              },
+              {
+                "label": "Endpoint",
+                "jsonPath": ".status.controlPlaneEndpoint"
+              },
+              {
+                "label": "Replicas",
+                "jsonPath": ".spec.controlPlane.deployment.replicas",
+                "format": "number"
+              },
+              {
+                "label": "Ready replicas",
+                "jsonPath": ".status.kubernetesResources.deployment.readyReplicas",
+                "format": "number"
+              },
+              {
+                "label": "Service type",
+                "jsonPath": ".spec.controlPlane.service.serviceType"
+              },
+              {
+                "label": "Datastore",
+                "jsonPath": ".status.storage.dataStoreName"
+              },
+              {
+                "label": "Datastore driver",
+                "jsonPath": ".status.storage.driver"
+              },
+              {
+                "label": "Datastore schema",
+                "jsonPath": ".spec.dataStoreSchema"
+              },
+              {
+                "label": "Pod CIDR",
+                "jsonPath": ".spec.networkProfile.podCidr"
+              },
+              {
+                "label": "Service CIDR",
+                "jsonPath": ".spec.networkProfile.serviceCidr"
+              },
+              {
+                "label": "Cluster domain",
+                "jsonPath": ".spec.networkProfile.clusterDomain"
+              },
+              {
+                "label": "Konnectivity",
+                "jsonPath": ".status.addons.konnectivity.enabled"
+              },
+              {
+                "label": "Admin kubeconfig secret",
+                "jsonPath": ".status.kubeconfig.admin.secretName"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "datastore-summary",
+        "title": "Datastore",
+        "forKinds": [
+          "kamaji.clastix.io/DataStore"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Driver",
+                "jsonPath": ".spec.driver"
+              },
+              {
+                "label": "Ready",
+                "jsonPath": ".status.ready"
+              },
+              {
+                "label": "Exclusive",
+                "jsonPath": ".spec.exclusive"
+              }
+            ]
+          },
+          {
+            "type": "conditions",
+            "jsonPath": ".status.conditions"
+          }
+        ]
+      },
+      {
+        "id": "kubeconfiggenerator-summary",
+        "title": "Kubeconfig generator",
+        "forKinds": [
+          "kamaji.clastix.io/KubeconfigGenerator"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Endpoint taken from",
+                "jsonPath": ".spec.controlPlaneEndpointFrom"
+              },
+              {
+                "label": "Generated",
+                "jsonPath": ".status.resources",
+                "format": "number"
+              },
+              {
+                "label": "Available",
+                "jsonPath": ".status.availableResources",
+                "format": "number"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "detailTabs": [],
+    "detailLinks": [],
+    "commands": [
+      {
+        "id": "open-overview",
+        "title": "Open overview",
+        "target": {
+          "page": "overview"
+        }
+      },
+      {
+        "id": "open-tenantcontrolplanes",
+        "title": "Open tenant control planes",
+        "target": {
+          "page": "tenantcontrolplanes"
+        }
+      },
+      {
+        "id": "open-datastores",
+        "title": "Open datastores",
+        "target": {
+          "page": "datastores"
+        }
+      },
+      {
+        "id": "open-kubeconfiggenerators",
+        "title": "Open kubeconfig generators",
+        "target": {
+          "page": "kubeconfiggenerators"
+        }
+      }
+    ],
+    "statusResolvers": [
+      {
+        "forKinds": [
+          "kamaji.clastix.io/TenantControlPlane"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.kubernetesResources.version.status",
+                "equals": "Ready"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.kubernetesResources.version.status",
+                "equals": "NotReady"
+              }
+            ],
+            "status": "error",
+            "label": "Not ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.kubernetesResources.version.status",
+                "equals": "Sleeping"
+              }
+            ],
+            "status": "suspended",
+            "label": "Sleeping"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.kubernetesResources.version.status",
+                "equals": "Provisioning"
+              }
+            ],
+            "status": "progressing",
+            "label": "Provisioning"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.kubernetesResources.version.status",
+                "equals": "Upgrading"
+              }
+            ],
+            "status": "progressing",
+            "label": "Upgrading"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.kubernetesResources.version.status",
+                "equals": "Migrating"
+              }
+            ],
+            "status": "progressing",
+            "label": "Migrating"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.kubernetesResources.version.status",
+                "equals": "CertificateAuthorityRotating"
+              }
+            ],
+            "status": "progressing",
+            "label": "Rotating certificate authority"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.kubernetesResources.version.status",
+                "equals": "WriteLimited"
+              }
+            ],
+            "status": "warning",
+            "label": "Write limited"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "kamaji.clastix.io/DataStore"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.ready",
+                "equals": true
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.ready",
+                "equals": false
+              }
+            ],
+            "status": "error",
+            "label": "Not ready"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      }
+    ],
+    "dashboardCards": [
+      {
+        "id": "tenantcontrolplanes-by-status",
+        "title": "Tenant control planes by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "tenantcontrolplanes",
+        "target": {
+          "page": "tenantcontrolplanes"
+        }
+      },
+      {
+        "id": "tenants-not-ready",
+        "title": "Tenant control planes not ready",
+        "size": "s",
+        "type": "count",
+        "source": "tenantcontrolplanes",
+        "predicate": {
+          "jsonPath": ".status.kubernetesResources.version.status",
+          "equals": "NotReady"
+        },
+        "target": {
+          "page": "tenantcontrolplanes"
+        }
+      },
+      {
+        "id": "datastores-by-status",
+        "title": "Datastores by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "datastores",
+        "target": {
+          "page": "datastores"
+        }
+      }
+    ],
+    "resourceLinks": [
+      {
+        "id": "tenant-datastore",
+        "from": "kamaji.clastix.io/TenantControlPlane",
+        "to": "kamaji.clastix.io/DataStore",
+        "relation": "references",
+        "match": {
+          "path": ".status.storage.dataStoreName"
+        }
+      },
+      {
+        "id": "tenant-deployment",
+        "from": "kamaji.clastix.io/TenantControlPlane",
+        "to": "apps/Deployment",
+        "relation": "references",
+        "match": {
+          "path": ".status.kubernetesResources.deployment"
+        }
+      },
+      {
+        "id": "tenant-service",
+        "from": "kamaji.clastix.io/TenantControlPlane",
+        "to": "/Service",
+        "relation": "references",
+        "match": {
+          "path": ".status.kubernetesResources.service"
+        }
+      },
+      {
+        "id": "tenant-admin-kubeconfig",
+        "from": "kamaji.clastix.io/TenantControlPlane",
+        "to": "/Secret",
+        "relation": "references",
+        "match": {
+          "path": ".status.kubeconfig.admin.secretName"
+        }
+      }
+    ]
+  }
+}

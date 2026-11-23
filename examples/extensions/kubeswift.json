@@ -1,0 +1,2727 @@
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "id": "org.srelens.kubeswift",
+  "name": "KubeSwift",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.5",
+  "kind": "declarative",
+  "permissions": [
+    "k8s.listCustomResource",
+    "k8s.listEvents",
+    "k8s.setFields"
+  ],
+  "capabilities": [
+    {
+      "name": "swiftguests",
+      "title": "List Guests",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "swift.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftguests",
+        "kind": "SwiftGuest",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "Node",
+            "jsonPath": ".status.nodeName",
+            "type": "string"
+          },
+          {
+            "name": "Guest IP",
+            "jsonPath": ".status.network.primaryIP",
+            "type": "string"
+          },
+          {
+            "name": "Pod IP",
+            "jsonPath": ".status.network.podIP",
+            "type": "string"
+          },
+          {
+            "name": "IP Scope",
+            "jsonPath": ".status.network.primaryIPScope",
+            "type": "string"
+          },
+          {
+            "name": "Hypervisor",
+            "jsonPath": ".status.runtime.hypervisor",
+            "type": "string"
+          },
+          {
+            "name": "OS",
+            "jsonPath": ".spec.osType",
+            "type": "string"
+          },
+          {
+            "name": "Service",
+            "jsonPath": ".status.network.serviceRef.name",
+            "type": "string"
+          },
+          {
+            "name": "Egress",
+            "jsonPath": ".status.network.egress",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftguestpools",
+      "title": "List Guest pools",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "swift.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftguestpools",
+        "kind": "SwiftGuestPool",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Desired",
+            "jsonPath": ".spec.replicas",
+            "type": "integer"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.readyReplicas",
+            "type": "integer"
+          },
+          {
+            "name": "Updated",
+            "jsonPath": ".status.updatedReplicas",
+            "type": "integer"
+          },
+          {
+            "name": "Available",
+            "jsonPath": ".status.availableReplicas",
+            "type": "integer"
+          },
+          {
+            "name": "Failed",
+            "jsonPath": ".status.failedReplicas",
+            "type": "integer"
+          },
+          {
+            "name": "Service",
+            "jsonPath": ".status.serviceRef",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftguestclasses",
+      "title": "List Guest classes",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "swift.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftguestclasses",
+        "kind": "SwiftGuestClass",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "CPU",
+            "jsonPath": ".spec.cpu",
+            "type": "string"
+          },
+          {
+            "name": "Memory",
+            "jsonPath": ".spec.memory",
+            "type": "string"
+          },
+          {
+            "name": "AccessMode",
+            "jsonPath": ".spec.storage.accessMode",
+            "type": "string"
+          },
+          {
+            "name": "VolumeMode",
+            "jsonPath": ".spec.storage.volumeMode",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftvolumeattachments",
+      "title": "List Volume attachments",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "swift.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftvolumeattachments",
+        "kind": "SwiftVolumeAttachment",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Guest",
+            "jsonPath": ".spec.guestRef.name",
+            "type": "string"
+          },
+          {
+            "name": "PVC",
+            "jsonPath": ".spec.pvcRef.name",
+            "type": "string"
+          },
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "Serial",
+            "jsonPath": ".status.serial",
+            "type": "string"
+          },
+          {
+            "name": "Node",
+            "jsonPath": ".status.nodeName",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftimages",
+      "title": "List Images",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "image.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftimages",
+        "kind": "SwiftImage",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "Size",
+            "jsonPath": ".status.preparedArtifact.size",
+            "type": "string"
+          },
+          {
+            "name": "Format",
+            "jsonPath": ".status.preparedFormat",
+            "type": "string"
+          },
+          {
+            "name": "Strategy",
+            "jsonPath": ".spec.cloneStrategy",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftkernels",
+      "title": "List Kernels",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "kernel.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftkernels",
+        "kind": "SwiftKernel",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Profile",
+            "jsonPath": ".spec.profile",
+            "type": "string"
+          },
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftseedprofiles",
+      "title": "List Seed profiles",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "seed.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftseedprofiles",
+        "kind": "SwiftSeedProfile",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Datasource",
+            "jsonPath": ".spec.datasource",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftsnapshots",
+      "title": "List Snapshots",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "snapshot.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftsnapshots",
+        "kind": "SwiftSnapshot",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "Guest",
+            "jsonPath": ".spec.guestRef.name",
+            "type": "string"
+          },
+          {
+            "name": "Backend",
+            "jsonPath": ".spec.backend.type",
+            "type": "string"
+          },
+          {
+            "name": "Location",
+            "jsonPath": ".status.location.source",
+            "type": "string"
+          },
+          {
+            "name": "Size",
+            "jsonPath": ".status.totalSizeBytes",
+            "type": "integer"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftrestores",
+      "title": "List Restores",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "snapshot.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftrestores",
+        "kind": "SwiftRestore",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "Snapshot",
+            "jsonPath": ".spec.snapshotRef.name",
+            "type": "string"
+          },
+          {
+            "name": "Target",
+            "jsonPath": ".spec.targetGuest.name",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftsnapshotschedules",
+      "title": "List Snapshot schedules",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "snapshot.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftsnapshotschedules",
+        "kind": "SwiftSnapshotSchedule",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Schedule",
+            "jsonPath": ".spec.schedule",
+            "type": "string"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Reason",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].reason",
+            "type": "string"
+          },
+          {
+            "name": "Suspend",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Guest",
+            "jsonPath": ".spec.template.spec.guestRef.name",
+            "type": "string"
+          },
+          {
+            "name": "Last-Schedule",
+            "jsonPath": ".status.lastScheduleTime",
+            "type": "date"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftmigrations",
+      "title": "List Migrations",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "migration.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftmigrations",
+        "kind": "SwiftMigration",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Guest",
+            "jsonPath": ".spec.guestRef.name",
+            "type": "string"
+          },
+          {
+            "name": "From",
+            "jsonPath": ".status.sourceNode",
+            "type": "string"
+          },
+          {
+            "name": "To",
+            "jsonPath": ".status.destinationNode",
+            "type": "string"
+          },
+          {
+            "name": "Mode",
+            "jsonPath": ".status.mode",
+            "type": "string"
+          },
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "Progress",
+            "jsonPath": ".status.transferProgress",
+            "type": "integer"
+          },
+          {
+            "name": "Downtime",
+            "jsonPath": ".status.observedDowntime",
+            "type": "string"
+          },
+          {
+            "name": "Transfer",
+            "jsonPath": ".status.observedTransferDuration",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftstoragelocations",
+      "title": "List Storage locations",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "storage.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftstoragelocations",
+        "kind": "SwiftStorageLocation",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Default",
+            "jsonPath": ".spec.default",
+            "type": "boolean"
+          },
+          {
+            "name": "Repository",
+            "jsonPath": ".spec.oci.repository",
+            "type": "string"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftclusterstoragelocations",
+      "title": "List Cluster storage locations",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "storage.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftclusterstoragelocations",
+        "kind": "SwiftClusterStorageLocation",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Default",
+            "jsonPath": ".spec.default",
+            "type": "boolean"
+          },
+          {
+            "name": "Repository",
+            "jsonPath": ".spec.oci.repository",
+            "type": "string"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Reachable",
+            "jsonPath": ".status.conditions[?(@.type==\"Reachable\")].status",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftgpuprofiles",
+      "title": "List GPU profiles",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "gpu.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftgpuprofiles",
+        "kind": "SwiftGPUProfile",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Count",
+            "jsonPath": ".spec.count",
+            "type": "integer"
+          },
+          {
+            "name": "Model",
+            "jsonPath": ".spec.model",
+            "type": "string"
+          },
+          {
+            "name": "Mode",
+            "jsonPath": ".spec.partitionMode",
+            "type": "string"
+          },
+          {
+            "name": "Tier",
+            "jsonPath": ".spec.tier",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftgpunodes",
+      "title": "List GPU nodes",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "gpu.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftgpunodes",
+        "kind": "SwiftGPUNode",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "GPUs",
+            "jsonPath": ".status.gpuCount",
+            "type": "integer"
+          },
+          {
+            "name": "Free",
+            "jsonPath": ".status.freeGPUs",
+            "type": "integer"
+          },
+          {
+            "name": "Model",
+            "jsonPath": ".status.gpuModel",
+            "type": "string"
+          },
+          {
+            "name": "VfioReady",
+            "jsonPath": ".status.vfioReady",
+            "type": "boolean"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftsandboxes",
+      "title": "List Sandboxes",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "sandbox.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftsandboxes",
+        "kind": "SwiftSandbox",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          },
+          {
+            "name": "Image",
+            "jsonPath": ".spec.image",
+            "type": "string"
+          },
+          {
+            "name": "Node",
+            "jsonPath": ".status.nodeName",
+            "type": "string"
+          },
+          {
+            "name": "Guest IP",
+            "jsonPath": ".status.network.primaryIP",
+            "type": "string"
+          },
+          {
+            "name": "Pod IP",
+            "jsonPath": ".status.network.podIP",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftsandboxpools",
+      "title": "List Sandbox pools",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "sandbox.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftsandboxpools",
+        "kind": "SwiftSandboxPool",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Image",
+            "jsonPath": ".spec.image",
+            "type": "string"
+          },
+          {
+            "name": "MinWarm",
+            "jsonPath": ".spec.minWarm",
+            "type": "integer"
+          },
+          {
+            "name": "Warm",
+            "jsonPath": ".status.warmReplicas",
+            "type": "integer"
+          },
+          {
+            "name": "Claimed",
+            "jsonPath": ".status.claimedReplicas",
+            "type": "integer"
+          },
+          {
+            "name": "Phase",
+            "jsonPath": ".status.phase",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftartifactplacements",
+      "title": "List Artifact placements",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "sandbox.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftartifactplacements",
+        "kind": "SwiftArtifactPlacement",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Pool",
+            "jsonPath": ".spec.poolRef.name",
+            "type": "string"
+          },
+          {
+            "name": "Prepared",
+            "jsonPath": ".status.preparedNodes",
+            "type": "integer"
+          },
+          {
+            "name": "Nodes",
+            "jsonPath": ".status.targetNodes",
+            "type": "integer"
+          },
+          {
+            "name": "Status",
+            "jsonPath": ".status.conditions[?(@.type==\"Prepared\")].reason",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftartifactverificationpolicies",
+      "title": "List Artifact verification policies",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "sandbox.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftartifactverificationpolicies",
+        "kind": "SwiftArtifactVerificationPolicy",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Namespaces",
+            "jsonPath": ".status.namespaces",
+            "type": "integer"
+          },
+          {
+            "name": "Other",
+            "jsonPath": ".spec.otherRepositories",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "swiftartifactexportpolicies",
+      "title": "List Artifact export policies",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "sandbox.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "swiftartifactexportpolicies",
+        "kind": "SwiftArtifactExportPolicy",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Namespaces",
+            "jsonPath": ".status.namespaces",
+            "type": "integer"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "clusters",
+      "title": "List Fleet clusters",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "fleet.kubeswift.io",
+        "version": "v1alpha1",
+        "plural": "clusters",
+        "kind": "Cluster",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Server",
+            "jsonPath": ".spec.server",
+            "type": "string"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "K8s",
+            "jsonPath": ".status.kubernetesVersion",
+            "type": "string"
+          },
+          {
+            "name": "Guests",
+            "jsonPath": ".status.guestCount",
+            "type": "integer"
+          },
+          {
+            "name": "Prometheus",
+            "jsonPath": ".status.prometheusEndpoint",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "events",
+      "title": "List events",
+      "target": "k8s.listEvents",
+      "arguments": {},
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    }
+  ],
+  "contributions": {
+    "pages": [
+      {
+        "id": "overview",
+        "title": "Overview",
+        "capability": "swiftguests",
+        "dashboard": {
+          "pages": [
+            "swiftguests",
+            "swiftimages",
+            "swiftsnapshots",
+            "swiftmigrations",
+            "swiftsandboxes",
+            "swiftgpunodes"
+          ],
+          "events": {
+            "capability": "events",
+            "apiGroups": [
+              "swift.kubeswift.io",
+              "image.kubeswift.io",
+              "kernel.kubeswift.io",
+              "seed.kubeswift.io",
+              "snapshot.kubeswift.io",
+              "migration.kubeswift.io",
+              "storage.kubeswift.io",
+              "gpu.kubeswift.io",
+              "sandbox.kubeswift.io",
+              "fleet.kubeswift.io"
+            ]
+          }
+        }
+      },
+      {
+        "id": "swiftguests",
+        "title": "Guests",
+        "capability": "swiftguests"
+      },
+      {
+        "id": "swiftguestpools",
+        "title": "Guest pools",
+        "capability": "swiftguestpools"
+      },
+      {
+        "id": "swiftguestclasses",
+        "title": "Guest classes",
+        "capability": "swiftguestclasses"
+      },
+      {
+        "id": "swiftvolumeattachments",
+        "title": "Volume attachments",
+        "capability": "swiftvolumeattachments"
+      },
+      {
+        "id": "swiftimages",
+        "title": "Images",
+        "capability": "swiftimages",
+        "group": "Images"
+      },
+      {
+        "id": "swiftkernels",
+        "title": "Kernels",
+        "capability": "swiftkernels",
+        "group": "Images"
+      },
+      {
+        "id": "swiftseedprofiles",
+        "title": "Seed profiles",
+        "capability": "swiftseedprofiles",
+        "group": "Images"
+      },
+      {
+        "id": "swiftsnapshots",
+        "title": "Snapshots",
+        "capability": "swiftsnapshots",
+        "group": "Snapshots"
+      },
+      {
+        "id": "swiftrestores",
+        "title": "Restores",
+        "capability": "swiftrestores",
+        "group": "Snapshots"
+      },
+      {
+        "id": "swiftsnapshotschedules",
+        "title": "Snapshot schedules",
+        "capability": "swiftsnapshotschedules",
+        "group": "Snapshots"
+      },
+      {
+        "id": "swiftmigrations",
+        "title": "Migrations",
+        "capability": "swiftmigrations"
+      },
+      {
+        "id": "swiftstoragelocations",
+        "title": "Storage locations",
+        "capability": "swiftstoragelocations",
+        "group": "Storage"
+      },
+      {
+        "id": "swiftclusterstoragelocations",
+        "title": "Cluster storage locations",
+        "capability": "swiftclusterstoragelocations",
+        "group": "Storage"
+      },
+      {
+        "id": "swiftgpuprofiles",
+        "title": "GPU profiles",
+        "capability": "swiftgpuprofiles",
+        "group": "GPU"
+      },
+      {
+        "id": "swiftgpunodes",
+        "title": "GPU nodes",
+        "capability": "swiftgpunodes",
+        "group": "GPU"
+      },
+      {
+        "id": "swiftsandboxes",
+        "title": "Sandboxes",
+        "capability": "swiftsandboxes",
+        "group": "Sandboxes"
+      },
+      {
+        "id": "swiftsandboxpools",
+        "title": "Sandbox pools",
+        "capability": "swiftsandboxpools",
+        "group": "Sandboxes"
+      },
+      {
+        "id": "swiftartifactplacements",
+        "title": "Artifact placements",
+        "capability": "swiftartifactplacements",
+        "group": "Sandboxes"
+      },
+      {
+        "id": "swiftartifactverificationpolicies",
+        "title": "Artifact verification policies",
+        "capability": "swiftartifactverificationpolicies",
+        "group": "Sandboxes"
+      },
+      {
+        "id": "swiftartifactexportpolicies",
+        "title": "Artifact export policies",
+        "capability": "swiftartifactexportpolicies",
+        "group": "Sandboxes"
+      },
+      {
+        "id": "clusters",
+        "title": "Fleet clusters",
+        "capability": "clusters"
+      }
+    ],
+    "detailPanels": [
+      {
+        "id": "guest-summary",
+        "title": "Guest",
+        "forKinds": [
+          "swift.kubeswift.io/SwiftGuest"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Run policy",
+                "jsonPath": ".spec.runPolicy"
+              },
+              {
+                "label": "Node",
+                "jsonPath": ".status.nodeName"
+              },
+              {
+                "label": "Guest IP",
+                "jsonPath": ".status.network.primaryIP"
+              },
+              {
+                "label": "Pod IP",
+                "jsonPath": ".status.network.podIP"
+              },
+              {
+                "label": "Hypervisor",
+                "jsonPath": ".status.runtime.hypervisor"
+              },
+              {
+                "label": "Operating system",
+                "jsonPath": ".spec.osType"
+              },
+              {
+                "label": "Restarts",
+                "jsonPath": ".status.restartCount",
+                "format": "number"
+              },
+              {
+                "label": "Last restart",
+                "jsonPath": ".status.lastRestartTime",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "guestpool-summary",
+        "title": "Guest pool",
+        "forKinds": [
+          "swift.kubeswift.io/SwiftGuestPool"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Desired",
+                "jsonPath": ".spec.replicas",
+                "format": "number"
+              },
+              {
+                "label": "Ready",
+                "jsonPath": ".status.readyReplicas",
+                "format": "number"
+              },
+              {
+                "label": "Updated",
+                "jsonPath": ".status.updatedReplicas",
+                "format": "number"
+              },
+              {
+                "label": "Available",
+                "jsonPath": ".status.availableReplicas",
+                "format": "number"
+              },
+              {
+                "label": "Failed",
+                "jsonPath": ".status.failedReplicas",
+                "format": "number"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "guestclass-summary",
+        "title": "Guest class",
+        "forKinds": [
+          "swift.kubeswift.io/SwiftGuestClass"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "CPU",
+                "jsonPath": ".spec.cpu"
+              },
+              {
+                "label": "Memory",
+                "jsonPath": ".spec.memory"
+              },
+              {
+                "label": "Access mode",
+                "jsonPath": ".spec.storage.accessMode"
+              },
+              {
+                "label": "Volume mode",
+                "jsonPath": ".spec.storage.volumeMode"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "image-summary",
+        "title": "Image",
+        "forKinds": [
+          "image.kubeswift.io/SwiftImage"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Format",
+                "jsonPath": ".status.preparedFormat"
+              },
+              {
+                "label": "Source format",
+                "jsonPath": ".status.sourceFormat"
+              },
+              {
+                "label": "Clone strategy",
+                "jsonPath": ".spec.cloneStrategy"
+              },
+              {
+                "label": "Operating system",
+                "jsonPath": ".spec.osType"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "kernel-summary",
+        "title": "Kernel",
+        "forKinds": [
+          "kernel.kubeswift.io/SwiftKernel"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Profile",
+                "jsonPath": ".spec.profile"
+              },
+              {
+                "label": "Kernel digest",
+                "jsonPath": ".status.kernelDigest"
+              },
+              {
+                "label": "Initramfs digest",
+                "jsonPath": ".status.initramfsDigest"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "snapshot-summary",
+        "title": "Snapshot",
+        "forKinds": [
+          "snapshot.kubeswift.io/SwiftSnapshot"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Guest",
+                "jsonPath": ".spec.guestRef.name"
+              },
+              {
+                "label": "Backend",
+                "jsonPath": ".spec.backend.type"
+              },
+              {
+                "label": "Includes memory",
+                "jsonPath": ".spec.includeMemory"
+              },
+              {
+                "label": "Includes disk",
+                "jsonPath": ".spec.includeDisk"
+              },
+              {
+                "label": "Size (bytes)",
+                "jsonPath": ".status.totalSizeBytes",
+                "format": "number"
+              },
+              {
+                "label": "Node",
+                "jsonPath": ".status.nodeName"
+              },
+              {
+                "label": "Captured",
+                "jsonPath": ".status.capturedAt",
+                "format": "date"
+              },
+              {
+                "label": "When deleted",
+                "jsonPath": ".spec.deletionPolicy"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "restore-summary",
+        "title": "Restore",
+        "forKinds": [
+          "snapshot.kubeswift.io/SwiftRestore"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Snapshot",
+                "jsonPath": ".spec.snapshotRef.name"
+              },
+              {
+                "label": "Target guest",
+                "jsonPath": ".spec.targetGuest.name"
+              },
+              {
+                "label": "Target node",
+                "jsonPath": ".spec.targetNode"
+              },
+              {
+                "label": "Started",
+                "jsonPath": ".status.startedAt",
+                "format": "date"
+              },
+              {
+                "label": "Completed",
+                "jsonPath": ".status.completedAt",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "migration-summary",
+        "title": "Migration",
+        "forKinds": [
+          "migration.kubeswift.io/SwiftMigration"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Detail",
+                "jsonPath": ".status.phaseDetail"
+              },
+              {
+                "label": "Guest",
+                "jsonPath": ".spec.guestRef.name"
+              },
+              {
+                "label": "Mode",
+                "jsonPath": ".status.mode"
+              },
+              {
+                "label": "From node",
+                "jsonPath": ".status.sourceNode"
+              },
+              {
+                "label": "To node",
+                "jsonPath": ".status.destinationNode"
+              },
+              {
+                "label": "Progress",
+                "jsonPath": ".status.transferProgress"
+              },
+              {
+                "label": "Downtime",
+                "jsonPath": ".status.observedDowntime"
+              },
+              {
+                "label": "Failure",
+                "jsonPath": ".status.failureMessage"
+              },
+              {
+                "label": "Started",
+                "jsonPath": ".status.startedAt",
+                "format": "date"
+              },
+              {
+                "label": "Completed",
+                "jsonPath": ".status.completedAt",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sandbox-summary",
+        "title": "Sandbox",
+        "forKinds": [
+          "sandbox.kubeswift.io/SwiftSandbox"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Message",
+                "jsonPath": ".status.message"
+              },
+              {
+                "label": "Image",
+                "jsonPath": ".spec.image"
+              },
+              {
+                "label": "Node",
+                "jsonPath": ".status.nodeName"
+              },
+              {
+                "label": "Guest IP",
+                "jsonPath": ".status.network.primaryIP"
+              },
+              {
+                "label": "Exit code",
+                "jsonPath": ".status.exitCode",
+                "format": "number"
+              },
+              {
+                "label": "Started",
+                "jsonPath": ".status.startedAt",
+                "format": "date"
+              },
+              {
+                "label": "Finished",
+                "jsonPath": ".status.terminalAt",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "sandboxpool-summary",
+        "title": "Sandbox pool",
+        "forKinds": [
+          "sandbox.kubeswift.io/SwiftSandboxPool"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Message",
+                "jsonPath": ".status.message"
+              },
+              {
+                "label": "Image",
+                "jsonPath": ".spec.image"
+              },
+              {
+                "label": "Minimum warm",
+                "jsonPath": ".spec.minWarm",
+                "format": "number"
+              },
+              {
+                "label": "Maximum warm",
+                "jsonPath": ".spec.maxWarm",
+                "format": "number"
+              },
+              {
+                "label": "Warm",
+                "jsonPath": ".status.warmReplicas",
+                "format": "number"
+              },
+              {
+                "label": "Claimed",
+                "jsonPath": ".status.claimedReplicas",
+                "format": "number"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "gpunode-summary",
+        "title": "GPU node",
+        "forKinds": [
+          "gpu.kubeswift.io/SwiftGPUNode"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "GPUs",
+                "jsonPath": ".status.gpuCount",
+                "format": "number"
+              },
+              {
+                "label": "Free",
+                "jsonPath": ".status.freeGPUs",
+                "format": "number"
+              },
+              {
+                "label": "Model",
+                "jsonPath": ".status.gpuModel"
+              },
+              {
+                "label": "Vendor",
+                "jsonPath": ".status.gpuVendor"
+              },
+              {
+                "label": "Passthrough ready",
+                "jsonPath": ".status.vfioReady"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "volumeattachment-summary",
+        "title": "Volume attachment",
+        "forKinds": [
+          "swift.kubeswift.io/SwiftVolumeAttachment"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Phase",
+                "jsonPath": ".status.phase",
+                "format": "status"
+              },
+              {
+                "label": "Guest",
+                "jsonPath": ".spec.guestRef.name"
+              },
+              {
+                "label": "Claim",
+                "jsonPath": ".spec.pvcRef.name"
+              },
+              {
+                "label": "Read only",
+                "jsonPath": ".spec.readOnly"
+              },
+              {
+                "label": "Node",
+                "jsonPath": ".status.nodeName"
+              },
+              {
+                "label": "Serial",
+                "jsonPath": ".status.serial"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "fleet-cluster-summary",
+        "title": "Fleet cluster",
+        "forKinds": [
+          "fleet.kubeswift.io/Cluster"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Server",
+                "jsonPath": ".spec.server"
+              },
+              {
+                "label": "Kubernetes version",
+                "jsonPath": ".status.kubernetesVersion"
+              },
+              {
+                "label": "Guests",
+                "jsonPath": ".status.guestCount",
+                "format": "number"
+              },
+              {
+                "label": "Last connected",
+                "jsonPath": ".status.lastConnected",
+                "format": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "kubeswift-conditions",
+        "title": "Conditions",
+        "forKinds": [
+          "swift.kubeswift.io/SwiftGuest",
+          "swift.kubeswift.io/SwiftGuestPool",
+          "swift.kubeswift.io/SwiftVolumeAttachment",
+          "image.kubeswift.io/SwiftImage",
+          "kernel.kubeswift.io/SwiftKernel",
+          "snapshot.kubeswift.io/SwiftSnapshot",
+          "snapshot.kubeswift.io/SwiftRestore",
+          "snapshot.kubeswift.io/SwiftSnapshotSchedule",
+          "migration.kubeswift.io/SwiftMigration",
+          "storage.kubeswift.io/SwiftStorageLocation",
+          "storage.kubeswift.io/SwiftClusterStorageLocation",
+          "sandbox.kubeswift.io/SwiftSandbox",
+          "sandbox.kubeswift.io/SwiftSandboxPool",
+          "sandbox.kubeswift.io/SwiftArtifactPlacement",
+          "sandbox.kubeswift.io/SwiftArtifactVerificationPolicy",
+          "sandbox.kubeswift.io/SwiftArtifactExportPolicy",
+          "fleet.kubeswift.io/Cluster"
+        ],
+        "sections": [
+          {
+            "type": "conditions",
+            "jsonPath": ".status.conditions"
+          }
+        ]
+      }
+    ],
+    "detailTabs": [],
+    "detailLinks": [],
+    "commands": [
+      {
+        "id": "open-overview",
+        "title": "Open overview",
+        "target": {
+          "page": "overview"
+        }
+      },
+      {
+        "id": "open-swiftguests",
+        "title": "Open guests",
+        "target": {
+          "page": "swiftguests"
+        }
+      },
+      {
+        "id": "open-swiftguestpools",
+        "title": "Open guest pools",
+        "target": {
+          "page": "swiftguestpools"
+        }
+      },
+      {
+        "id": "open-swiftguestclasses",
+        "title": "Open guest classes",
+        "target": {
+          "page": "swiftguestclasses"
+        }
+      },
+      {
+        "id": "open-swiftvolumeattachments",
+        "title": "Open volume attachments",
+        "target": {
+          "page": "swiftvolumeattachments"
+        }
+      },
+      {
+        "id": "open-swiftimages",
+        "title": "Open images",
+        "target": {
+          "page": "swiftimages"
+        }
+      },
+      {
+        "id": "open-swiftkernels",
+        "title": "Open kernels",
+        "target": {
+          "page": "swiftkernels"
+        }
+      },
+      {
+        "id": "open-swiftseedprofiles",
+        "title": "Open seed profiles",
+        "target": {
+          "page": "swiftseedprofiles"
+        }
+      },
+      {
+        "id": "open-swiftsnapshots",
+        "title": "Open snapshots",
+        "target": {
+          "page": "swiftsnapshots"
+        }
+      },
+      {
+        "id": "open-swiftrestores",
+        "title": "Open restores",
+        "target": {
+          "page": "swiftrestores"
+        }
+      },
+      {
+        "id": "open-swiftsnapshotschedules",
+        "title": "Open snapshot schedules",
+        "target": {
+          "page": "swiftsnapshotschedules"
+        }
+      },
+      {
+        "id": "open-swiftmigrations",
+        "title": "Open migrations",
+        "target": {
+          "page": "swiftmigrations"
+        }
+      },
+      {
+        "id": "open-swiftstoragelocations",
+        "title": "Open storage locations",
+        "target": {
+          "page": "swiftstoragelocations"
+        }
+      },
+      {
+        "id": "open-swiftclusterstoragelocations",
+        "title": "Open cluster storage locations",
+        "target": {
+          "page": "swiftclusterstoragelocations"
+        }
+      },
+      {
+        "id": "open-swiftgpuprofiles",
+        "title": "Open gPU profiles",
+        "target": {
+          "page": "swiftgpuprofiles"
+        }
+      },
+      {
+        "id": "open-swiftgpunodes",
+        "title": "Open gPU nodes",
+        "target": {
+          "page": "swiftgpunodes"
+        }
+      },
+      {
+        "id": "open-swiftsandboxes",
+        "title": "Open sandboxes",
+        "target": {
+          "page": "swiftsandboxes"
+        }
+      },
+      {
+        "id": "open-swiftsandboxpools",
+        "title": "Open sandbox pools",
+        "target": {
+          "page": "swiftsandboxpools"
+        }
+      },
+      {
+        "id": "open-swiftartifactplacements",
+        "title": "Open artifact placements",
+        "target": {
+          "page": "swiftartifactplacements"
+        }
+      },
+      {
+        "id": "open-swiftartifactverificationpolicies",
+        "title": "Open artifact verification policies",
+        "target": {
+          "page": "swiftartifactverificationpolicies"
+        }
+      },
+      {
+        "id": "open-swiftartifactexportpolicies",
+        "title": "Open artifact export policies",
+        "target": {
+          "page": "swiftartifactexportpolicies"
+        }
+      },
+      {
+        "id": "open-clusters",
+        "title": "Open fleet clusters",
+        "target": {
+          "page": "clusters"
+        }
+      },
+      {
+        "id": "start-guest",
+        "title": "Start guest",
+        "target": {
+          "action": "start-guest"
+        },
+        "forKinds": [
+          "swift.kubeswift.io/SwiftGuest"
+        ]
+      }
+    ],
+    "statusResolvers": [
+      {
+        "forKinds": [
+          "swift.kubeswift.io/SwiftGuest"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Running"
+              }
+            ],
+            "status": "healthy",
+            "label": "Running"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Stopped"
+              }
+            ],
+            "status": "suspended",
+            "label": "Stopped"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Failed"
+              }
+            ],
+            "status": "error",
+            "label": "Failed"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Pending"
+              }
+            ],
+            "status": "progressing",
+            "label": "Pending"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Scheduling"
+              }
+            ],
+            "status": "progressing",
+            "label": "Scheduling"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "image.kubeswift.io/SwiftImage",
+          "kernel.kubeswift.io/SwiftKernel"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Ready"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Failed"
+              }
+            ],
+            "status": "error",
+            "label": "Failed"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Pending"
+              }
+            ],
+            "status": "progressing",
+            "label": "Pending"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Importing"
+              }
+            ],
+            "status": "progressing",
+            "label": "Importing"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Validating"
+              }
+            ],
+            "status": "progressing",
+            "label": "Validating"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Preparing"
+              }
+            ],
+            "status": "progressing",
+            "label": "Preparing"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Snapshotting"
+              }
+            ],
+            "status": "progressing",
+            "label": "Snapshotting"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Pulling"
+              }
+            ],
+            "status": "progressing",
+            "label": "Pulling"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "snapshot.kubeswift.io/SwiftSnapshot",
+          "snapshot.kubeswift.io/SwiftRestore"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Ready"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Failed"
+              }
+            ],
+            "status": "error",
+            "label": "Failed"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Pending"
+              }
+            ],
+            "status": "progressing",
+            "label": "Pending"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Capturing"
+              }
+            ],
+            "status": "progressing",
+            "label": "Capturing"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Uploading"
+              }
+            ],
+            "status": "progressing",
+            "label": "Uploading"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Downloading"
+              }
+            ],
+            "status": "progressing",
+            "label": "Downloading"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Restoring"
+              }
+            ],
+            "status": "progressing",
+            "label": "Restoring"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Resuming"
+              }
+            ],
+            "status": "progressing",
+            "label": "Resuming"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "migration.kubeswift.io/SwiftMigration"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Completed"
+              }
+            ],
+            "status": "healthy",
+            "label": "Completed"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Failed"
+              }
+            ],
+            "status": "error",
+            "label": "Failed",
+            "reason": ".status.failureMessage"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Cancelled"
+              }
+            ],
+            "status": "warning",
+            "label": "Cancelled"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Pending"
+              }
+            ],
+            "status": "progressing",
+            "label": "Pending"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Validating"
+              }
+            ],
+            "status": "progressing",
+            "label": "Validating"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Preparing"
+              }
+            ],
+            "status": "progressing",
+            "label": "Preparing"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "StopAndCopy"
+              }
+            ],
+            "status": "progressing",
+            "label": "Stop and copy"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Resuming"
+              }
+            ],
+            "status": "progressing",
+            "label": "Resuming"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "sandbox.kubeswift.io/SwiftSandbox"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Running"
+              }
+            ],
+            "status": "healthy",
+            "label": "Running"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Completed"
+              }
+            ],
+            "status": "healthy",
+            "label": "Completed"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Failed"
+              }
+            ],
+            "status": "error",
+            "label": "Failed",
+            "reason": ".status.message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Pending"
+              }
+            ],
+            "status": "progressing",
+            "label": "Pending"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Materializing"
+              }
+            ],
+            "status": "progressing",
+            "label": "Materializing"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Exporting"
+              }
+            ],
+            "status": "progressing",
+            "label": "Exporting"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "sandbox.kubeswift.io/SwiftSandboxPool"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Ready"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Degraded"
+              }
+            ],
+            "status": "warning",
+            "label": "Degraded",
+            "reason": ".status.message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Pending"
+              }
+            ],
+            "status": "progressing",
+            "label": "Pending"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Warming"
+              }
+            ],
+            "status": "progressing",
+            "label": "Warming"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "swift.kubeswift.io/SwiftVolumeAttachment"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Attached"
+              }
+            ],
+            "status": "healthy",
+            "label": "Attached"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Failed"
+              }
+            ],
+            "status": "error",
+            "label": "Failed"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Pending"
+              }
+            ],
+            "status": "progressing",
+            "label": "Pending"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Attaching"
+              }
+            ],
+            "status": "progressing",
+            "label": "Attaching"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Detaching"
+              }
+            ],
+            "status": "progressing",
+            "label": "Detaching"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "gpu.kubeswift.io/SwiftGPUNode"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Ready"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Error"
+              }
+            ],
+            "status": "error",
+            "label": "Error"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.phase",
+                "equals": "Discovering"
+              }
+            ],
+            "status": "progressing",
+            "label": "Discovering"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "snapshot.kubeswift.io/SwiftSnapshotSchedule"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".spec.suspend",
+                "equals": true
+              }
+            ],
+            "status": "suspended",
+            "label": "Suspended"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "error",
+            "label": "Not ready",
+            "reason": ".status.conditions[?(@.type==\"Ready\")].message"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "fleet.kubeswift.io/Cluster",
+          "storage.kubeswift.io/SwiftStorageLocation",
+          "storage.kubeswift.io/SwiftClusterStorageLocation",
+          "sandbox.kubeswift.io/SwiftArtifactVerificationPolicy",
+          "sandbox.kubeswift.io/SwiftArtifactExportPolicy"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "error",
+            "label": "Not ready",
+            "reason": ".status.conditions[?(@.type==\"Ready\")].message"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "sandbox.kubeswift.io/SwiftArtifactPlacement"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Prepared\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "healthy",
+            "label": "Prepared"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Prepared\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "progressing",
+            "label": "Preparing",
+            "reason": ".status.conditions[?(@.type==\"Prepared\")].message"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      }
+    ],
+    "dashboardCards": [
+      {
+        "id": "swiftguests-by-status",
+        "title": "Guests by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "swiftguests",
+        "target": {
+          "page": "swiftguests"
+        }
+      },
+      {
+        "id": "guests-failed",
+        "title": "Failed guests",
+        "size": "s",
+        "type": "count",
+        "source": "swiftguests",
+        "predicate": {
+          "jsonPath": ".status.phase",
+          "equals": "Failed"
+        },
+        "target": {
+          "page": "swiftguests"
+        }
+      },
+      {
+        "id": "guests-stopped",
+        "title": "Stopped guests",
+        "size": "s",
+        "type": "count",
+        "source": "swiftguests",
+        "predicate": {
+          "jsonPath": ".status.phase",
+          "equals": "Stopped"
+        },
+        "target": {
+          "page": "swiftguests"
+        }
+      },
+      {
+        "id": "swiftimages-by-status",
+        "title": "Images by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "swiftimages",
+        "target": {
+          "page": "swiftimages"
+        }
+      },
+      {
+        "id": "swiftsnapshots-by-status",
+        "title": "Snapshots by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "swiftsnapshots",
+        "target": {
+          "page": "swiftsnapshots"
+        }
+      },
+      {
+        "id": "snapshots-failed",
+        "title": "Failed snapshots",
+        "size": "s",
+        "type": "count",
+        "source": "swiftsnapshots",
+        "predicate": {
+          "jsonPath": ".status.phase",
+          "equals": "Failed"
+        },
+        "target": {
+          "page": "swiftsnapshots"
+        }
+      },
+      {
+        "id": "swiftmigrations-by-status",
+        "title": "Migrations by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "swiftmigrations",
+        "target": {
+          "page": "swiftmigrations"
+        }
+      },
+      {
+        "id": "swiftsandboxes-by-status",
+        "title": "Sandboxes by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "swiftsandboxes",
+        "target": {
+          "page": "swiftsandboxes"
+        }
+      },
+      {
+        "id": "swiftgpunodes-by-status",
+        "title": "GPU nodes by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "swiftgpunodes",
+        "target": {
+          "page": "swiftgpunodes"
+        }
+      }
+    ],
+    "resourceLinks": [
+      {
+        "id": "guest-class",
+        "from": "swift.kubeswift.io/SwiftGuest",
+        "to": "swift.kubeswift.io/SwiftGuestClass",
+        "relation": "references",
+        "match": {
+          "path": ".spec.guestClassRef"
+        }
+      },
+      {
+        "id": "guest-image",
+        "from": "swift.kubeswift.io/SwiftGuest",
+        "to": "image.kubeswift.io/SwiftImage",
+        "relation": "references",
+        "match": {
+          "path": ".spec.imageRef"
+        }
+      },
+      {
+        "id": "guest-kernel",
+        "from": "swift.kubeswift.io/SwiftGuest",
+        "to": "kernel.kubeswift.io/SwiftKernel",
+        "relation": "references",
+        "match": {
+          "path": ".spec.kernelRef"
+        }
+      },
+      {
+        "id": "guest-seed-profile",
+        "from": "swift.kubeswift.io/SwiftGuest",
+        "to": "seed.kubeswift.io/SwiftSeedProfile",
+        "relation": "references",
+        "match": {
+          "path": ".spec.seedProfileRef"
+        }
+      },
+      {
+        "id": "guest-gpu-profile",
+        "from": "swift.kubeswift.io/SwiftGuest",
+        "to": "gpu.kubeswift.io/SwiftGPUProfile",
+        "relation": "references",
+        "match": {
+          "path": ".spec.gpuProfileRef"
+        }
+      },
+      {
+        "id": "guest-node",
+        "from": "swift.kubeswift.io/SwiftGuest",
+        "to": "/Node",
+        "relation": "references",
+        "match": {
+          "path": ".status.nodeName"
+        }
+      },
+      {
+        "id": "snapshot-guest",
+        "from": "snapshot.kubeswift.io/SwiftSnapshot",
+        "to": "swift.kubeswift.io/SwiftGuest",
+        "relation": "references",
+        "match": {
+          "path": ".spec.guestRef"
+        }
+      },
+      {
+        "id": "restore-snapshot",
+        "from": "snapshot.kubeswift.io/SwiftRestore",
+        "to": "snapshot.kubeswift.io/SwiftSnapshot",
+        "relation": "references",
+        "match": {
+          "path": ".spec.snapshotRef"
+        }
+      },
+      {
+        "id": "restore-guest",
+        "from": "snapshot.kubeswift.io/SwiftRestore",
+        "to": "swift.kubeswift.io/SwiftGuest",
+        "relation": "references",
+        "match": {
+          "path": ".spec.targetGuest"
+        }
+      },
+      {
+        "id": "migration-guest",
+        "from": "migration.kubeswift.io/SwiftMigration",
+        "to": "swift.kubeswift.io/SwiftGuest",
+        "relation": "references",
+        "match": {
+          "path": ".spec.guestRef"
+        }
+      },
+      {
+        "id": "volumeattachment-guest",
+        "from": "swift.kubeswift.io/SwiftVolumeAttachment",
+        "to": "swift.kubeswift.io/SwiftGuest",
+        "relation": "references",
+        "match": {
+          "path": ".spec.guestRef"
+        }
+      },
+      {
+        "id": "volumeattachment-claim",
+        "from": "swift.kubeswift.io/SwiftVolumeAttachment",
+        "to": "/PersistentVolumeClaim",
+        "relation": "references",
+        "match": {
+          "path": ".spec.pvcRef"
+        }
+      },
+      {
+        "id": "sandbox-pool",
+        "from": "sandbox.kubeswift.io/SwiftSandbox",
+        "to": "sandbox.kubeswift.io/SwiftSandboxPool",
+        "relation": "references",
+        "match": {
+          "path": ".spec.poolRef"
+        }
+      },
+      {
+        "id": "artifactplacement-pool",
+        "from": "sandbox.kubeswift.io/SwiftArtifactPlacement",
+        "to": "sandbox.kubeswift.io/SwiftSandboxPool",
+        "relation": "references",
+        "match": {
+          "path": ".spec.poolRef"
+        }
+      },
+      {
+        "id": "fleet-cluster-credential",
+        "from": "fleet.kubeswift.io/Cluster",
+        "to": "/Secret",
+        "relation": "references",
+        "match": {
+          "path": ".spec.credentialSecretRef"
+        }
+      }
+    ]
+  },
+  "actions": [
+    {
+      "name": "start-guest",
+      "title": "Start",
+      "target": "k8s.setFields",
+      "resource": "swiftguests",
+      "arguments": {
+        "fields": {
+          "/spec/runPolicy": "Running"
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.runPolicy",
+          "equals": "Stopped",
+          "reason": "This guest is not stopped"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.runPolicy",
+          "equals": "Stopped",
+          "reason": "This guest is not stopped"
+        }
+      ]
+    }
+  ]
+}

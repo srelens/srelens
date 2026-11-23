@@ -65,6 +65,7 @@ Freelens and OpenLens packages are not supported.
 | [specification.md](specification.md) | The normative contract: versioning, compatibility, deprecation, identifiers, API changelog |
 | [architecture.md](architecture.md) | Broker, app lifecycle, inventory, quarantine, where it is heading |
 | [manifest.md](manifest.md) | Manifest fields, limits and validation rules |
+| [examples.md](examples.md) | The example apps: which operators they cover, and what they leave out |
 | [permissions.md](permissions.md) | Permissions, grants, what an app may read, RBAC and consent |
 | [ui-contributions.md](ui-contributions.md) | Pages, dashboards, detail tabs, requirement checks, resource inspection |
 | [capabilities.md](capabilities.md) | The `extensions.*` capabilities, MCP, host GitOps actions |

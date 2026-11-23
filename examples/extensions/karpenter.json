@@ -1,0 +1,858 @@
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "id": "org.srelens.karpenter",
+  "name": "Karpenter",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.5",
+  "kind": "declarative",
+  "permissions": [
+    "k8s.listCustomResource",
+    "k8s.listEvents"
+  ],
+  "capabilities": [
+    {
+      "name": "nodepools",
+      "title": "List Node pools",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "karpenter.sh",
+        "version": "v1",
+        "plural": "nodepools",
+        "kind": "NodePool",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "NodeClass",
+            "jsonPath": ".spec.template.spec.nodeClassRef.name",
+            "type": "string"
+          },
+          {
+            "name": "Nodes",
+            "jsonPath": ".status.nodes",
+            "type": "string"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Weight",
+            "jsonPath": ".spec.weight",
+            "type": "integer"
+          },
+          {
+            "name": "CPU",
+            "jsonPath": ".status.resources.cpu",
+            "type": "string"
+          },
+          {
+            "name": "Memory",
+            "jsonPath": ".status.resources.memory",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "nodeclaims",
+      "title": "List Node claims",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "karpenter.sh",
+        "version": "v1",
+        "plural": "nodeclaims",
+        "kind": "NodeClaim",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Type",
+            "jsonPath": ".metadata.labels.node\\.kubernetes\\.io/instance-type",
+            "type": "string"
+          },
+          {
+            "name": "Capacity",
+            "jsonPath": ".metadata.labels.karpenter\\.sh/capacity-type",
+            "type": "string"
+          },
+          {
+            "name": "Zone",
+            "jsonPath": ".metadata.labels.topology\\.kubernetes\\.io/zone",
+            "type": "string"
+          },
+          {
+            "name": "Node",
+            "jsonPath": ".status.nodeName",
+            "type": "string"
+          },
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "ImageID",
+            "jsonPath": ".status.imageID",
+            "type": "string"
+          },
+          {
+            "name": "ID",
+            "jsonPath": ".status.providerID",
+            "type": "string"
+          },
+          {
+            "name": "NodePool",
+            "jsonPath": ".metadata.labels.karpenter\\.sh/nodepool",
+            "type": "string"
+          },
+          {
+            "name": "NodeClass",
+            "jsonPath": ".spec.nodeClassRef.name",
+            "type": "string"
+          },
+          {
+            "name": "Drifted",
+            "jsonPath": ".status.conditions[?(@.type==\"Drifted\")].status",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "nodeoverlays",
+      "title": "List Node overlays",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "karpenter.sh",
+        "version": "v1alpha1",
+        "plural": "nodeoverlays",
+        "kind": "NodeOverlay",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Weight",
+            "jsonPath": ".spec.weight",
+            "type": "integer"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "ec2nodeclasses",
+      "title": "List EC2 node classes",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "karpenter.k8s.aws",
+        "version": "v1",
+        "plural": "ec2nodeclasses",
+        "kind": "EC2NodeClass",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Role",
+            "jsonPath": ".spec.role",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "aksnodeclasses",
+      "title": "List AKS node classes",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "karpenter.azure.com",
+        "version": "v1beta1",
+        "plural": "aksnodeclasses",
+        "kind": "AKSNodeClass",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type=='Ready')].status",
+            "type": "string"
+          },
+          {
+            "name": "ImageFamily",
+            "jsonPath": ".spec.imageFamily",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "gcenodeclasses",
+      "title": "List GCE node classes",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "karpenter.k8s.gcp",
+        "version": "v1alpha1",
+        "plural": "gcenodeclasses",
+        "kind": "GCENodeClass",
+        "namespaced": false,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "events",
+      "title": "List events",
+      "target": "k8s.listEvents",
+      "arguments": {},
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    }
+  ],
+  "contributions": {
+    "pages": [
+      {
+        "id": "overview",
+        "title": "Overview",
+        "capability": "nodepools",
+        "dashboard": {
+          "pages": [
+            "nodepools",
+            "nodeclaims",
+            "nodeoverlays"
+          ],
+          "events": {
+            "capability": "events",
+            "apiGroups": [
+              "karpenter.sh",
+              "karpenter.k8s.aws",
+              "karpenter.azure.com",
+              "karpenter.k8s.gcp"
+            ]
+          }
+        }
+      },
+      {
+        "id": "nodepools",
+        "title": "Node pools",
+        "capability": "nodepools"
+      },
+      {
+        "id": "nodeclaims",
+        "title": "Node claims",
+        "capability": "nodeclaims"
+      },
+      {
+        "id": "nodeoverlays",
+        "title": "Node overlays",
+        "capability": "nodeoverlays"
+      },
+      {
+        "id": "ec2nodeclasses",
+        "title": "EC2 node classes",
+        "capability": "ec2nodeclasses",
+        "group": "Node classes"
+      },
+      {
+        "id": "aksnodeclasses",
+        "title": "AKS node classes",
+        "capability": "aksnodeclasses",
+        "group": "Node classes"
+      },
+      {
+        "id": "gcenodeclasses",
+        "title": "GCE node classes",
+        "capability": "gcenodeclasses",
+        "group": "Node classes"
+      }
+    ],
+    "detailPanels": [
+      {
+        "id": "nodepool-summary",
+        "title": "Node pool",
+        "forKinds": [
+          "karpenter.sh/NodePool"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Node class",
+                "jsonPath": ".spec.template.spec.nodeClassRef.name"
+              },
+              {
+                "label": "Node class kind",
+                "jsonPath": ".spec.template.spec.nodeClassRef.kind"
+              },
+              {
+                "label": "Nodes",
+                "jsonPath": ".status.nodes",
+                "format": "number"
+              },
+              {
+                "label": "Weight",
+                "jsonPath": ".spec.weight",
+                "format": "number"
+              },
+              {
+                "label": "CPU in use",
+                "jsonPath": ".status.resources.cpu"
+              },
+              {
+                "label": "Memory in use",
+                "jsonPath": ".status.resources.memory"
+              },
+              {
+                "label": "CPU limit",
+                "jsonPath": ".spec.limits.cpu"
+              },
+              {
+                "label": "Memory limit",
+                "jsonPath": ".spec.limits.memory"
+              },
+              {
+                "label": "Consolidation policy",
+                "jsonPath": ".spec.disruption.consolidationPolicy"
+              },
+              {
+                "label": "Consolidate after",
+                "jsonPath": ".spec.disruption.consolidateAfter"
+              },
+              {
+                "label": "Nodes expire after",
+                "jsonPath": ".spec.template.spec.expireAfter"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "nodeclaim-summary",
+        "title": "Node claim",
+        "forKinds": [
+          "karpenter.sh/NodeClaim"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Node",
+                "jsonPath": ".status.nodeName"
+              },
+              {
+                "label": "Node pool",
+                "jsonPath": ".metadata.labels['karpenter.sh/nodepool']"
+              },
+              {
+                "label": "Node class",
+                "jsonPath": ".spec.nodeClassRef.name"
+              },
+              {
+                "label": "Instance type",
+                "jsonPath": ".metadata.labels['node.kubernetes.io/instance-type']"
+              },
+              {
+                "label": "Capacity type",
+                "jsonPath": ".metadata.labels['karpenter.sh/capacity-type']"
+              },
+              {
+                "label": "Zone",
+                "jsonPath": ".metadata.labels['topology.kubernetes.io/zone']"
+              },
+              {
+                "label": "CPU",
+                "jsonPath": ".status.capacity.cpu"
+              },
+              {
+                "label": "Memory",
+                "jsonPath": ".status.capacity.memory"
+              },
+              {
+                "label": "Pods",
+                "jsonPath": ".status.capacity.pods"
+              },
+              {
+                "label": "Image",
+                "jsonPath": ".status.imageID"
+              },
+              {
+                "label": "Provider ID",
+                "jsonPath": ".status.providerID"
+              },
+              {
+                "label": "Expires after",
+                "jsonPath": ".spec.expireAfter"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "nodeoverlay-summary",
+        "title": "Node overlay",
+        "forKinds": [
+          "karpenter.sh/NodeOverlay"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Weight",
+                "jsonPath": ".spec.weight",
+                "format": "number"
+              },
+              {
+                "label": "Price",
+                "jsonPath": ".spec.price"
+              },
+              {
+                "label": "Price adjustment",
+                "jsonPath": ".spec.priceAdjustment"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "ec2nodeclass-summary",
+        "title": "EC2 node class",
+        "forKinds": [
+          "karpenter.k8s.aws/EC2NodeClass"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Role",
+                "jsonPath": ".spec.role"
+              },
+              {
+                "label": "Instance profile",
+                "jsonPath": ".status.instanceProfile"
+              },
+              {
+                "label": "AMI family",
+                "jsonPath": ".spec.amiFamily"
+              },
+              {
+                "label": "Instance store policy",
+                "jsonPath": ".spec.instanceStorePolicy"
+              },
+              {
+                "label": "Metadata tokens",
+                "jsonPath": ".spec.metadataOptions.httpTokens"
+              },
+              {
+                "label": "Detailed monitoring",
+                "jsonPath": ".spec.detailedMonitoring"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "aksnodeclass-summary",
+        "title": "AKS node class",
+        "forKinds": [
+          "karpenter.azure.com/AKSNodeClass"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Image family",
+                "jsonPath": ".spec.imageFamily"
+              },
+              {
+                "label": "Kubernetes version",
+                "jsonPath": ".status.kubernetesVersion"
+              },
+              {
+                "label": "Subnet",
+                "jsonPath": ".spec.vnetSubnetID"
+              },
+              {
+                "label": "OS disk (GB)",
+                "jsonPath": ".spec.osDiskSizeGB",
+                "format": "number"
+              },
+              {
+                "label": "Maximum pods",
+                "jsonPath": ".spec.maxPods",
+                "format": "number"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "gcenodeclass-summary",
+        "title": "GCE node class",
+        "forKinds": [
+          "karpenter.k8s.gcp/GCENodeClass"
+        ],
+        "sections": [
+          {
+            "type": "fields",
+            "fields": [
+              {
+                "label": "Image family",
+                "jsonPath": ".spec.imageFamily"
+              },
+              {
+                "label": "Service account",
+                "jsonPath": ".spec.serviceAccount"
+              },
+              {
+                "label": "Subnet range",
+                "jsonPath": ".spec.subnetRangeName"
+              },
+              {
+                "label": "Minimum CPU platform",
+                "jsonPath": ".spec.minCpuPlatform"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "karpenter-conditions",
+        "title": "Conditions",
+        "forKinds": [
+          "karpenter.sh/NodePool",
+          "karpenter.sh/NodeClaim",
+          "karpenter.sh/NodeOverlay",
+          "karpenter.k8s.aws/EC2NodeClass",
+          "karpenter.azure.com/AKSNodeClass",
+          "karpenter.k8s.gcp/GCENodeClass"
+        ],
+        "sections": [
+          {
+            "type": "conditions",
+            "jsonPath": ".status.conditions"
+          }
+        ]
+      }
+    ],
+    "detailTabs": [],
+    "detailLinks": [],
+    "commands": [
+      {
+        "id": "open-overview",
+        "title": "Open overview",
+        "target": {
+          "page": "overview"
+        }
+      },
+      {
+        "id": "open-nodepools",
+        "title": "Open node pools",
+        "target": {
+          "page": "nodepools"
+        }
+      },
+      {
+        "id": "open-nodeclaims",
+        "title": "Open node claims",
+        "target": {
+          "page": "nodeclaims"
+        }
+      },
+      {
+        "id": "open-nodeoverlays",
+        "title": "Open node overlays",
+        "target": {
+          "page": "nodeoverlays"
+        }
+      },
+      {
+        "id": "open-ec2nodeclasses",
+        "title": "Open eC2 node classes",
+        "target": {
+          "page": "ec2nodeclasses"
+        }
+      },
+      {
+        "id": "open-aksnodeclasses",
+        "title": "Open aKS node classes",
+        "target": {
+          "page": "aksnodeclasses"
+        }
+      },
+      {
+        "id": "open-gcenodeclasses",
+        "title": "Open gCE node classes",
+        "target": {
+          "page": "gcenodeclasses"
+        }
+      }
+    ],
+    "statusResolvers": [
+      {
+        "forKinds": [
+          "karpenter.sh/NodeClaim"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Drifted\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "warning",
+            "label": "Drifted",
+            "reason": ".status.conditions[?(@.type==\"Drifted\")].message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Launched\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "error",
+            "label": "Launch failed",
+            "reason": ".status.conditions[?(@.type==\"Launched\")].message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "progressing",
+            "label": "Starting",
+            "reason": ".status.conditions[?(@.type==\"Ready\")].message"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      },
+      {
+        "forKinds": [
+          "karpenter.sh/NodePool",
+          "karpenter.sh/NodeOverlay",
+          "karpenter.k8s.aws/EC2NodeClass",
+          "karpenter.azure.com/AKSNodeClass",
+          "karpenter.k8s.gcp/GCENodeClass"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "error",
+            "label": "Not ready",
+            "reason": ".status.conditions[?(@.type==\"Ready\")].message"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      }
+    ],
+    "dashboardCards": [
+      {
+        "id": "nodepools-by-status",
+        "title": "Node pools by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "nodepools",
+        "target": {
+          "page": "nodepools"
+        }
+      },
+      {
+        "id": "nodepools-not-ready",
+        "title": "Node pools not ready",
+        "size": "s",
+        "type": "count",
+        "source": "nodepools",
+        "predicate": {
+          "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+          "equals": "False"
+        },
+        "target": {
+          "page": "nodepools"
+        }
+      },
+      {
+        "id": "nodeclaims-by-status",
+        "title": "Node claims by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "nodeclaims",
+        "target": {
+          "page": "nodeclaims"
+        }
+      },
+      {
+        "id": "nodeclaims-drifted",
+        "title": "Drifted node claims",
+        "size": "s",
+        "type": "count",
+        "source": "nodeclaims",
+        "predicate": {
+          "jsonPath": ".status.conditions[?(@.type==\"Drifted\")].status",
+          "equals": "True"
+        },
+        "target": {
+          "page": "nodeclaims"
+        }
+      }
+    ],
+    "resourceLinks": [
+      {
+        "id": "nodeclaim-node",
+        "from": "karpenter.sh/NodeClaim",
+        "to": "/Node",
+        "relation": "references",
+        "match": {
+          "path": ".status.nodeName"
+        }
+      },
+      {
+        "id": "nodeclaim-nodepool",
+        "from": "karpenter.sh/NodeClaim",
+        "to": "karpenter.sh/NodePool",
+        "relation": "managedBy",
+        "match": {
+          "label": "karpenter.sh/nodepool"
+        }
+      },
+      {
+        "id": "node-nodepool",
+        "from": "/Node",
+        "to": "karpenter.sh/NodePool",
+        "relation": "managedBy",
+        "match": {
+          "label": "karpenter.sh/nodepool"
+        }
+      },
+      {
+        "id": "nodeclaim-ec2nodeclass",
+        "from": "karpenter.sh/NodeClaim",
+        "to": "karpenter.k8s.aws/EC2NodeClass",
+        "relation": "references",
+        "match": {
+          "path": ".spec.nodeClassRef"
+        }
+      },
+      {
+        "id": "nodeclaim-aksnodeclass",
+        "from": "karpenter.sh/NodeClaim",
+        "to": "karpenter.azure.com/AKSNodeClass",
+        "relation": "references",
+        "match": {
+          "path": ".spec.nodeClassRef"
+        }
+      },
+      {
+        "id": "nodeclaim-gcenodeclass",
+        "from": "karpenter.sh/NodeClaim",
+        "to": "karpenter.k8s.gcp/GCENodeClass",
+        "relation": "references",
+        "match": {
+          "path": ".spec.nodeClassRef"
+        }
+      },
+      {
+        "id": "nodepool-gcenodeclass",
+        "from": "karpenter.sh/NodePool",
+        "to": "karpenter.k8s.gcp/GCENodeClass",
+        "relation": "references",
+        "match": {
+          "path": ".spec.template.spec.nodeClassRef"
+        }
+      },
+      {
+        "id": "nodepool-ec2nodeclass",
+        "from": "karpenter.sh/NodePool",
+        "to": "karpenter.k8s.aws/EC2NodeClass",
+        "relation": "references",
+        "match": {
+          "path": ".spec.template.spec.nodeClassRef"
+        }
+      },
+      {
+        "id": "nodepool-aksnodeclass",
+        "from": "karpenter.sh/NodePool",
+        "to": "karpenter.azure.com/AKSNodeClass",
+        "relation": "references",
+        "match": {
+          "path": ".spec.template.spec.nodeClassRef"
+        }
+      }
+    ]
+  }
+}
