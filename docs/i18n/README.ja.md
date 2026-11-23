@@ -178,7 +178,7 @@ srectl --help               # すべてのフラグを表示
 | --- | --- | --- |
 | macOS | Apple Silicon 用と Intel 用の `.dmg` | Developer ID で署名され、公証（notarization）済み |
 | Linux | `.AppImage`、`.deb`、`.rpm`、および AUR の [`srelens-bin`](https://aur.archlinux.org/packages/srelens-bin) | AppImage はアプリ内アップデーターに対応 |
-| Windows | `.exe`、`.msi` | コード署名はまだロードマップ上の項目のため、Windows で SmartScreen の確認画面が表示されることがあります |
+| Windows | `.exe`、`.msi`、`winget install srelens.srelens` | コード署名はまだロードマップ上の項目のため、Windows で SmartScreen の確認画面が表示されることがあります |
 
 ### ターミナル UI
 
@@ -188,6 +188,12 @@ macOS（Homebrew）:
 
 ```bash
 brew install srelens/tap/srectl
+```
+
+Windows (winget):
+
+```powershell
+winget install srelens.srectl
 ```
 
 Linux（ワンライナー）:

@@ -1,0 +1,34 @@
+# TEMPLATE. See srelens.srelens.yaml.
+PackageIdentifier: srelens.srelens
+PackageVersion: 0.0.0
+PackageLocale: en-US
+Publisher: srelens
+PublisherUrl: https://github.com/srelens
+PublisherSupportUrl: https://github.com/srelens/srelens/issues
+Author: srelens
+PackageName: srelens
+PackageUrl: https://github.com/srelens/srelens
+License: MIT
+LicenseUrl: https://github.com/srelens/srelens/blob/main/LICENSE
+Copyright: Copyright (c) srelens contributors
+ShortDescription: Local-first Kubernetes desktop workspace for SREs and platform engineers
+Description: >-
+  srelens is a local-first Kubernetes desktop workspace for SREs, platform
+  engineers and DevOps engineers. Browse live cluster resources, inspect
+  manifests and events, follow logs, open pod shells and port forwards, manage
+  Helm releases, and take confirmation-gated cluster actions from one
+  application. Cluster access uses your local kubeconfig and connects directly
+  to the API server.
+Moniker: srelens
+Tags:
+  - kubernetes
+  - k8s
+  - cluster
+  - devops
+  - sre
+  - helm
+  - kubectl
+  - mcp
+ReleaseNotesUrl: https://github.com/srelens/srelens/releases/tag/srelens-v0.0.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
