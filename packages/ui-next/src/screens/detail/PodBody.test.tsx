@@ -803,3 +803,23 @@ describe("a container's last exit (#1112)", () => {
     expect(screen.queryByText("Last exit")).toBeNull();
   });
 });
+
+describe("sorting the containers table by last exit (#1112)", () => {
+  it("reorders the rows", async () => {
+    render(
+      <PodContainersTable
+        context="ctx"
+        object={pod(
+          { containers: [APP_CONTAINER, SIDECAR_CONTAINER] },
+          { containerStatuses: [CRASHED_STATUS, SIDECAR_STATUS] },
+        )}
+      />,
+    );
+    const names = () =>
+      Array.from(document.querySelectorAll("tbody tr.tbl-row")).map((tr) => tr.querySelector("td")?.textContent);
+    expect(names()).toEqual(["app", "sidecar"]);
+    // Ascending: the sidecar has never exited, so its empty value sorts first.
+    await userEvent.click(screen.getByRole("button", { name: "Sort by Last exit" }));
+    expect(names()).toEqual(["sidecar", "app"]);
+  });
+});

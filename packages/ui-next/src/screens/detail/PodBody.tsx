@@ -648,7 +648,8 @@ function containerColumns(subject?: Omit<PortsSubject, "container">): Column<Con
     },
   },
   // Why the previous run ended (#1112): a crash loop's state is only "waiting".
-  { key: "lastExit", header: "Last exit", render: (r) => containerLastExit(r.status) || "—" },
+  // `getValue`, because a row has no `lastExit` field for the table to sort or filter on.
+  { key: "lastExit", header: "Last exit", getValue: (r) => containerLastExit(r.status), render: (r) => containerLastExit(r.status) || "—" },
   ];
 }
 
