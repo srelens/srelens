@@ -25,56 +25,6 @@
 # for us because tauri 2.x pins gtk 0.18, which pins glib 0.18.
 
 [[IgnoredVulns]]
-id = "RUSTSEC-2024-0411"  # gdkwayland-sys
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0412"  # gdk
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0413"  # atk
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0414"  # gdkx11-sys
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0415"  # gtk
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0416"  # atk-sys
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0417"  # gdkx11
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0418"  # gdk-sys
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0419"  # gtk3-macros
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0420"  # gtk-sys
-reason = "Unmaintained GTK3 binding pinned by tauri's Linux backend; no fixed version exists."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
 id = "RUSTSEC-2024-0429"  # glib -- alias GHSA-wrw7-89jp-8q8g
 reason = "glib 0.18 Iterator unsoundness; fixed in 0.20 but tauri 2.x pins gtk 0.18 -> glib 0.18. Not upgradable from here."
 ignoreUntil = 2027-02-18
@@ -85,31 +35,6 @@ reason = "Unmaintained; build-time proc-macro reached only via glib-macros in th
 ignoreUntil = 2027-02-18
 
 # --- unic-*: unmaintained, reached via tauri-utils -> urlpattern --------------
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0075"  # unic-char-range
-reason = "Unmaintained crate advisory; pinned by tauri-utils -> urlpattern. No fixed version."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0080"  # unic-common
-reason = "Unmaintained crate advisory; pinned by tauri-utils -> urlpattern. No fixed version."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0081"  # unic-char-property
-reason = "Unmaintained crate advisory; pinned by tauri-utils -> urlpattern. No fixed version."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0098"  # unic-ucd-version
-reason = "Unmaintained crate advisory; pinned by tauri-utils -> urlpattern. No fixed version."
-ignoreUntil = 2027-02-18
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2025-0100"  # unic-ucd-ident
-reason = "Unmaintained crate advisory; pinned by tauri-utils -> urlpattern. No fixed version."
-ignoreUntil = 2027-02-18
 
 # --- remaining transitive advisories with no fix -----------------------------
 
